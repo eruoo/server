@@ -1,0 +1,47 @@
+{
+  "name": "eruoo-server",
+  "type": "module",
+  "version": "1.0.50",
+  "author": "LoTwT <l709937065@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/eruoo/server#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eruoo/server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/eruoo/server/issues"
+  },
+  "module": "src/index.js",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "prepare": "simple-git-hooks",
+    "up": "taze latest -I -f",
+    "prettier": "prettier --write .",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@ayingott/eslint-config": "^2.0.7",
+    "@ayingott/prettier-config": "^2.1.8",
+    "elysia": "latest",
+    "eslint": "^9.39.1",
+    "lint-staged": "^16.2.6",
+    "prettier": "^3.6.2",
+    "simple-git-hooks": "^2.13.1",
+    "taze": "^19.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "bun-types": "latest"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "pnpm exec lint-staged"
+  },
+  "lint-staged": {
+    "*": [
+      "eslint --fix",
+      "prettier --write --ignore-unknown"
+    ]
+  },
+  "prettier": "@ayingott/prettier-config"
+}
