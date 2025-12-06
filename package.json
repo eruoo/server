@@ -20,22 +20,39 @@
     "prepare": "simple-git-hooks",
     "up": "taze latest -I -f",
     "prettier": "prettier --write .",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "db:push": "drizzle-kit push",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "better-auth:generate": "better-auth generate --yes --output ./src/db/schemas/auth-schema.ts --config ./src/modules/auth/auth.ts"
   },
   "dependencies": {
     "@ayingott/eslint-config": "^2.0.7",
     "@ayingott/prettier-config": "^2.1.8",
+    "@elysiajs/cors": "^1.4.0",
     "@elysiajs/openapi": "^1.4.11",
+    "better-auth": "^1.4.5",
+    "dotenv": "^17.2.3",
+    "drizzle-orm": "^0.45.0",
+    "drizzle-typebox": "^0.3.3",
     "elysia": "latest",
     "eslint": "^9.39.1",
     "lint-staged": "^16.2.6",
+    "pg": "^8.16.3",
     "prettier": "^3.7.4",
     "simple-git-hooks": "^2.13.1",
     "taze": "^19.9.2"
   },
   "devDependencies": {
+    "@better-auth/cli": "^1.4.5",
     "@types/node": "^24.10.1",
-    "bun-types": "latest"
+    "@types/pg": "^8.15.6",
+    "bun-types": "latest",
+    "drizzle-kit": "^0.31.8",
+    "tsx": "^4.21.0"
+  },
+  "overrides": {
+    "@sinclair/typebox": "0.34.0"
   },
   "simple-git-hooks": {
     "pre-commit": "pnpm exec lint-staged"
