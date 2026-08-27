@@ -1,0 +1,16 @@
+minimumReleaseAge: 1440
+trustPolicy: no-downgrade
+blockExoticSubdeps: true
+strictDepBuilds: true
+patchedDependencies:
+  "@better-auth/api-key@1.7.0": patches/@better-auth__api-key@1.7.0.patch
+  "@better-auth/core@1.7.0": "patches/@better-auth__core@1.7.0.patch"
+  "@better-auth/oauth-provider@1.7.0": "patches/@better-auth__oauth-provider@1.7.0.patch"
+peerDependencyRules:
+  allowedVersions:
+    "openapi-typescript>typescript": "6"
+allowBuilds:
+  esbuild: true
+  simple-git-hooks: true
+  vue-demi: true
+  workerd: true

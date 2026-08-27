@@ -1,0 +1,177 @@
+diff --git a/dist/authorize-BP2_wo6r.mjs b/dist/authorize-BP2_wo6r.mjs
+index 822f08f9af95267d9ef085448741d11370e77fc2..c92f4aacb00f414ba1fc054eaf0c408507d537b2 100644
+--- a/dist/authorize-BP2_wo6r.mjs
++++ b/dist/authorize-BP2_wo6r.mjs
+@@ -3503,7 +3503,7 @@ async function revokeRefreshToken(ctx, opts, token, clientId) {
+ 		error: "invalid_request"
+ 	});
+ 	if (refreshToken.revoked) {
+-		await invalidateRefreshFamily(ctx, clientId, refreshToken.userId);
++		await invalidateRefreshFamily(ctx, clientId, refreshToken.userId, refreshToken.authorizationCodeId);
+ 		throw new APIError$1("BAD_REQUEST", {
+ 			error_description: "refresh token revoked",
+ 			error: "invalid_request"
+@@ -3524,7 +3524,7 @@ async function revokeRefreshToken(ctx, opts, token, clientId) {
+ 		increment: {},
+ 		set: { revoked: /* @__PURE__ */ new Date(iat * 1e3) }
+ 	})) {
+-		await invalidateRefreshFamily(ctx, clientId, refreshToken.userId);
++		await invalidateRefreshFamily(ctx, clientId, refreshToken.userId, refreshToken.authorizationCodeId);
+ 		throw new APIError$1("BAD_REQUEST", {
+ 			error_description: "refresh token revoked",
+ 			error: "invalid_request"
+@@ -3576,20 +3576,17 @@ async function revokeEndpoint(ctx, opts) {
+ 		error: "invalid_request"
+ 	});
+ 	const client = await validateClientCredentials(ctx, opts, client_id, client_secret, void 0, preVerified, void 0, authMethod);
++	const revokeAsAccessToken = () => revokeAccessToken(ctx, opts, client.clientId, token);
++	const revokeAsRefreshToken = async () => revokeRefreshToken(ctx, opts, (await decodeRefreshToken(opts, token)).token, client.clientId);
++	const revocationAttempts = token_type_hint === "refresh_token" ? [revokeAsRefreshToken, revokeAsAccessToken] : [revokeAsAccessToken, revokeAsRefreshToken];
+ 	try {
+-		if (token_type_hint === void 0 || token_type_hint === "access_token") try {
+-			return await revokeAccessToken(ctx, opts, client.clientId, token);
++		for (const attempt of revocationAttempts) try {
++			return await attempt();
+ 		} catch (error) {
+ 			if (error instanceof APIError$1) {
+-				if (token_type_hint === "access_token" || error.body?.error === "unsupported_token_type") throw error;
+-			} else if (error instanceof Error) throw error;
+-			else throw new Error(error);
+-		}
+-		if (token_type_hint === void 0 || token_type_hint === "refresh_token") try {
+-			return await revokeRefreshToken(ctx, opts, (await decodeRefreshToken(opts, token)).token, client.clientId);
+-		} catch (error) {
+-			if (error instanceof APIError$1) {
+-				if (token_type_hint === "refresh_token") throw error;
++				if (error.body?.error === "unsupported_token_type") throw error;
++				if (error.status === "BAD_REQUEST") continue;
++				throw error;
+ 			} else if (error instanceof Error) throw error;
+ 			else throw new Error(error);
+ 		}
+@@ -3600,7 +3597,7 @@ async function revokeEndpoint(ctx, opts) {
+ 	} catch (error) {
+ 		if (error instanceof APIError$1) {
+ 			if (error.body?.error === "unsupported_token_type") throw error;
+-			if (error.name === "BAD_REQUEST") return null;
++			if (error.status === "BAD_REQUEST") return null;
+ 			throw error;
+ 		} else if (error instanceof Error) {
+ 			logger.error("Introspection error:", error.message, error.stack);
+@@ -4167,6 +4164,7 @@ function getServerContextSignedQueryIssuedAt(value) {
+ * @param options - The options for the oAuth Provider plugin.
+ * @returns A Better Auth plugin.
+ */
++const oauthContinuationAuthenticationPaths = /* @__PURE__ */ new Set(["/sign-in/social", "/passkey/verify-authentication", "/oauth2/consent", "/oauth2/continue"]);
+ const oauthProvider = (options) => {
+ 	let clientRegistrationAllowedScopes = options.clientRegistrationAllowedScopes;
+ 	if (options.clientRegistrationDefaultScopes) {
+@@ -4440,7 +4438,7 @@ const oauthProvider = (options) => {
+ 		hooks: {
+ 			before: [{
+ 				matcher(ctx) {
+-					return ctx.body?.oauth_query;
++					return oauthContinuationAuthenticationPaths.has(ctx.path) && ctx.body?.oauth_query;
+ 				},
+ 				handler: createAuthMiddleware(async (ctx) => {
+ 					const query = ctx.body.oauth_query;
+@@ -4903,7 +4901,8 @@ const oauthProvider = (options) => {
+ 					}
+ 				}
+ 			}, async (ctx) => {
+-				return revokeEndpoint(ctx, opts);
++				await revokeEndpoint(ctx, opts);
++				return new Response(null);
+ 			}),
+ 			oauth2UserInfo: createAuthEndpoint("/oauth2/userinfo", {
+ 				method: ["GET", "POST"],
+diff --git a/dist/client.mjs b/dist/client.mjs
+index be1b0d5019c424b258144712e3f225b3d6ef00c8..210fcb112cd1c485d4878e17b577ff36c9baf2f2 100644
+--- a/dist/client.mjs
++++ b/dist/client.mjs
+@@ -3,6 +3,7 @@ import { t as PACKAGE_VERSION } from "./version-C0TE7qRr.mjs";
+ import { safeJSONParse } from "@better-auth/core/utils/json";
+ import { deviceAuthorizationClient } from "better-auth/client/plugins";
+ //#region src/client.ts
++const oauthContinuationAuthenticationPaths = /* @__PURE__ */ new Set(["/api/auth/sign-in/social", "/api/auth/passkey/verify-authentication"]);
+ const oauthProviderClient = () => {
+ 	return {
+ 		id: "oauth-provider-client",
+@@ -10,12 +11,15 @@ const oauthProviderClient = () => {
+ 		fetchPlugins: [{
+ 			id: "oauth-provider-signin",
+ 			name: "oauth-provider-signin",
+-			description: "Adds the current page query to oauth requests",
++			description: "Adds the current page query to OAuth continuation authentication requests",
+ 			hooks: { async onRequest(ctx) {
++				if (ctx.method !== "POST") return;
++				const pathname = new URL(ctx.url, "http://localhost").pathname;
++				if (!oauthContinuationAuthenticationPaths.has(pathname)) return;
+ 				const headers = ctx.headers;
+ 				const body = typeof ctx.body === "string" ? headers.get("content-type") === "application/x-www-form-urlencoded" ? Object.fromEntries(new URLSearchParams(ctx.body)) : safeJSONParse(ctx.body ?? "{}") : ctx.body;
+ 				if (body?.oauth_query) return;
+-				if (typeof window !== "undefined" && window?.location?.search && !(ctx.method === "GET" || ctx.method === "DELETE")) ctx.body = JSON.stringify({
++				if (typeof window !== "undefined" && window?.location?.search) ctx.body = JSON.stringify({
+ 					...body,
+ 					oauth_query: buildSignedOAuthQuery(window.location.search)
+ 				});
+diff --git a/dist/introspect-Cs1_yhqH.mjs b/dist/introspect-Cs1_yhqH.mjs
+index 431e245f28bfcd642c0128b46c5cee6b86cefc05..a3c22f95884a37c62c730c7b5a2a8661badf2b11 100644
+--- a/dist/introspect-Cs1_yhqH.mjs
++++ b/dist/introspect-Cs1_yhqH.mjs
+@@ -1479,7 +1479,7 @@ async function createOpaqueAccessToken(ctx, opts, user, client, scopes, payload,
+ 	return (opts.prefix?.opaqueAccessToken ?? "") + token;
+ }
+ /**
+-* Tear down the entire refresh-token family for a (client, user) pair, plus
++* Tear down the refresh-token family for one authorization code, plus
+ * any access tokens that reference those refresh rows, per RFC 9700 §4.14.
+ * Access tokens are deleted first so the parent rows' foreign-key children
+ * do not block the refresh-row delete.
+@@ -1487,7 +1487,7 @@ async function createOpaqueAccessToken(ctx, opts, user, client, scopes, payload,
+ * TODO(invalidate-family-race): the two `deleteMany` calls are not atomic
+ * with respect to each other. Between them, a concurrent rotation in a
+ * different worker can `create` a fresh refresh row (and, immediately after,
+-* an access-token row referencing it) for the same (client, user) pair,
++* an access-token row referencing it) for the same authorization-code family,
+ * leaving the family partially rebuilt and the new refresh row orphaned of
+ * any deletion. Closing this window requires the same transactional adapter
+ * contract tracked under FIXME(strict-family-invalidation) in
+@@ -1495,7 +1495,7 @@ async function createOpaqueAccessToken(ctx, opts, user, client, scopes, payload,
+ *
+ * @internal
+ */
+-async function invalidateRefreshFamily(ctx, clientId, userId) {
++async function invalidateRefreshFamily(ctx, clientId, userId, authorizationCodeId) {
+ 	const refreshTokens = await ctx.context.adapter.findMany({
+ 		model: "oauthRefreshToken",
+ 		where: [{
+@@ -1504,6 +1504,9 @@ async function invalidateRefreshFamily(ctx, clientId, userId) {
+ 		}, {
+ 			field: "userId",
+ 			value: userId
++		}, {
++			field: "authorizationCodeId",
++			value: authorizationCodeId
+ 		}]
+ 	});
+ 	if (refreshTokens.length) await ctx.context.adapter.deleteMany({
+@@ -1522,6 +1525,9 @@ async function invalidateRefreshFamily(ctx, clientId, userId) {
+ 		}, {
+ 			field: "userId",
+ 			value: userId
++		}, {
++			field: "authorizationCodeId",
++			value: authorizationCodeId
+ 		}]
+ 	});
+ }
+@@ -2157,7 +2163,7 @@ async function handleRefreshTokenGrant(ctx, opts) {
+ 				error: "invalid_grant"
+ 			});
+ 		}
+-		await invalidateRefreshFamily(ctx, client_id, refreshToken.userId);
++		await invalidateRefreshFamily(ctx, client_id, refreshToken.userId, refreshToken.authorizationCodeId);
+ 		throw new APIError("BAD_REQUEST", {
+ 			error_description: "invalid refresh token",
+ 			error: "invalid_grant"

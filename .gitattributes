@@ -1,0 +1,2 @@
+# Unified diff context markers can resemble source whitespace errors to an outer Git diff.
+*.patch -whitespace

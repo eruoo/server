@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 80,
+  "tabWidth": 2,
+  "useTabs": false,
+  "semi": false,
+  "singleQuote": false,
+  "trailingComma": "all",
+  "sortImports": {
+    "sortSideEffects": false
+  },
+  "sortPackageJson": {
+    "sortScripts": true
+  },
+  "sortTailwindcss": {
+    "stylesheet": "./src/client/styles/main.css",
+    "attributes": [":class"],
+    "functions": ["cn"]
+  },
+  "ignorePatterns": [
+    "dist/**",
+    "coverage/**",
+    "docs/openapi.json",
+    "node_modules/**",
+    "docs/specs/foundation.md",
+    "pnpm-lock.yaml",
+    "worker-configuration.d.ts"
+  ]
+}

@@ -1,0 +1,65 @@
+# Dependencies and package-manager state
+node_modules/
+.pnpm-store/
+
+# Build, typecheck, test, and browser artifacts
+dist/
+.generated/
+.output/
+.vite/
+.vitest/
+coverage/
+test-results/
+playwright-report/
+blob-report/
+output/playwright/
+playwright/.auth/
+playwright/.cache/
+*.trace
+
+# Logs and diagnostics
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Cloudflare and local database state
+.wrangler/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Database exports and backups (migration SQL remains tracked)
+backups/
+exports/
+*.dump
+*.sql
+*.sql.*
+!migrations/**/*.sql
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+*.swp
+*.swo

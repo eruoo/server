@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "options": {
+    "denyWarnings": true,
+    "reportUnusedDisableDirectives": "error",
+    "typeAware": false,
+    "typeCheck": false
+  },
+  "plugins": ["import", "promise", "typescript", "unicorn", "vitest", "vue"],
+  "rules": {
+    "no-console": "off"
+  },
+  "ignorePatterns": [
+    "dist/**",
+    "coverage/**",
+    "node_modules/**",
+    "worker-configuration.d.ts"
+  ]
+}
