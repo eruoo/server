@@ -1,0 +1,1066 @@
+{
+  "info": {
+    "description": "Owner-only identity management and future authenticated business API.",
+    "title": "eruoo API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "servers": [
+    {
+      "description": "Production",
+      "url": "https://auth.eruoo.me"
+    }
+  ],
+  "tags": [
+    {
+      "description": "Owner-only security audit and OAuth authorization management.",
+      "name": "Security"
+    },
+    {
+      "description": "Service and dependency status available to the owner.",
+      "name": "System"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "ownerSession": {
+        "description": "Better Auth owner Session cookie.",
+        "in": "cookie",
+        "name": "__Secure-eruoo.session_token",
+        "type": "apiKey"
+      },
+      "apiKey": {
+        "description": "Finite Better Auth API key with route-scoped permissions.",
+        "in": "header",
+        "name": "x-api-key",
+        "type": "apiKey"
+      }
+    },
+    "schemas": {
+      "SecurityAuditEventPage": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SecurityAuditEvent"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          }
+        },
+        "required": [
+          "events",
+          "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "SecurityAuditEvent": {
+        "type": "object",
+        "properties": {
+          "clientId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "credentialId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ipFingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "Keyed HMAC fingerprint of the Cloudflare-provided client IP; never the original IP address."
+          },
+          "metadata": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "occurredAt": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Event time as Unix epoch milliseconds.",
+            "format": "int64"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "failure",
+              "success"
+            ]
+          },
+          "requestId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "subjectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "api_key_created",
+              "api_key_expired",
+              "api_key_rejected",
+              "api_key_revoked",
+              "api_key_updated",
+              "database_restore_completed",
+              "github_login",
+              "jwt_signing_key_rotated",
+              "oauth_grant_created",
+              "oauth_grant_revoked",
+              "oauth_refresh_reuse_detected",
+              "passkey_created",
+              "passkey_deleted",
+              "passkey_login",
+              "passkey_updated",
+              "security_configuration_changed",
+              "sensitive_operation_denied"
+            ]
+          }
+        },
+        "required": [
+          "clientId",
+          "credentialId",
+          "id",
+          "ipFingerprint",
+          "metadata",
+          "occurredAt",
+          "outcome",
+          "requestId",
+          "subjectId",
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "Problem": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidationIssue"
+            }
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https:\\/\\/auth\\.eruoo\\.me\\/problems\\/[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "description": "Canonical problem type URI in the https://auth.eruoo.me/problems/ namespace."
+          }
+        },
+        "required": [
+          "detail",
+          "requestId",
+          "status",
+          "title",
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "ValidationIssue": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string",
+            "enum": [
+              "body",
+              "header",
+              "path",
+              "query"
+            ]
+          },
+          "pointer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail",
+          "location",
+          "pointer"
+        ],
+        "additionalProperties": false
+      },
+      "DatabaseBackupStatus": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "errorCode": {
+                "type": "null"
+              },
+              "lastAttemptAt": {
+                "type": "null"
+              },
+              "lastSuccessAt": {
+                "type": "null"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "never-run"
+                ]
+              }
+            },
+            "required": [
+              "errorCode",
+              "lastAttemptAt",
+              "lastSuccessAt",
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "errorCode": {
+                "type": "null"
+              },
+              "lastAttemptAt": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8640000000000000,
+                "description": "Unix epoch milliseconds.",
+                "format": "int64"
+              },
+              "lastSuccessAt": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8640000000000000,
+                "description": "Unix epoch milliseconds.",
+                "format": "int64"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "ok"
+                ]
+              }
+            },
+            "required": [
+              "errorCode",
+              "lastAttemptAt",
+              "lastSuccessAt",
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "errorCode": {
+                "type": "string",
+                "enum": [
+                  "backup_configuration_invalid",
+                  "backup_concurrency_conflict",
+                  "backup_lease_failed",
+                  "backup_object_conflict",
+                  "backup_schema_inventory_failed",
+                  "backup_schema_inventory_invalid",
+                  "backup_virtual_table_detected",
+                  "backup_migration_state_invalid",
+                  "backup_storage_inventory_failed",
+                  "backup_storage_inventory_invalid",
+                  "backup_storage_budget_exceeded",
+                  "backup_export_authentication_failed",
+                  "backup_export_request_failed",
+                  "backup_export_response_invalid",
+                  "backup_export_failed",
+                  "backup_export_timed_out",
+                  "backup_export_download_failed",
+                  "backup_export_download_invalid",
+                  "backup_compression_failed",
+                  "backup_upload_timed_out",
+                  "backup_upload_failed",
+                  "backup_upload_abort_failed",
+                  "backup_upload_integrity_failed",
+                  "backup_health_write_failed"
+                ]
+              },
+              "lastAttemptAt": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8640000000000000,
+                "description": "Unix epoch milliseconds.",
+                "format": "int64"
+              },
+              "lastSuccessAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 8640000000000000,
+                "description": "Unix epoch milliseconds.",
+                "format": "int64"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "failed"
+                ]
+              }
+            },
+            "required": [
+              "errorCode",
+              "lastAttemptAt",
+              "lastSuccessAt",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "OAuthAuthorization": {
+        "type": "object",
+        "properties": {
+          "activeRefreshTokenCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "authorized": {
+            "type": "boolean"
+          },
+          "clientId": {
+            "type": "string",
+            "enum": [
+              "eruoo-web",
+              "eruoo-desktop",
+              "eruoo-mobile"
+            ]
+          },
+          "consentCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "lastAuthorizedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Most recent authorization activity as Unix epoch milliseconds, or null when the application is not authorized.",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "offlineAccess": {
+            "type": "boolean"
+          },
+          "platform": {
+            "type": "string",
+            "enum": [
+              "web",
+              "desktop",
+              "mobile"
+            ]
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "https://auth.eruoo.me/api"
+              ]
+            }
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "openid",
+                "profile",
+                "api:read",
+                "api:write",
+                "offline_access"
+              ]
+            }
+          },
+          "supportsOfflineAccess": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "activeRefreshTokenCount",
+          "authorized",
+          "clientId",
+          "consentCount",
+          "enabled",
+          "lastAuthorizedAt",
+          "name",
+          "offlineAccess",
+          "platform",
+          "resources",
+          "scopes",
+          "supportsOfflineAccess"
+        ],
+        "additionalProperties": false
+      },
+      "OAuthAuthorizationRevocation": {
+        "type": "object",
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "enum": [
+              "eruoo-web",
+              "eruoo-desktop",
+              "eruoo-mobile"
+            ]
+          },
+          "deletedConsentCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "revokedRefreshTokenCount": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "clientId",
+          "deletedConsentCount",
+          "revokedRefreshTokenCount"
+        ],
+        "additionalProperties": false
+      },
+      "Status": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/api/security/audit-events": {
+      "get": {
+        "operationId": "listSecurityAuditEvents",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "tags": [
+          "Security"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+              "description": "Exclusive opaque cursor returned by the preceding page. It is bound to the active filters."
+            },
+            "required": false,
+            "description": "Exclusive opaque cursor returned by the preceding page. It is bound to the active filters.",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "description": "Inclusive lower occurredAt bound as Unix epoch milliseconds.",
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 0
+            },
+            "required": false,
+            "description": "Inclusive lower occurredAt bound as Unix epoch milliseconds.",
+            "name": "from",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "description": "Number of events to return. Defaults to 50 and cannot exceed 100.",
+              "format": "int32",
+              "maximum": 100,
+              "minimum": 1
+            },
+            "required": false,
+            "description": "Number of events to return. Defaults to 50 and cannot exceed 100.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "failure",
+                "success"
+              ]
+            },
+            "required": false,
+            "name": "outcome",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "description": "Inclusive upper occurredAt bound as Unix epoch milliseconds.",
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 0
+            },
+            "required": false,
+            "description": "Inclusive upper occurredAt bound as Unix epoch milliseconds.",
+            "name": "to",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "api_key_created",
+                "api_key_expired",
+                "api_key_rejected",
+                "api_key_revoked",
+                "api_key_updated",
+                "database_restore_completed",
+                "github_login",
+                "jwt_signing_key_rotated",
+                "oauth_grant_created",
+                "oauth_grant_revoked",
+                "oauth_refresh_reuse_detected",
+                "passkey_created",
+                "passkey_deleted",
+                "passkey_login",
+                "passkey_updated",
+                "security_configuration_changed",
+                "sensitive_operation_denied"
+              ]
+            },
+            "required": false,
+            "name": "type",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Security events from the preceding 180 days in descending keyset order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityAuditEventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request contains ambiguous credential carriers.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A valid owner Session is required.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The filters, page size, or cursor do not satisfy the query contract.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Stored audit data does not satisfy its invariant.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The audit database could not be queried.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The request exceeded the service time limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/security/backup-status": {
+      "get": {
+        "operationId": "getDatabaseBackupStatus",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "tags": [
+          "Security"
+        ],
+        "responses": {
+          "200": {
+            "description": "The latest durable database backup health state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatabaseBackupStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request contains ambiguous credential carriers.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A valid owner Session is required.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Stored backup health does not satisfy its invariant.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The backup health database could not be queried.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The request exceeded the service time limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/oauth/authorizations": {
+      "get": {
+        "operationId": "listOAuthAuthorizations",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "tags": [
+          "Security"
+        ],
+        "responses": {
+          "200": {
+            "description": "The static Web, Desktop, and Mobile authorization summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OAuthAuthorization"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request contains ambiguous credential carriers.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A valid owner Session is required.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed unexpectedly.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The OAuth authorization database is unavailable or violates its invariant.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The request exceeded the service time limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/oauth/authorizations/{clientId}": {
+      "delete": {
+        "operationId": "revokeOAuthAuthorization",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "tags": [
+          "Security"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "clientId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "All unrevoked refresh tokens and all consents for the owner and client were revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthAuthorizationRevocation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request contains ambiguous credential carriers.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A valid owner Session is required.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Recent owner authentication is required, or the client does not support owner-managed offline access.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The client or its owner authorization does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body exceeds the 1 MiB operation limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The owner authorization revocation rate limit was exceeded.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed unexpectedly.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The OAuth authorization database or rate limiter is unavailable, or stored state violates its invariant.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The request exceeded the service time limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/status": {
+      "get": {
+        "operationId": "getStatus",
+        "security": [
+          {
+            "ownerSession": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "The owner Session or status:read API key and its D1 record are valid.",
+            "headers": {
+              "API-Key-Expires-At": {
+                "description": "UTC RFC 3339 expiration returned only for a successfully authenticated API key with at most 14 days remaining.",
+                "schema": {
+                  "format": "date-time",
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request contains ambiguous credential carriers.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A valid owner Session or status:read API key is required.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The authenticated API key does not grant status:read.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The API key request limit was exceeded.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed unexpectedly.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The credential dependency could not be checked.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The request exceeded the service time limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}
