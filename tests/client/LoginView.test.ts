@@ -85,6 +85,26 @@ describe("LoginView", () => {
     mockedSocialSignIn.mockResolvedValue({ data: null, error: null })
   })
 
+  it("explains an owner-only rejection without exposing upstream details", async () => {
+    const router = createTestRouter()
+    await router.push(
+      "/login?error=owner_not_allowed&error_description=private-upstream-detail",
+    )
+    const wrapper = mount(LoginView, {
+      global: { plugins: [router] },
+    })
+
+    await flushPromises()
+
+    expect(wrapper.get('[role="alert"]').text()).toBe(
+      "当前 GitHub 账号不是此服务允许的 owner，请改用已配置的 owner 账号。",
+    )
+    expect(wrapper.text()).not.toContain("private-upstream-detail")
+    expect(router.currentRoute.value.fullPath).toBe("/login")
+
+    wrapper.unmount()
+  })
+
   it("removes only upstream error parameters while keeping the visible prompt", async () => {
     const router = createTestRouter()
     await router.push(signedLoginPath({ includeError: true }))

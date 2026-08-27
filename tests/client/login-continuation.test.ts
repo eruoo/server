@@ -1,4 +1,5 @@
 import {
+  classifyGitHubCallbackError,
   inspectLoginContinuationLocation,
   isInvalidOAuthContinuationError,
 } from "@client/features/auth/login-continuation"
@@ -41,7 +42,7 @@ describe("login OAuth continuation", () => {
     const callback = new URL(result.callbackLocation, "https://auth.eruoo.me")
 
     expect(result.status).toBe("current")
-    expect(result.hadUpstreamError).toBe(true)
+    expect(result.upstreamError).toBe("other")
     expect(result.normalizedLocation).toBe(result.callbackLocation)
     expect(callback.pathname).toBe("/login")
     expect(callback.searchParams.get("client_id")).toBe("eruoo-desktop")
@@ -78,10 +79,43 @@ describe("login OAuth continuation", () => {
       ),
     ).toEqual({
       callbackLocation: "/login",
-      hadUpstreamError: true,
       normalizedLocation: "/login?source=management",
       status: "absent",
+      upstreamError: "other",
     })
+  })
+
+  it("classifies only an exact owner rejection without retaining upstream detail", () => {
+    const result = inspectLoginContinuationLocation(
+      "/login?error=owner_not_allowed&error_description=private-upstream-detail",
+    )
+
+    expect(result).toEqual({
+      callbackLocation: "/login",
+      normalizedLocation: "/login",
+      status: "absent",
+      upstreamError: "owner-not-allowed",
+    })
+    expect(result.normalizedLocation).not.toContain("private-upstream-detail")
+
+    expect(
+      inspectLoginContinuationLocation(
+        "/login?error=owner_not_allowed&error=access_denied",
+      ).upstreamError,
+    ).toBe("other")
+  })
+
+  it.each([
+    [
+      "a duplicated owner rejection",
+      "error=owner_not_allowed&error=owner_not_allowed",
+    ],
+    ["mixed errors", "error=owner_not_allowed&error=access_denied"],
+    ["an error description without an error code", "error_description=detail"],
+  ])("classifies %s as a generic callback error", (_label, query) => {
+    expect(classifyGitHubCallbackError(new URLSearchParams(query))).toBe(
+      "other",
+    )
   })
 
   it("recognizes invalid-signature failures without trusting arbitrary text", () => {

@@ -12,13 +12,18 @@ const router = useRouter()
 const route = useRoute()
 const authorizationRestartMessage =
   "授权请求无效或已过期，请返回调用应用重新发起授权。你仍可在此直接登录管理后台。"
+const githubLoginIncompleteMessage = "GitHub 登录未完成，请重试。"
+const githubOwnerRejectedMessage =
+  "当前 GitHub 账号不是此服务允许的 owner，请改用已配置的 owner 账号。"
 const initialLoginLocation = inspectLoginContinuationLocation(route.fullPath)
 const errorMessage = shallowRef<string | undefined>(
   initialLoginLocation.status === "invalid"
     ? authorizationRestartMessage
-    : initialLoginLocation.hadUpstreamError
-      ? "GitHub 登录未完成，请重试。"
-      : undefined,
+    : initialLoginLocation.upstreamError === "owner-not-allowed"
+      ? githubOwnerRejectedMessage
+      : initialLoginLocation.upstreamError === "other"
+        ? githubLoginIncompleteMessage
+        : undefined,
 )
 const pendingMethod = shallowRef<"github" | "passkey">()
 
@@ -80,7 +85,7 @@ async function signInWithGitHub() {
       return
     }
 
-    errorMessage.value = "GitHub 登录未完成，请重试。"
+    errorMessage.value = githubLoginIncompleteMessage
   } catch (error) {
     if (isInvalidOAuthContinuationError(error)) {
       await discardInvalidAuthorizationContinuation()

@@ -2,15 +2,20 @@ const SIGNATURE_PARAMETER = "sig"
 const SIGNED_PARAMETER_NAME = "ba_param"
 const EXPIRATION_PARAMETER = "exp"
 const ISSUED_AT_PARAMETER = "ba_iat"
-const UPSTREAM_ERROR_PARAMETERS = ["error", "error_description"] as const
+export const GITHUB_CALLBACK_ERROR_PARAMETERS = [
+  "error",
+  "error_description",
+] as const
 
 const loginLocationBase = "https://login.eruoo.invalid"
 
+export type LoginUpstreamError = "other" | "owner-not-allowed"
+
 export interface LoginContinuationLocation {
   callbackLocation: string
-  hadUpstreamError: boolean
   normalizedLocation: string
   status: "absent" | "current" | "invalid"
+  upstreamError: LoginUpstreamError | undefined
 }
 
 function locationFromUrl(url: URL): string {
@@ -20,6 +25,22 @@ function locationFromUrl(url: URL): string {
 
 function hasContinuationMarker(params: URLSearchParams): boolean {
   return params.has(SIGNATURE_PARAMETER) || params.has(SIGNED_PARAMETER_NAME)
+}
+
+export function classifyGitHubCallbackError(
+  params: URLSearchParams,
+): LoginUpstreamError | undefined {
+  const [errorParameter, errorDescriptionParameter] =
+    GITHUB_CALLBACK_ERROR_PARAMETERS
+  const errorValues = params.getAll(errorParameter)
+
+  if (errorValues.length === 1 && errorValues[0] === "owner_not_allowed") {
+    return "owner-not-allowed"
+  }
+
+  return errorValues.length > 0 || params.has(errorDescriptionParameter)
+    ? "other"
+    : undefined
 }
 
 function parsePositiveInteger(value: string | null): number | undefined {
@@ -52,7 +73,7 @@ function currentSignedContinuation(
     !uniqueSignedParameterNames.has(EXPIRATION_PARAMETER) ||
     !uniqueSignedParameterNames.has(ISSUED_AT_PARAMETER) ||
     uniqueSignedParameterNames.has(SIGNATURE_PARAMETER) ||
-    UPSTREAM_ERROR_PARAMETERS.some((name) =>
+    GITHUB_CALLBACK_ERROR_PARAMETERS.some((name) =>
       uniqueSignedParameterNames.has(name),
     )
   ) {
@@ -94,9 +115,7 @@ export function inspectLoginContinuationLocation(
   now = Date.now(),
 ): LoginContinuationLocation {
   const url = new URL(fullPath, loginLocationBase)
-  const hadUpstreamError = UPSTREAM_ERROR_PARAMETERS.some((name) =>
-    url.searchParams.has(name),
-  )
+  const upstreamError = classifyGitHubCallbackError(url.searchParams)
   const signedContinuation = currentSignedContinuation(url.searchParams, now)
 
   if (signedContinuation) {
@@ -105,9 +124,9 @@ export function inspectLoginContinuationLocation(
 
     return {
       callbackLocation: continuationLocation,
-      hadUpstreamError,
       normalizedLocation: continuationLocation,
       status: "current",
+      upstreamError,
     }
   }
 
@@ -116,21 +135,21 @@ export function inspectLoginContinuationLocation(
 
     return {
       callbackLocation: url.pathname,
-      hadUpstreamError,
       normalizedLocation: url.pathname,
       status: "invalid",
+      upstreamError,
     }
   }
 
-  for (const parameterName of UPSTREAM_ERROR_PARAMETERS) {
+  for (const parameterName of GITHUB_CALLBACK_ERROR_PARAMETERS) {
     url.searchParams.delete(parameterName)
   }
 
   return {
     callbackLocation: url.pathname,
-    hadUpstreamError,
     normalizedLocation: locationFromUrl(url),
     status: "absent",
+    upstreamError,
   }
 }
 

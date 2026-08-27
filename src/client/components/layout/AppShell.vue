@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import ThemeSchemeControl from "@client/components/theme/ThemeSchemeControl.vue"
 import { useTheme } from "@client/composables/useTheme"
+import {
+  classifyGitHubCallbackError,
+  GITHUB_CALLBACK_ERROR_PARAMETERS,
+  type LoginUpstreamError,
+} from "@client/features/auth/login-continuation"
 import BackupStatusNotice from "@client/features/security/BackupStatusNotice.vue"
 import { authClient } from "@client/lib/auth-client"
 import {
@@ -11,7 +16,7 @@ import {
   ShieldCheck,
   X,
 } from "@lucide/vue"
-import { nextTick, onMounted, shallowRef, useTemplateRef } from "vue"
+import { computed, nextTick, onMounted, shallowRef, useTemplateRef } from "vue"
 import { RouterLink, useRoute, useRouter } from "vue-router"
 
 const router = useRouter()
@@ -22,16 +27,30 @@ const signOutError = shallowRef(false)
 const mainContent = useTemplateRef<HTMLElement>("main-content")
 const isGitHubReauthenticationCallback =
   route.query["reauthentication"] === "github"
-const githubReauthenticationFailed = shallowRef(
-  isGitHubReauthenticationCallback && typeof route.query["error"] === "string",
+const githubReauthenticationError = shallowRef<LoginUpstreamError | undefined>(
+  isGitHubReauthenticationCallback
+    ? classifyGitHubCallbackError(
+        new URL(route.fullPath, window.location.origin).searchParams,
+      )
+    : undefined,
 )
+const githubReauthenticationErrorMessage = computed(() => {
+  if (githubReauthenticationError.value === "owner-not-allowed") {
+    return "当前 GitHub 账号不是此服务允许的 owner，请改用已配置的 owner 账号，或改用 Passkey。"
+  }
+
+  return githubReauthenticationError.value === "other"
+    ? "GitHub 身份确认未完成。请返回刚才的操作并重试，或改用 Passkey。"
+    : undefined
+})
 
 onMounted(() => {
   if (!isGitHubReauthenticationCallback) return
 
   const query = { ...route.query }
-  delete query["error"]
-  delete query["error_description"]
+  for (const parameterName of GITHUB_CALLBACK_ERROR_PARAMETERS) {
+    delete query[parameterName]
+  }
   delete query["reauthentication"]
   void router.replace({ query })
 })
@@ -57,7 +76,7 @@ async function signOut() {
 }
 
 async function dismissGitHubReauthenticationFailure(): Promise<void> {
-  githubReauthenticationFailed.value = false
+  githubReauthenticationError.value = undefined
   await nextTick()
   mainContent.value?.focus({ preventScroll: true })
 }
@@ -104,10 +123,12 @@ async function dismissGitHubReauthenticationFailure(): Promise<void> {
     <p v-if="signOutError" class="session-error" role="alert">
       退出失败，当前 Session 可能仍然有效，请重试。
     </p>
-    <div v-if="githubReauthenticationFailed" class="session-error" role="alert">
-      <span>
-        GitHub 身份确认未完成。请返回刚才的操作并重试，或改用 Passkey。
-      </span>
+    <div
+      v-if="githubReauthenticationErrorMessage"
+      class="session-error"
+      role="alert"
+    >
+      <span>{{ githubReauthenticationErrorMessage }}</span>
       <button
         class="session-error-dismiss focus-ring"
         type="button"

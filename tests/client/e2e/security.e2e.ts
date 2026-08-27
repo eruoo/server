@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test"
-import type { BrowserContext } from "@playwright/test"
+import type { BrowserContext, Page } from "@playwright/test"
 
 import { e2eBootstrapPath, e2eBootstrapToken } from "./support"
 
@@ -25,6 +25,18 @@ async function bootstrapOwner(
   const payload = (await response.json()) as E2EBootstrapPayload
   await context.addCookies([payload.cookie])
   return payload
+}
+
+async function clipboardMatchesDisplayedApiKey(page: Page): Promise<boolean> {
+  return page.evaluate(async () => {
+    const input = document.querySelector("#created-api-key")
+
+    return (
+      input instanceof HTMLInputElement &&
+      input.value.length > 0 &&
+      (await navigator.clipboard.readText()) === input.value
+    )
+  })
 }
 
 function shanghaiTimestampParts(timestamp: number) {
@@ -123,6 +135,50 @@ test("the owner can confirm and persistently revoke the Desktop authorization", 
     desktopApplication.getByText("未授权", { exact: true }),
   ).toBeVisible()
   await expect(desktopApplication.getByText("离线访问：未授权")).toBeVisible()
+})
+
+test("the owner can copy a newly created API Key by keyboard or button", async ({
+  context,
+  page,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: "http://localhost:5173",
+  })
+  await bootstrapOwner(context)
+  await page.goto("/")
+
+  await page.getByLabel("新 API Key 名称").fill("playwright-status")
+  await page.getByRole("button", { name: "创建", exact: true }).click()
+
+  const createdKeyPanel = page
+    .getByText("完整密钥只显示这一次", { exact: true })
+    .locator("..")
+  const rawKeyInput = createdKeyPanel.getByLabel("完整密钥只显示这一次")
+
+  await expect(rawKeyInput).toHaveJSProperty("readOnly", true)
+  await page.keyboard.press("Tab")
+  await expect(rawKeyInput).toBeFocused()
+  await expect
+    .poll(() =>
+      rawKeyInput.evaluate(
+        (element) =>
+          element instanceof HTMLInputElement &&
+          element.value.length > 0 &&
+          element.selectionStart === 0 &&
+          element.selectionEnd === element.value.length,
+      ),
+    )
+    .toBe(true)
+
+  await rawKeyInput.press("ControlOrMeta+C")
+  await expect.poll(() => clipboardMatchesDisplayedApiKey(page)).toBe(true)
+
+  await page.evaluate(() => navigator.clipboard.writeText(""))
+  await createdKeyPanel
+    .getByRole("button", { name: "复制完整 API Key" })
+    .click()
+  await expect(createdKeyPanel.getByText("已复制到剪贴板。")).toBeVisible()
+  await expect.poll(() => clipboardMatchesDisplayedApiKey(page)).toBe(true)
 })
 
 test("theme selection switches among system, dark, and light and survives reloads", async ({

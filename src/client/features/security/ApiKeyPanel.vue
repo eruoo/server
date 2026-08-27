@@ -2,7 +2,11 @@
 import RecentAuthenticationNotice from "@client/features/auth/RecentAuthenticationNotice.vue"
 import { authClient } from "@client/lib/auth-client"
 import { requiresRecentAuthentication } from "@client/lib/auth-errors"
-import { KeyRound, Plus, RefreshCw, Trash2 } from "@lucide/vue"
+import {
+  nativeClipboardWritePending,
+  startNativeClipboardWrite,
+} from "@client/lib/native-clipboard-write"
+import { Copy, KeyRound, Plus, RefreshCw, Trash2 } from "@lucide/vue"
 import {
   AlertDialogAction,
   AlertDialogCancel,
@@ -21,19 +25,28 @@ type ApiKeyList = NonNullable<
   Awaited<ReturnType<typeof authClient.apiKey.list>>["data"]
 >
 type ListedApiKey = ApiKeyList["apiKeys"][number]
+type CreatedApiKey = { id: string; key: string }
+type CopyState = "copying" | "error" | "idle" | "success"
+type Feedback = {
+  alreadyAnnounced?: boolean
+  kind: "error" | "success" | "warning"
+  message: string
+}
 
 const apiKeys = shallowRef<ListedApiKey[]>([])
 const loadState = shallowRef<
   "authentication-required" | "error" | "loading" | "ready"
 >("loading")
-const feedback = shallowRef<
-  { kind: "error" | "success" | "warning"; message: string } | undefined
->()
-const createdApiKey = shallowRef<string>()
+const feedback = shallowRef<Feedback>()
+const createdApiKey = shallowRef<CreatedApiKey>()
+const createdApiKeyAnnouncement = shallowRef("")
+const copyInFlight = shallowRef(false)
+const copyState = shallowRef<CopyState>("idle")
 const isCreating = shallowRef(false)
 const newApiKeyName = shallowRef("")
 const revokingId = shallowRef<string>()
 const needsRecentAuthentication = shallowRef(false)
+let copyAttemptGeneration = 0
 
 function displayName(apiKey: ListedApiKey) {
   return apiKey.name?.trim() || "未命名密钥"
@@ -102,6 +115,58 @@ function statusLabel(apiKey: ListedApiKey) {
   if (!apiKey.enabled) return "已停用"
   if (isExpired(apiKey)) return "已过期"
   return "有效"
+}
+
+function clearCreatedApiKey() {
+  copyAttemptGeneration += 1
+  createdApiKey.value = undefined
+  createdApiKeyAnnouncement.value = ""
+  copyInFlight.value = false
+  copyState.value = "idle"
+}
+
+function selectCreatedApiKey(event: FocusEvent) {
+  if (event.currentTarget instanceof HTMLInputElement) {
+    event.currentTarget.select()
+  }
+}
+
+async function copyCreatedApiKey() {
+  const apiKey = createdApiKey.value
+  if (!apiKey || copyInFlight.value || nativeClipboardWritePending.value) return
+
+  const nativeWrite = startNativeClipboardWrite(apiKey.key)
+  if (!nativeWrite) return
+
+  const copyAttempt = ++copyAttemptGeneration
+  copyInFlight.value = true
+  copyState.value = "copying"
+
+  try {
+    await nativeWrite
+
+    if (
+      copyAttemptGeneration === copyAttempt &&
+      createdApiKey.value === apiKey
+    ) {
+      copyState.value = "success"
+    }
+  } catch {
+    if (
+      copyAttemptGeneration === copyAttempt &&
+      createdApiKey.value === apiKey
+    ) {
+      copyState.value = "error"
+    }
+  } finally {
+    if (copyAttemptGeneration === copyAttempt) {
+      copyInFlight.value = false
+    }
+  }
+}
+
+function preventOverlappingManualCopy(event: ClipboardEvent) {
+  if (nativeClipboardWritePending.value) event.preventDefault()
 }
 
 function handleReauthenticated() {
@@ -221,6 +286,10 @@ async function revokeApiKey(apiKey: ListedApiKey) {
       return
     }
 
+    if (createdApiKey.value?.id === apiKey.id) {
+      clearCreatedApiKey()
+    }
+
     apiKeys.value = apiKeys.value.filter(({ id }) => id !== apiKey.id)
     feedback.value = {
       kind: "success",
@@ -234,7 +303,7 @@ async function revokeApiKey(apiKey: ListedApiKey) {
 }
 
 async function createApiKey() {
-  if (isCreating.value) return
+  if (isCreating.value || copyInFlight.value) return
 
   const name = newApiKeyName.value.trim()
   if (!name) {
@@ -246,7 +315,7 @@ async function createApiKey() {
   }
 
   isCreating.value = true
-  createdApiKey.value = undefined
+  clearCreatedApiKey()
   feedback.value = undefined
 
   try {
@@ -260,12 +329,15 @@ async function createApiKey() {
       return
     }
 
-    createdApiKey.value = data.key
+    createdApiKey.value = { id: data.id, key: data.key }
+    createdApiKeyAnnouncement.value =
+      "API Key 已创建。完整密钥已显示，请立即保存。"
     newApiKeyName.value = ""
     await loadApiKeys()
 
     if (loadState.value === "ready") {
       feedback.value = {
+        alreadyAnnounced: true,
         kind: "success",
         message: `已创建“${name}”。请立即保存下面的完整密钥。`,
       }
@@ -326,27 +398,109 @@ onMounted(loadApiKeys)
         <button
           class="secondary-button focus-ring"
           type="submit"
-          :disabled="isCreating || loadState !== 'ready'"
+          :disabled="isCreating || copyInFlight || loadState !== 'ready'"
         >
           <Plus :size="18" aria-hidden="true" />
-          {{ isCreating ? "创建中" : "创建" }}
+          {{ isCreating ? "创建中" : copyInFlight ? "复制处理中" : "创建" }}
         </button>
       </div>
       <small>固定授予 status:read，有效期 180 天。</small>
     </form>
 
-    <div v-if="createdApiKey" class="created-key" role="status">
-      <strong>完整密钥只显示这一次</strong>
-      <code class="created-key-value">{{ createdApiKey }}</code>
-      <p>离开或刷新页面前，请把它保存到调用方的安全凭证存储。</p>
+    <div v-if="createdApiKey" class="created-key">
+      <label class="created-key-label" for="created-api-key">
+        完整密钥只显示这一次
+      </label>
+      <div class="created-key-controls">
+        <input
+          id="created-api-key"
+          class="created-key-value focus-ring"
+          type="text"
+          :value="createdApiKey.key"
+          readonly
+          autocomplete="off"
+          spellcheck="false"
+          :aria-describedby="
+            nativeClipboardWritePending
+              ? 'created-api-key-help created-api-key-copy-wait'
+              : 'created-api-key-help'
+          "
+          :aria-disabled="nativeClipboardWritePending"
+          @focus="selectCreatedApiKey"
+          @copy="preventOverlappingManualCopy"
+        />
+        <button
+          class="secondary-button focus-ring"
+          type="button"
+          :disabled="copyInFlight || nativeClipboardWritePending"
+          :aria-busy="copyInFlight || nativeClipboardWritePending"
+          :aria-label="
+            copyInFlight
+              ? '剪贴板写入处理中，请稍候'
+              : nativeClipboardWritePending
+                ? '等待上一次剪贴板写入完成'
+                : '复制完整 API Key'
+          "
+          @click="copyCreatedApiKey"
+        >
+          <Copy :size="18" aria-hidden="true" />
+          {{
+            copyInFlight
+              ? "处理中"
+              : nativeClipboardWritePending
+                ? "请稍候"
+                : "复制"
+          }}
+        </button>
+      </div>
+      <p id="created-api-key-help">
+        离开或刷新页面前，请把它保存到调用方的安全凭证存储。
+      </p>
+      <p
+        v-if="nativeClipboardWritePending"
+        id="created-api-key-copy-wait"
+        class="copy-feedback"
+        role="status"
+      >
+        {{
+          copyInFlight
+            ? "正在写入剪贴板，请稍候。"
+            : "上一次剪贴板写入尚未完成，请稍后再复制。"
+        }}
+      </p>
+      <p
+        v-else-if="copyState === 'success'"
+        class="copy-feedback"
+        role="status"
+      >
+        已复制到剪贴板。
+      </p>
+      <p v-else-if="copyState === 'error'" class="copy-feedback" role="alert">
+        自动复制失败，请手动选择并复制完整密钥。
+      </p>
     </div>
+
+    <p
+      class="created-key-announcement"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      {{ createdApiKeyAnnouncement }}
+    </p>
 
     <p
       v-if="feedback"
       class="feedback"
       :class="`feedback-${feedback.kind}`"
-      :role="feedback.kind === 'success' ? 'status' : 'alert'"
-      aria-live="polite"
+      :role="
+        feedback.alreadyAnnounced
+          ? undefined
+          : feedback.kind === 'success'
+            ? 'status'
+            : 'alert'
+      "
+      :aria-live="feedback.alreadyAnnounced ? undefined : 'polite'"
     >
       {{ feedback.message }}
     </p>
@@ -572,13 +726,46 @@ h2 {
   line-height: var(--leading-relaxed);
 }
 
+.created-key-label {
+  font-weight: var(--font-weight-bold);
+}
+
+.created-key-controls {
+  display: flex;
+  gap: var(--spacing-3);
+  align-items: stretch;
+}
+
 .created-key-value {
+  min-width: 0;
+  min-height: var(--touch-target-min);
+  flex: 1;
   padding: var(--spacing-3);
-  overflow-wrap: anywhere;
+  margin-top: 0;
   border: var(--border-width-thin) solid currentcolor;
   background: var(--surface-panel);
   color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
   user-select: all;
+}
+
+.created-key-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.copy-feedback {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-bold);
 }
 
 .feedback,
@@ -828,7 +1015,8 @@ code {
 }
 
 @media (width < 36rem) {
-  .create-controls {
+  .create-controls,
+  .created-key-controls {
     display: grid;
   }
 

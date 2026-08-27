@@ -256,6 +256,8 @@ eruoo-server/
 - Passkey 是首选的日常登录和敏感操作重新认证方式。
 - GitHub OAuth 保留为恢复和回退方式。
 - Passkey 凭据绑定 `auth.eruoo.me`。未来迁移到不同 RP ID 时，既有 Passkey 不能直接沿用。
+- 管理 SPA 发起 Passkey 创建或删除后，必须等待该次操作对应的列表刷新完成才解除其他 Passkey mutation 和手动重载入口的锁，避免多个列表请求乱序覆盖。正常成功路径使用 Better Auth plugin 的一次自动刷新；若固定版本 plugin 未在约定窗口内启动自动刷新，则以一次显式刷新回退；服务端精确返回 `PASSKEY_NOT_FOUND` 的幂等删除路径也显式刷新列表。Better Auth 客户端网络请求统一使用 30 秒真实超时，确保列表请求最终退出刷新状态；组件卸载必须取消仍在等待的刷新 barrier，且卸载后的异步 operation 不得继续发起 fallback、Session 探测或写回组件状态。
+- 服务端删除 Passkey 成功后，管理 SPA 使用该记录的 WebAuthn credential ID 和当前 RP ID 尽力调用 `signalUnknownCredential`，请求当前凭据管理器隐藏或移除本地凭据。浏览器不支持或调用失败不得回滚服务端删除，也不得显示为服务端删除失败；界面必须保留手动清理指引。只有服务端精确返回 `PASSKEY_NOT_FOUND` 且再次确认 owner Session 仍有效时，才按幂等删除继续发送该 signal。
 
 ## 7. Session 和敏感操作
 
@@ -336,7 +338,7 @@ API Key 不用于浏览器登录，不替代 OAuth/OIDC，也不用于同一 Wor
 
 - 使用 Better Auth API Key plugin。
 - 请求头为 `x-api-key`。
-- 原始 key 只在创建响应中返回一次，数据库只存储哈希。
+- 原始 key 只在创建响应中返回一次，数据库只存储哈希。管理 SPA 在这次展示中提供剪贴板复制；复制失败时必须保留原始 key 和手动复制指引，成功撤销同一 key 后立即清除仍在页面内存中的原始值与复制状态，已经在途的旧剪贴板回调不得恢复或覆盖它们。同一页面同一时刻最多执行一次原生剪贴板写入，且该锁必须跨管理 SPA 的路由卸载与重新挂载保持；旧写入尚未结束时可以创建并展示新 key，但必须暂时阻止按钮和手动复制，待旧写入结束后由用户重新发起复制。
 - 每个脚本或客户端使用独立 key，禁止多个用途共享一把 key。
 - 默认有效期 180 天，最大允许 365 天，不允许永久 key。
 - 到期前 14 天在管理 SPA 提醒。使用该 API Key 成功认证且最终状态为 2xx 的响应，在验证时剩余有效期大于 0 且不超过 14 天时返回 `API-Key-Expires-At`，值为 UTC RFC 3339 时间；更早、已经到期、永久/损坏记录和任何错误响应均不返回该 header。
@@ -710,7 +712,7 @@ OAuth form 中语义为 singleton 的已知参数必须在交给 Better Auth 前
 - 其他普通静态资源直接由 Assets 提供，不消耗不必要的 Worker 动态请求。
 - 前端 route guard 只改善 UX，不是安全边界。所有数据和操作仍由后端验证。
 - 自有管理 API 只在收到经过契约验证的 canonical `authentication-required` 或 `invalid-credential` Problem 时显示重新登录入口；500、503、网络失败和响应契约错误继续显示重试，不得把任意无类型的 401 猜测为 Session 过期。Better Auth 原生管理端点发生错误时，必须先通过其 Session API 重新确认 Session 已失效，才能切换到重新登录状态。
-- 前端只根据 canonical `recent-authentication-required` Problem type 显示重新认证入口，不得把任意无类型的 403 猜测为 recent-auth。GitHub 登录与重新认证 callback 失败时显示稳定的通用提示，从地址栏精确移除 `error`、`error_description` 和重新认证标记但保留其他签名 continuation 参数，不展示 `error_description`。重新认证失败横幅在 URL 清理后继续可见，并提供显式关闭入口；键盘关闭横幅后把焦点移到主内容区，不得让焦点退回 `body` 或从页面开头重新开始。
+- 前端只根据 canonical `recent-authentication-required` Problem type 显示重新认证入口，不得把任意无类型的 403 猜测为 recent-auth。GitHub 登录与重新认证 callback 失败时显示稳定提示：服务端返回精确的 `owner_not_allowed` 时只说明当前 GitHub 账号不是允许的 owner 并提示换号，不披露 owner login 或 email；其他错误继续使用通用提示。地址栏必须精确移除 `error`、`error_description` 和重新认证标记但保留其他签名 continuation 参数，且不得展示 `error_description`。重新认证失败横幅在 URL 清理后继续可见，并提供显式关闭入口；键盘关闭横幅后把焦点移到主内容区，不得让焦点退回 `body` 或从页面开头重新开始。
 - Better Auth、WebAuthn、服务端和网络异常的原始 `error.message` 不得直接显示；Passkey 等界面只使用按操作定义的稳定文案，确需区分用户取消时只允许按已知错误类型白名单映射。
 - `VITE_*` 变量会进入客户端 bundle，禁止放 secret。
 

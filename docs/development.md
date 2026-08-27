@@ -15,9 +15,13 @@ pnpm install --frozen-lockfile
 
 安装过程会按 `pnpm-workspace.yaml` 应用仓库内固定的 `@better-auth/core` Workers 兼容补丁、`@better-auth/api-key` 依赖故障传播补丁与 `@better-auth/oauth-provider` family-scope 安全补丁；不要直接修改 `node_modules`。升级 Better Auth 时必须同时审查这三份补丁、lockfile、依赖补丁测试、`pnpm run dependencies:audit` 和 production bundle 门禁，具体兼容边界以 foundation 第 3.1、4.1 节为准。
 
-## 本地 Secret
+## 本地变量与 Secret
 
-复制示例文件并替换所有占位值：
+### 为什么使用 `.dev.vars`
+
+本项目明确使用 Wrangler 的 `.dev.vars`，不使用通用的 `.env`。Cloudflare 的[本地 Secret 文档](https://developers.cloudflare.com/workers/configuration/environment-variables/#local-development-with-secrets)同时支持两种文件，但要求二选一；只要 `.dev.vars` 存在，`.env` 中的值就不会进入本地 Worker。`wrangler.jsonc` 还通过 `secrets.required` 声明了允许加载的名称，未列出的额外键会被排除，缺少的键会产生警告。不要同时维护两份配置。
+
+复制示例文件：
 
 ```sh
 cp .dev.vars.example .dev.vars
@@ -25,7 +29,58 @@ cp .dev.vars.example .dev.vars
 
 `.dev.vars` 只保存在本机并已被 `.gitignore` 排除。不得把真实 GitHub OAuth secret、Better Auth secret、Cloudflare token、Cookie、API Key 或数据库导出写入仓库、测试 fixture、日志或 issue。
 
-当前浏览器测试使用公开且明显为合成值的独立环境变量，不读取 `.dev.vars`。本地开发 Origin 固定为 `http://localhost:5173`，GitHub OAuth callback 固定为 `http://localhost:5173/api/auth/callback/github`。本地使用独立 GitHub OAuth App；创建或修改该 App 以及写入真实 client ID/secret 前必须取得 owner 明确授权。没有真实 App 时，其他本地功能和自动化测试继续使用合成值，不依赖真实 GitHub 登录。
+生成一个 32-byte 的 base64url 随机值时使用：
+
+```sh
+node --input-type=module -e "import { randomBytes } from 'node:crypto'; console.log(randomBytes(32).toString('base64url'))"
+```
+
+命令输出本身就是 Secret，不要粘贴到对话、issue 或日志。为 `BETTER_AUTH_SECRETS` 与 `AUDIT_IP_HASH_SECRET` 分别运行一次，不要复用同一个值。
+
+`.dev.vars` 中各项的来源如下：
+
+| 名称                   | 本地值或获取方式                                                                                                                                           |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `APP_ORIGIN`           | 固定为 `http://localhost:5173`。这是本地配置，不是凭证。                                                                                                   |
+| `BETTER_AUTH_SECRETS`  | 使用上面的命令生成，写成 `1:<随机值>`。轮换时才使用 `2:<新值>,1:<旧值>`，并始终把最新版本放在最前面。                                                      |
+| `GITHUB_CLIENT_ID`     | 从独立的本地 GitHub OAuth App 复制 Client ID。                                                                                                             |
+| `GITHUB_CLIENT_SECRET` | 在同一个本地 GitHub OAuth App 中生成 Client secret，只写入 `.dev.vars`。                                                                                   |
+| `AUDIT_IP_HASH_SECRET` | 使用上面的命令另行生成，不得与 Better Auth secret 复用。                                                                                                   |
+| `D1_EXPORT_API_TOKEN`  | 日常本地开发不会调用远端 D1 export，保留示例中的明显合成值即可。不得把生产 export token 放到本地文件；只有经授权的隔离远端备份验证才使用单独的受限 token。 |
+
+在 GitHub 的 `Settings > Developer settings > OAuth Apps` 中创建本地 App，具体入口见 [GitHub 官方指南](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app)。Homepage URL 填 `http://localhost:5173`，Authorization callback URL 精确填写 `http://localhost:5173/api/auth/callback/github`。本地 App 与生产 App 必须分离，不复用 client ID 或 secret。创建或修改 OAuth App、写入真实凭证仍需 owner 明确授权。
+
+`APP_ENV=development`、已确认的公开 `OWNER_GITHUB_ID`、`ALLOWED_CORS_ORIGINS=[]` 等非敏感配置已经提交在 `wrangler.jsonc`。本地 `CF_ACCOUNT_ID` 与 `D1_DATABASE_ID` 刻意留空，D1、R2 和 Workflow 都使用本地模拟资源，不需要生产 ID。
+
+当前浏览器测试使用公开且明显为合成值的独立环境变量，不读取 `.dev.vars`。没有真实 GitHub OAuth App 时，其他本地功能和自动化测试仍可运行，只有真实 GitHub 登录无法完成。
+
+## 生产变量与 Secret
+
+生产配置与本地配置完全分开，不能把 `.dev.vars` 上传到 Cloudflare，也不能创建包含生产 Secret 的 `.dev.vars.production`。远端资源建立获得授权后，按以下来源补齐：
+
+| 配置                                                               | 生产来源与存放位置                                                                                                                                                                                                     |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `APP_ENV`、`APP_ORIGIN`、`OWNER_GITHUB_ID`、`ALLOWED_CORS_ORIGINS` | 非敏感值已提交在 `wrangler.jsonc#env.production.vars`。`APP_ORIGIN` 固定为 `https://auth.eruoo.me`。                                                                                                                   |
+| `CF_ACCOUNT_ID`                                                    | 从 Cloudflare Dashboard 的账号信息或 `pnpm exec wrangler whoami --json` 读取；取得稳定值后提交到 production vars。                                                                                                     |
+| D1 binding `database_id` 与 `D1_DATABASE_ID`                       | 从获准创建的 production D1 输出或 `pnpm exec wrangler d1 list --json` 读取。两处必须填写同一个 UUID 并提交。                                                                                                           |
+| R2 bucket                                                          | 创建获准的私有 bucket `eruoo-server-backups` 后保持 `wrangler.jsonc` 中的 binding 名称一致；bucket 名不是 Secret。                                                                                                     |
+| `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`                         | 来自独立的生产 GitHub OAuth App，Homepage URL 使用 `https://auth.eruoo.me`，callback 精确使用 `https://auth.eruoo.me/api/auth/callback/github`。                                                                       |
+| `BETTER_AUTH_SECRETS`、`AUDIT_IP_HASH_SECRET`                      | 为生产重新生成，不能复用本地值。Better Auth 继续使用版本化格式，审计 Secret 单独生成。                                                                                                                                 |
+| `D1_EXPORT_API_TOKEN`                                              | 创建仅限定目标 Cloudflare account、仅供 [D1 export API](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/export/) 使用的独立最小权限 API token。不要复用 Workers Builds 的部署 token。 |
+
+五个生产运行时 Secret 必须写入 Worker `eruoo-server-production` 的 `Settings > Variables & Secrets` 并选择 Secret 类型，或者在明确获准进行远端配置后逐项使用交互式命令：
+
+```sh
+pnpm exec wrangler secret put BETTER_AUTH_SECRETS --env production --config wrangler.jsonc
+pnpm exec wrangler secret put GITHUB_CLIENT_ID --env production --config wrangler.jsonc
+pnpm exec wrangler secret put GITHUB_CLIENT_SECRET --env production --config wrangler.jsonc
+pnpm exec wrangler secret put AUDIT_IP_HASH_SECRET --env production --config wrangler.jsonc
+pnpm exec wrangler secret put D1_EXPORT_API_TOKEN --env production --config wrangler.jsonc
+```
+
+这些命令会修改远端 Worker，不属于本地启动步骤。Wrangler 会交互式读取值，不要把 Secret 直接写进命令行参数或 shell 历史。
+
+Workers Builds 的 API token 和 `Settings > Environment variables` 中的 build variables/secrets 只在构建及部署阶段可用，运行时不可见。生产运行时的五个 Secret 仍必须放在 Worker 的 `Settings > Variables & Secrets` 或通过 `wrangler secret put` 写入。Workers Builds 的自定义部署 token 还要具备严格部署所需权限和 production D1 的 `D1 Edit`，因为发布流程会先应用远端 migration；它与只供运行时导出的 `D1_EXPORT_API_TOKEN` 必须分离。详见 [Cloudflare Workers Builds 配置文档](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#build-variables-and-secrets)。
 
 ## 本地 D1
 
@@ -42,6 +97,10 @@ Better Auth schema 由与运行时相同的选项生成并与已提交 migration
 ```sh
 pnpm run auth-schema:check
 ```
+
+已经应用的 migration 应视为不可变。当前实现阶段曾在本地应用 `0001_foundation.sql` 后继续补写该文件；这种旧本地 D1 的 migration ledger 会认为 `0001` 已完成，`pnpm run db:migrate:local` 因而显示没有待应用项，但数据库 schema 仍可能缺表或缺列。若出现登录成功但某个管理接口持续 500、或代码引用的表在本地不存在，先检查是否属于这种 schema drift。
+
+如果本地数据需要保留，必须新增后续 migration，不能覆盖已经应用的 migration。只有确认本地账号、Session、Passkey、API Key 与审计数据都可以丢弃时，才停止开发服务，将仓库内精确路径 `.wrangler/state/v3/d1/` 移入废纸篓，再重新运行 `pnpm run db:migrate:local`。这个操作只重建本地 D1，但会删除其中全部本地数据；不要删除整个 `.wrangler/`，也不要对远端 D1 执行类似操作。
 
 ## OpenAPI 与客户端类型
 
@@ -61,6 +120,15 @@ pnpm run dev
 ```
 
 Vite 同时启动 Vue client 与 Worker runtime。`/api`、`/api/*`、`/.well-known/*` 和 `/problems/*` 先进入 Worker，其余导航由 SPA fallback 处理。
+
+用以下请求验收 Worker discovery endpoint：
+
+```sh
+curl --noproxy localhost,127.0.0.1 -i \
+  http://localhost:5173/.well-known/openid-configuration
+```
+
+预期返回 `200`、JSON `Content-Type` 和 OpenID 配置对象。如果浏览器可以访问同一地址，而不带 `--noproxy` 的 curl 返回 `502 Bad Gateway`，通常是 curl 继承了 shell 的代理变量，代理又无法访问本机服务，并不是 Worker endpoint 失败。继续使用上面的显式绕过参数，或在代理工具中把 `localhost`、`127.0.0.1` 和 `::1` 加入本地绕过列表；排障时不要打印或记录代理变量的值。
 
 ## 测试和门禁
 

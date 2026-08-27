@@ -2,6 +2,10 @@
 import RecentAuthenticationNotice from "@client/features/auth/RecentAuthenticationNotice.vue"
 import { authClient } from "@client/lib/auth-client"
 import { requiresRecentAuthentication } from "@client/lib/auth-errors"
+import {
+  type PasskeyCredentialSignalOutcome,
+  signalUnknownPasskeyCredential,
+} from "@client/lib/passkey-credential-signal"
 import { Fingerprint, Plus, Trash2 } from "@lucide/vue"
 import {
   AlertDialogAction,
@@ -14,24 +18,39 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "reka-ui"
-import { computed, shallowRef, watch } from "vue"
+import { computed, onBeforeUnmount, shallowRef, watch } from "vue"
 import { RouterLink } from "vue-router"
 
 interface Feedback {
-  kind: "error" | "success"
+  kind: "error" | "success" | "warning"
   message: string
 }
+
+type PasskeyRefreshOutcome = "authentication-required" | "failed" | "succeeded"
+type AutomaticPasskeyRefreshOutcome = PasskeyRefreshOutcome | "not-started"
+type SessionAvailability = "available" | "unavailable" | "unknown"
+
+interface AutomaticPasskeyRefreshBarrier {
+  cancel: () => void
+  wait: () => Promise<AutomaticPasskeyRefreshOutcome>
+}
+
+const AUTOMATIC_REFRESH_START_TIMEOUT_MS = 1_000
 
 const passkeyQuery = authClient.useListPasskeys()
 const passkeyName = shallowRef("")
 const isAdding = shallowRef(false)
 const deletingPasskeyId = shallowRef<string | null>(null)
 const feedback = shallowRef<Feedback | null>(null)
+const credentialCleanupFeedback = shallowRef<Feedback | null>(null)
 const needsRecentAuthentication = shallowRef(false)
 const authenticationRequired = shallowRef(false)
+const activeAutomaticRefreshBarriers = new Set<AutomaticPasskeyRefreshBarrier>()
+let panelUnmounted = false
 
 const passkeys = computed(() =>
   (passkeyQuery.value.data ?? []).map((passkey) => ({
+    credentialId: passkey.credentialID,
     id: passkey.id,
     name: passkey.name?.trim() || "未命名 Passkey",
     deviceLabel:
@@ -41,7 +60,11 @@ const passkeys = computed(() =>
 )
 const hasLoadError = computed(() => Boolean(passkeyQuery.value.error))
 const isBusy = computed(
-  () => isAdding.value || deletingPasskeyId.value !== null,
+  () =>
+    passkeyQuery.value.isPending ||
+    passkeyQuery.value.isRefetching ||
+    isAdding.value ||
+    deletingPasskeyId.value !== null,
 )
 
 function showAuthenticationRequired(): void {
@@ -50,20 +73,67 @@ function showAuthenticationRequired(): void {
   feedback.value = null
 }
 
-async function sessionIsUnavailable(): Promise<boolean> {
+async function readSessionAvailability(): Promise<SessionAvailability> {
+  if (panelUnmounted) return "unknown"
+
   try {
     const result = await authClient.getSession()
-    return result.error == null && result.data === null
+
+    if (panelUnmounted) return "unknown"
+    if (result.error != null) return "unknown"
+    return result.data === null ? "unavailable" : "available"
   } catch {
-    return false
+    return "unknown"
+  }
+}
+
+async function sessionIsUnavailable(): Promise<boolean> {
+  return (await readSessionAvailability()) === "unavailable"
+}
+
+function isPasskeyNotFoundError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "PASSKEY_NOT_FOUND"
+  )
+}
+
+function createDeletionFeedback(
+  signalOutcome: PasskeyCredentialSignalOutcome,
+  wasAlreadyDeleted: boolean,
+): Feedback {
+  let message = wasAlreadyDeleted
+    ? "Passkey 已不在服务端。"
+    : "Passkey 已删除。"
+
+  if (signalOutcome === "requested") {
+    message +=
+      "已请求当前设备的凭据管理器隐藏或删除对应凭据；部分凭据管理器仍可能需要手动处理。"
+  } else if (signalOutcome === "unsupported") {
+    message +=
+      "当前浏览器不支持同步清理设备中的凭据，请在凭据管理器中手动移除。"
+  } else {
+    message += "未能同步清理当前设备中的凭据，请在凭据管理器中手动移除。"
+  }
+
+  return {
+    kind: signalOutcome === "requested" ? "success" : "warning",
+    message,
   }
 }
 
 async function reportOperationError(error: unknown, fallback: string) {
+  if (panelUnmounted) return
+
   if (await sessionIsUnavailable()) {
+    if (panelUnmounted) return
     showAuthenticationRequired()
     return
   }
+
+  if (panelUnmounted) return
 
   if (requiresRecentAuthentication(error)) {
     needsRecentAuthentication.value = true
@@ -88,39 +158,123 @@ function handleReauthenticated() {
   }
 }
 
-async function refreshPasskeys() {
-  try {
-    await passkeyQuery.value.refetch()
-  } catch {
-    if (await sessionIsUnavailable()) {
-      showAuthenticationRequired()
-      return
-    }
-
-    feedback.value = {
-      kind: "error",
-      message: "操作已完成，但 Passkey 列表刷新失败。",
-    }
+async function classifyPasskeyRefreshOutcome(): Promise<PasskeyRefreshOutcome> {
+  if (panelUnmounted) return "failed"
+  if (!passkeyQuery.value.error) return "succeeded"
+  if (await sessionIsUnavailable()) {
+    return "authentication-required"
   }
+
+  return "failed"
+}
+
+function createAutomaticPasskeyRefreshBarrier(): AutomaticPasskeyRefreshBarrier {
+  let completionOutcome: AutomaticPasskeyRefreshOutcome | undefined
+  let refreshStarted = false
+  let settled = false
+  let resolveCompletion!: () => void
+  let stopWatching: () => void = () => {}
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  let barrier!: AutomaticPasskeyRefreshBarrier
+  const completion = new Promise<void>((resolve) => {
+    resolveCompletion = resolve
+  })
+
+  const clearBarrierTimeout = () => {
+    if (timeoutId === undefined) return
+
+    clearTimeout(timeoutId)
+    timeoutId = undefined
+  }
+
+  const settle = (outcome?: AutomaticPasskeyRefreshOutcome) => {
+    if (settled) return
+
+    settled = true
+    completionOutcome = outcome
+    clearBarrierTimeout()
+    stopWatching()
+    activeAutomaticRefreshBarriers.delete(barrier)
+    resolveCompletion()
+  }
+
+  const armBarrierTimeout = (
+    delay: number,
+    outcome: AutomaticPasskeyRefreshOutcome,
+  ) => {
+    clearBarrierTimeout()
+    timeoutId = setTimeout(() => settle(outcome), delay)
+  }
+
+  stopWatching = watch(
+    () => passkeyQuery.value.isRefetching,
+    (isRefetching) => {
+      if (isRefetching) {
+        refreshStarted = true
+        clearBarrierTimeout()
+        return
+      }
+
+      if (refreshStarted) settle()
+    },
+    { flush: "sync" },
+  )
+
+  barrier = {
+    cancel: () => settle("failed"),
+    async wait() {
+      if (!settled && !refreshStarted) {
+        armBarrierTimeout(AUTOMATIC_REFRESH_START_TIMEOUT_MS, "not-started")
+      }
+
+      await completion
+      return completionOutcome ?? classifyPasskeyRefreshOutcome()
+    },
+  }
+
+  activeAutomaticRefreshBarriers.add(barrier)
+  return barrier
+}
+
+async function refreshPasskeys(): Promise<PasskeyRefreshOutcome> {
+  if (panelUnmounted) return "failed"
+
+  await passkeyQuery.value.refetch()
+  if (panelUnmounted) return "failed"
+  return classifyPasskeyRefreshOutcome()
+}
+
+async function awaitAutomaticPasskeyRefresh(
+  barrier: AutomaticPasskeyRefreshBarrier,
+): Promise<PasskeyRefreshOutcome> {
+  const outcome = await barrier.wait()
+  if (panelUnmounted) return "failed"
+  return outcome === "not-started" ? refreshPasskeys() : outcome
 }
 
 async function retryPasskeyList() {
-  try {
-    await passkeyQuery.value.refetch()
-  } catch {
-    if (await sessionIsUnavailable()) showAuthenticationRequired()
+  if (isBusy.value) return
+
+  const refreshOutcome = await refreshPasskeys()
+  if (panelUnmounted) return
+
+  if (refreshOutcome === "authentication-required") {
+    showAuthenticationRequired()
   }
 }
 
 async function addPasskey() {
   if (isBusy.value) return
 
+  const automaticRefresh = createAutomaticPasskeyRefreshBarrier()
   feedback.value = null
+  credentialCleanupFeedback.value = null
   isAdding.value = true
 
   try {
     const name = passkeyName.value.trim()
     const result = await authClient.passkey.addPasskey(name ? { name } : {})
+    if (panelUnmounted) return
 
     if (result.error) {
       await reportOperationError(result.error, "Passkey 添加失败。")
@@ -129,36 +283,92 @@ async function addPasskey() {
 
     passkeyName.value = ""
     feedback.value = { kind: "success", message: "Passkey 已添加。" }
-    await refreshPasskeys()
+    const refreshOutcome = await awaitAutomaticPasskeyRefresh(automaticRefresh)
+    if (panelUnmounted) return
+
+    if (refreshOutcome === "authentication-required") {
+      showAuthenticationRequired()
+    }
   } catch (error) {
+    automaticRefresh.cancel()
     await reportOperationError(error, "Passkey 添加失败。")
   } finally {
-    isAdding.value = false
+    automaticRefresh.cancel()
+    if (!panelUnmounted) isAdding.value = false
   }
 }
 
-async function deletePasskey(id: string) {
+async function deletePasskey(passkey: { credentialId: string; id: string }) {
   if (isBusy.value) return
 
+  const automaticRefresh = createAutomaticPasskeyRefreshBarrier()
   feedback.value = null
-  deletingPasskeyId.value = id
+  credentialCleanupFeedback.value = null
+  deletingPasskeyId.value = passkey.id
 
   try {
-    const result = await authClient.passkey.deletePasskey({ id })
+    const result = await authClient.passkey.deletePasskey({ id: passkey.id })
+    if (panelUnmounted) return
+    let wasAlreadyDeleted = false
 
     if (result.error) {
-      await reportOperationError(result.error, "Passkey 删除失败。")
-      return
+      if (!isPasskeyNotFoundError(result.error)) {
+        automaticRefresh.cancel()
+        await reportOperationError(result.error, "Passkey 删除失败。")
+        return
+      }
+
+      automaticRefresh.cancel()
+
+      const sessionAvailability = await readSessionAvailability()
+      if (panelUnmounted) return
+      if (sessionAvailability === "unavailable") {
+        showAuthenticationRequired()
+        return
+      }
+
+      if (sessionAvailability !== "available") {
+        feedback.value = {
+          kind: "error",
+          message: "无法确认当前 Session，未同步清理设备中的凭据。",
+        }
+        return
+      }
+
+      wasAlreadyDeleted = true
     }
 
-    feedback.value = { kind: "success", message: "Passkey 已删除。" }
-    await refreshPasskeys()
+    const credentialSignalOutcome = await signalUnknownPasskeyCredential({
+      credentialId: passkey.credentialId,
+      rpId: window.location.hostname,
+    })
+    if (panelUnmounted) return
+    credentialCleanupFeedback.value = createDeletionFeedback(
+      credentialSignalOutcome,
+      wasAlreadyDeleted,
+    )
+
+    const refreshOutcome = wasAlreadyDeleted
+      ? await refreshPasskeys()
+      : await awaitAutomaticPasskeyRefresh(automaticRefresh)
+    if (panelUnmounted) return
+
+    if (refreshOutcome === "authentication-required") {
+      showAuthenticationRequired()
+    }
   } catch (error) {
+    automaticRefresh.cancel()
     await reportOperationError(error, "Passkey 删除失败。")
   } finally {
-    deletingPasskeyId.value = null
+    automaticRefresh.cancel()
+    if (!panelUnmounted) deletingPasskeyId.value = null
   }
 }
+
+onBeforeUnmount(() => {
+  panelUnmounted = true
+  for (const barrier of activeAutomaticRefreshBarriers) barrier.cancel()
+})
 
 watch(
   () => passkeyQuery.value.error,
@@ -170,9 +380,8 @@ watch(
       isCurrent = false
     })
 
-    if ((await sessionIsUnavailable()) && isCurrent) {
+    if ((await sessionIsUnavailable()) && isCurrent)
       showAuthenticationRequired()
-    }
   },
   { immediate: true },
 )
@@ -243,11 +452,23 @@ watch(
     </form>
 
     <p
+      v-if="credentialCleanupFeedback"
+      class="feedback"
+      :class="`feedback-${credentialCleanupFeedback.kind}`"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      {{ credentialCleanupFeedback.message }}
+    </p>
+
+    <p
       v-if="feedback"
       class="feedback"
       :class="`feedback-${feedback.kind}`"
       :role="feedback.kind === 'error' ? 'alert' : 'status'"
       aria-live="polite"
+      aria-atomic="true"
     >
       {{ feedback.message }}
     </p>
@@ -275,7 +496,7 @@ watch(
       <button
         class="text-button focus-ring"
         type="button"
-        :disabled="passkeyQuery.isRefetching"
+        :disabled="isBusy"
         @click="retryPasskeyList"
       >
         {{ passkeyQuery.isRefetching ? "重试中…" : "重新载入" }}
@@ -312,7 +533,7 @@ watch(
                 删除 {{ passkey.name }}？
               </AlertDialogTitle>
               <AlertDialogDescription class="dialog-description">
-                删除后，这个凭据将无法再用于登录。设备中保存的凭据可能仍需在系统设置中单独移除。
+                删除后，账号将不再接受这个凭据。系统会请求当前设备的凭据管理器同步移除或隐藏；不同浏览器和凭据管理器的处理结果可能不同，必要时仍需手动移除。
               </AlertDialogDescription>
               <div class="dialog-actions">
                 <AlertDialogCancel
@@ -324,7 +545,7 @@ watch(
                 <AlertDialogAction
                   class="button danger-button focus-ring"
                   type="button"
-                  @click="deletePasskey(passkey.id)"
+                  @click="deletePasskey(passkey)"
                 >
                   确认删除
                 </AlertDialogAction>
@@ -510,6 +731,12 @@ watch(
 .feedback-success {
   background: var(--status-success-bg);
   color: var(--status-success-fg);
+}
+
+.feedback-warning {
+  border-color: var(--status-warning-border);
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
 }
 
 .feedback-error,

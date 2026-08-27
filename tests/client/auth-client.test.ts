@@ -30,8 +30,43 @@ function expectAuthorizeContinuation(body: Record<string, unknown>) {
 describe("authClient OAuth continuation", () => {
   afterEach(() => {
     window.history.replaceState(null, "", "/")
+    vi.useRealTimers()
     vi.unstubAllGlobals()
     vi.resetModules()
+  })
+
+  it("aborts an auth request after the configured client timeout", async () => {
+    vi.useFakeTimers()
+    let requestSignal: AbortSignal | undefined
+    const fetchMock = vi.fn<FetchImplementation>(
+      (input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          const request = requestFromFetchCall(input, init)
+          requestSignal = request.signal
+          request.signal.addEventListener(
+            "abort",
+            () => reject(request.signal.reason),
+            { once: true },
+          )
+        }),
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    const { authClient } = await import("@client/lib/auth-client")
+    const requestOutcome = authClient
+      .$fetch("/passkey/list-user-passkeys", { method: "GET" })
+      .then(
+        (result) => ({ error: undefined, result }),
+        (error: unknown) => ({ error, result: undefined }),
+      )
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    const outcome = await requestOutcome
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(requestSignal?.aborted).toBe(true)
+    expect(outcome.result).toBeUndefined()
+    expect(outcome.error).toMatchObject({ name: "AbortError" })
   })
 
   it("supplies the signed authorize query when GitHub login starts", async () => {
