@@ -991,15 +991,16 @@ HTTP 和契约：
 
 - GitHub 仓库为 `eruoo/server`。
 - 使用 Cloudflare Workers Builds 的 GitHub 集成。
-- Git 默认分支和日常集成分支为 `main`；Cloudflare Workers Builds 的 production branch 固定为长期分支 `production`。`main`、PR 和其他非生产分支只能执行验证 build，non-production deploy command 固定为 `pnpm run bundle:check`，不得上传版本、执行远端 migration 或修改 Worker。
-- Workers Builds 的 root directory 为仓库根目录，build command 固定为 `pnpm install --frozen-lockfile && pnpm exec playwright install chromium && pnpm run check`，production deploy command 固定为 `pnpm run deploy:production`。启用远端 trigger 前必须先用隔离构建验证 Workers Builds 镜像能够运行 Playwright Chromium；不能运行时停止接线，不得静默跳过 E2E。
+- Git 默认分支和日常集成分支为 `main`；Cloudflare Workers Builds 的 production branch 固定为长期分支 `production`。production trigger 只能监听 `production`。默认关闭 non-production branch builds，避免普通功能分支的仓库脚本接触生产级 build token；`main`、PR 和其他非生产分支继续通过本地与 pre-push 门禁验证。只有单独建立不含 production D1、Worker、Secret、route 或其他生产写权限的 preview trigger/token 后，才可启用非生产构建，其 non-production deploy command 固定为 `pnpm run bundle:check`，不得上传版本、执行远端 migration 或修改 Worker。
+- Workers Builds 的 root directory 为仓库根目录，build command 固定为 `pnpm install --frozen-lockfile && pnpm exec playwright install chromium && pnpm run check`，production deploy command 固定为 `pnpm run deploy:production`。build variables 固定为与仓库工具链一致的 `NODE_VERSION=24.18.0`、`PNPM_VERSION=11.22.0` 和 `SKIP_DEPENDENCY_INSTALL=1`；最后一项用于禁用平台自动 dependency install，确保依赖只由固定 build command 的 frozen install 安装一次。首次生产 build 必须先成功运行 Playwright Chromium 和完整门禁，失败时不得进入 deploy command，不得静默跳过 E2E。
 - 根 `package.json` 中的 `deploy:production` 必须先执行 `pnpm run release:preflight`，再执行 `pnpm exec wrangler d1 migrations apply DB --remote --env production --config wrangler.jsonc`，成功后执行 `pnpm exec wrangler deploy --config dist/eruoo_server/wrangler.json --no-x-provision --strict`。任一步失败都必须阻止后续步骤。该 script 在 Workers Builds 配置前必须实现；以静态或单元测试配合 mock Wrangler 验证命令顺序、失败短路和参数，并单独运行 `pnpm run bundle:check` 验证部署产物。真实执行 `deploy:production` 只能发生在本节规定的逐次生产部署授权之后。
-- Workers Builds 必须使用自定义、只限定到目标 Cloudflare account 的最小权限 API token：除 Wrangler 严格部署 Worker、Assets、binding 与 Workflow 所需的部署权限外，必须显式包含 production D1 的 `D1 Edit`，以执行发布序列中的 remote migration。不得使用全局 API key 或账号管理员 token；该构建 token 与运行时只用于 D1 export 的 `D1_EXPORT_API_TOKEN` 分离。创建 token 和接通 trigger 仍是第 27 节外部操作，本地实现不执行。
+- Workers Builds 的 production trigger 必须使用自定义、只限定到目标 Cloudflare account 的最小权限 API token：除 Wrangler 严格部署 Worker、Assets、binding 与 Workflow 所需的部署权限外，必须显式包含 production D1 的 `D1 Edit`，以执行发布序列中的 remote migration。不得使用全局 API key 或账号管理员 token；该构建 token 不得提供给非生产 branch build，并与运行时只用于 D1 export 的 `D1_EXPORT_API_TOKEN` 分离。创建 token 和接通 trigger 仍是第 27 节外部操作，本地实现不执行。
+- `deploy:production` 入口必须在执行 preflight、migration 和 deploy 的每一步前验证 `WORKERS_CI=1`、`WORKERS_CI_BRANCH` 精确等于 `production`，且 `WORKERS_CI_COMMIT_SHA`、checkout 的 `HEAD` 与 GitHub 上 `eruoo/server` 的 `refs/heads/production` 三者相同，同时要求源码工作区干净；Worker deploy 返回后必须再执行一次相同校验，末次失败时 build 失败且不得打 tag。`WORKERS_CI_*` 只提供执行上下文，不是可信的平台身份证明；实际授权边界由远端分支 ruleset 和隔离的 production deploy token 提供。任一值缺失、不合法、不匹配或无法读取远端 ref 时 fail-closed；不得在 Build variables 中覆盖这些变量。上一个 production build 完成或明确失败前不得再次推进 `production`，避免并发 build 竞争发布顺序。
 - 每次发布都必须先取得 owner 对该精确 commit 的生产部署授权，再由 LoTwT 将 `production` 快进到该已审查的 `main` commit；只有这一受控分支更新才能触发 production deploy。Agent 不得更新 `production`，普通 `main` merge 也不构成生产部署授权。GitHub ruleset 必须禁止 force push，并把 `production` 更新权限限制给 LoTwT；配置 ruleset 和 production trigger 本身属于第 27 节外部操作门禁。
 - Cloudflare Vite plugin 的 production environment 必须在 Vite build 时选择；不得假定 build 完成后给 Wrangler deploy 增加 `--env production` 可以改变已生成并扁平化的配置。
 - D1、R2、Workflow、Static Assets 和 Secrets 通过 Wrangler/Cloudflare bindings 配置。
-- production D1 和 R2 必须先显式创建并绑定稳定 ID；发布门禁禁止 Wrangler 自动 provisioning，并要求 production migration 成功后才允许上传依赖该 schema 的 Worker。
-- Cloudflare account ID、D1 database ID 和 R2 bucket name 是部署标识而非凭证；资源创建获得授权后，将稳定值提交到 production Wrangler 配置，使 Vite 生成物与 source config 可审计地一致。访问这些资源的 API token 仍只存 Cloudflare Secret。缺少稳定 ID 时 `release:preflight` 必须失败，且不得启用 Workers Builds production trigger。
+- production D1 和 R2 必须先显式创建并绑定稳定 ID；当前 D1 为 `eruoo-server`，私有 R2 bucket 为 `eruoo-server-backups`。Account 与 D1 的权威 ID 只维护在 `wrangler.jsonc#env.production`；发布门禁禁止 Wrangler 自动 provisioning，并要求 production migration 成功后才允许上传依赖该 schema 的 Worker。
+- Cloudflare account ID、D1 database ID 和 R2 bucket name 是部署标识而非凭证；当前 production 配置提交稳定值，使 Vite 生成物与 source config 可审计地一致。访问这些资源的 API token 仍只存 Cloudflare Secret。缺少或不一致的稳定 ID 时 `release:preflight` 必须失败，且不得启用 Workers Builds production trigger。
 - `release:preflight` 必须同时校验 source config 与 Vite 生成配置中的 `CF_ACCOUNT_ID`、D1 binding `database_id`、`D1_DATABASE_ID`、生产 `AUTH_RATE_LIMITER` 的 10/60 配置、精确字符串 `ALLOWED_CORS_ORIGINS="[]"` 和完整 required-secret manifest；构建产物遗漏或改写任一项都阻止 migration 与 deploy。
 - GitHub OAuth secret、版本化 `BETTER_AUTH_SECRETS`、D1 REST API token、`AUDIT_IP_HASH_SECRET` 等不得提交到 Git。
 - schema 演进采用向后兼容的 expand、migrate、deploy、contract 顺序。先增加兼容结构和迁移数据，再发布使用新结构的 Worker，最后在后续发布删除旧结构。
@@ -1042,6 +1043,7 @@ HTTP 和契约：
 - Agent 使用 `eruoos <github@eruoo.me>` 创建提交并推送功能分支。
 - LoTwT 负责 review、approve，并以 squash merge 合入默认集成分支 `main`。
 - LoTwT 将功能 PR squash merge 到 `main`；生产发布使用第 22.3 节的独立 `production` 分支门禁。Agent 不得更新 `production` 或把普通代码合并解释为部署授权。
+- 根 `CHANGELOG.md` 记录稳定 `MAJOR.MINOR.PATCH` SemVer 发布版本；应用版本、OpenAPI document version 与根 `package.json#version` 对齐，并由 `release:preflight` 校验。只有生产部署和验收成功后，才能在实际部署的精确 commit 上创建对应 annotated tag 与 GitHub Release，完整操作以 `docs/releasing.md` 为准。
 - 未经明确要求，不直接向生产分支提交或发布。
 - GitHub 仓库启用 secret scanning 和 push protection；任何提交和 push 前都必须检查 staged diff，并执行自动化 secret scan。具体扫描工具在工程初始化时确定。
 
@@ -1074,7 +1076,7 @@ HTTP 和契约：
 6. 180 天安全审计、过期 verification、OAuth replay payload、过期 token 与达到 31 天保护窗且无活跃 token 的 family tombstone 每日清理，每周单次完整 D1 Workflow export 直写私有 R2、D1 租约串行化的 8/9 GB 免费额度保护、无效新写对象的精确补偿删除、持久化备份健康状态与管理 SPA 提醒，以及会在内存 SQLite 中语义执行但只生成本地计划的隔离恢复校验器。
 7. OpenAPI/schema/config drift、secret scan、组件/workerd/D1/浏览器测试、production build、Wrangler dry-run/startup check 和严格顺序的生产发布编排。
 
-所有尚缺的输入均属于第 27 节外部操作，而不是待定的本地设计：真实 GitHub OAuth App 与凭证、Cloudflare account/D1/R2/Worker/Workflow 资源、R2 180 天 lifecycle、Workers Builds/ruleset、生产 CORS/Web/Mobile 接线及域名发布。仓库保持 fail-closed；缺少这些输入必须阻止生产 preflight 或对应客户端启用，但不阻止使用合成值完成本地实现与验证。
+已获准完成的生产基础输入包括 Cloudflare account ID、D1、私有 R2 bucket、R2 180 天 lifecycle，以及 `production` 分支的发布 actor 与历史安全 ruleset。剩余输入仍属于第 27 节外部操作，而不是待定的本地设计：真实 GitHub OAuth App 与凭证、生产 Worker/Workflow、Cloudflare Secret、Workers Builds trigger，以及域名 Custom Domain 发布。生产 CORS 继续保持 `[]`，Web/Mobile 接线继续禁用。仓库保持 fail-closed；缺少这些输入必须阻止对应外部接线或客户端启用，但不阻止本地实现与验证。
 
 ## 27. 实施授权与外部操作门禁
 
@@ -1093,7 +1095,7 @@ HTTP 和契约：
 当前生产接线输入采用以下 fail-closed 状态，不构成设计阻塞：
 
 - `eruoo-web` 与 `eruoo-mobile` 在精确 redirect URI 和 app-link 获批前不启用；生产 CORS allowlist 保持 `[]`。
-- 生产 D1、R2、Worker、Cloudflare account ID、GitHub OAuth App 和全部 Cloudflare Secret 只通过外部配置提供，仓库中只保留变量名与校验规则。
+- production D1、R2 与 Cloudflare account 已建立，稳定非敏感标识提交在 `wrangler.jsonc`；生产 Worker、GitHub OAuth App、Workers Builds trigger 和全部 Cloudflare Secret 仍只通过获准的外部配置提供，仓库中只保留 Secret 名称与校验规则。
 - API Key permission allowlist 当前只包含 `status:read`，API Key 创建固定使用该权限和 180 天有效期。后续每个允许 API Key 访问的业务 operation 仍必须在同一变更中加入精确 `resource:action`、运行时门禁、14 天内的 `API-Key-Expires-At` 响应头、需要时的 CORS expose header、OpenAPI 和测试；测试用 `fixture:*` 不得进入生产 allowlist。
 
 ## 28. 主要风险

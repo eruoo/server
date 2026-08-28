@@ -98,8 +98,8 @@
         "APP_ORIGIN": "https://auth.eruoo.me",
         "OWNER_GITHUB_ID": "50254496",
         "ALLOWED_CORS_ORIGINS": "[]",
-        "CF_ACCOUNT_ID": "",
-        "D1_DATABASE_ID": "",
+        "CF_ACCOUNT_ID": "1d204c847b5870d3438dc79534b91798",
+        "D1_DATABASE_ID": "652f931e-a445-46fa-bc2b-72be095fdc01",
       },
       "secrets": {
         "required": [
@@ -114,6 +114,7 @@
         {
           "binding": "DB",
           "database_name": "eruoo-server",
+          "database_id": "652f931e-a445-46fa-bc2b-72be095fdc01",
           "migrations_dir": "./migrations",
           "migrations_pattern": "./migrations/*.sql",
           "remote": false,

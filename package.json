@@ -1,6 +1,6 @@
 {
   "name": "eruoo-server",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -22,7 +22,7 @@
     "openapi:check": "tsx scripts/openapi.ts --check",
     "openapi:generate": "tsx scripts/openapi.ts --write",
     "prepare": "pnpm run api-types:generate && simple-git-hooks",
-    "release:preflight": "pnpm run build && tsx scripts/release-preflight.ts && pnpm run bundle:check && pnpm run startup:check",
+    "release:preflight": "pnpm run openapi:check && pnpm run build && tsx scripts/release-preflight.ts && pnpm run bundle:check && pnpm run startup:check",
     "secret:scan": "secretlint \"**/*\"",
     "secret:scan:staged": "tsx scripts/secret-scan-staged.ts",
     "startup:check": "wrangler check startup --config dist/eruoo_server/wrangler.json --outfile .wrangler/worker-startup.cpuprofile",

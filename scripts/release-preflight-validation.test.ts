@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   requiredProductionSecrets,
   validateReleaseBindingIdentity,
+  validateReleaseVersionIdentity,
 } from "./release-preflight-validation"
 
 const accountId = "a".repeat(32)
@@ -75,5 +76,64 @@ describe("production release binding validation", () => {
     ).toContain(
       "Production ALLOWED_CORS_ORIGINS must remain the exact empty JSON array in source and generated configs.",
     )
+  })
+})
+
+const packageVersion = "0.0.1"
+
+function validVersionInput() {
+  return {
+    changelog: [
+      `## [${packageVersion}]`,
+      `[Unreleased]: https://github.com/eruoo/server/compare/v${packageVersion}...HEAD`,
+      `[${packageVersion}]: https://github.com/eruoo/server/releases/tag/v${packageVersion}`,
+    ].join("\n"),
+    openApiVersion: packageVersion,
+    packageVersion,
+  }
+}
+
+describe("production release version validation", () => {
+  it("accepts aligned package, OpenAPI, and changelog versions", () => {
+    expect(validateReleaseVersionIdentity(validVersionInput())).toEqual([])
+  })
+
+  it("rejects an OpenAPI version that differs from the package version", () => {
+    expect(
+      validateReleaseVersionIdentity({
+        ...validVersionInput(),
+        openApiVersion: "0.1.0",
+      }),
+    ).toContain("The OpenAPI document version must exactly match package.json.")
+  })
+
+  it.each(["not-semver", "0.0.01", "v0.0.1", "0.0.1-preview.1"])(
+    "rejects a non-stable Semantic Version: %s",
+    (invalidVersion) => {
+      const input = validVersionInput()
+
+      expect(
+        validateReleaseVersionIdentity({
+          changelog: input.changelog.replaceAll(packageVersion, invalidVersion),
+          openApiVersion: invalidVersion,
+          packageVersion: invalidVersion,
+        }),
+      ).toContain(
+        "package.json version must be a stable MAJOR.MINOR.PATCH Semantic Version.",
+      )
+    },
+  )
+
+  it("requires the release heading and both version links", () => {
+    expect(
+      validateReleaseVersionIdentity({
+        ...validVersionInput(),
+        changelog: "## [Unreleased]\n",
+      }),
+    ).toEqual([
+      "CHANGELOG.md must contain a release heading for the package version.",
+      "CHANGELOG.md must compare Unreleased changes from the package version tag.",
+      "CHANGELOG.md must link the package version to its matching release tag.",
+    ])
   })
 })

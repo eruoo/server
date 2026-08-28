@@ -9,11 +9,16 @@ import {
   DATABASE_BACKUP_SCHEDULE,
 } from "../src/worker/schedules"
 import { productionDeployCommands } from "./deploy-production"
-import { validateReleaseBindingIdentity } from "./release-preflight-validation"
+import {
+  validateReleaseBindingIdentity,
+  validateReleaseVersionIdentity,
+} from "./release-preflight-validation"
 
 const productionOrigin = "https://auth.eruoo.me"
 const productionWorkerName = "eruoo-server-production"
 const expectedDeployProductionScript = "tsx scripts/deploy-production.ts"
+const expectedReleasePreflightScript =
+  "pnpm run openapi:check && pnpm run build && tsx scripts/release-preflight.ts && pnpm run bundle:check && pnpm run startup:check"
 const expectedDeployProductionCommands = [
   "pnpm run release:preflight",
   "pnpm exec wrangler d1 migrations apply DB --remote --env production --config wrangler.jsonc",
@@ -106,9 +111,17 @@ const sourceConfig = unstable_readConfig(
 )
 const packageManifest = z
   .object({
-    scripts: z.object({ "deploy:production": z.string() }),
+    scripts: z.object({
+      "deploy:production": z.string(),
+      "release:preflight": z.string(),
+    }),
+    version: z.string().min(1),
   })
   .parse(JSON.parse(await readFile("package.json", "utf8")))
+const openApiDocument = z
+  .object({ info: z.object({ version: z.string().min(1) }) })
+  .parse(JSON.parse(await readFile("docs/openapi.json", "utf8")))
+const changelog = await readFile("CHANGELOG.md", "utf8")
 const defaultEnvironmentConfig = unstable_readConfig(
   { config: "wrangler.jsonc" },
   { hideWarnings: true },
@@ -151,12 +164,24 @@ const configuredSecrets = (sourceConfig.secrets?.required ?? []).filter(
 )
 
 check(
+  packageManifest.scripts["release:preflight"] ===
+    expectedReleasePreflightScript,
+  "release:preflight must check OpenAPI drift before building and validating the production artifact.",
+)
+check(
   packageManifest.scripts["deploy:production"] ===
     expectedDeployProductionScript &&
     productionDeployCommands
       .map((command) => `${command.executable} ${command.args.join(" ")}`)
       .join("\n") === expectedDeployProductionCommands.join("\n"),
   "deploy:production must use the tested preflight, remote migration, generated-config deployment sequence.",
+)
+failures.push(
+  ...validateReleaseVersionIdentity({
+    changelog,
+    openApiVersion: openApiDocument.info.version,
+    packageVersion: packageManifest.version,
+  }),
 )
 
 check(

@@ -1,6 +1,8 @@
 const d1IdPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const accountIdPattern = /^[0-9a-f]{32}$/i
+const stableSemanticVersionPattern =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u
 
 export const requiredProductionSecrets = [
   "AUDIT_IP_HASH_SECRET",
@@ -9,6 +11,8 @@ export const requiredProductionSecrets = [
   "GITHUB_CLIENT_ID",
   "GITHUB_CLIENT_SECRET",
 ] as const
+
+const releaseRepositoryUrl = "https://github.com/eruoo/server"
 
 function hasExactSet(
   actual: readonly string[],
@@ -77,6 +81,51 @@ export function validateReleaseBindingIdentity(options: {
   if (!hasExactSet(options.generatedSecrets, requiredProductionSecrets)) {
     failures.push(
       "The generated required-secret manifest does not match the release contract.",
+    )
+  }
+
+  return failures
+}
+
+export function validateReleaseVersionIdentity(options: {
+  changelog: string
+  openApiVersion: string
+  packageVersion: string
+}): string[] {
+  const failures: string[] = []
+  const changelogLines = new Set(options.changelog.split(/\r?\n/u))
+
+  if (!stableSemanticVersionPattern.test(options.packageVersion)) {
+    failures.push(
+      "package.json version must be a stable MAJOR.MINOR.PATCH Semantic Version.",
+    )
+  }
+  if (options.openApiVersion !== options.packageVersion) {
+    failures.push(
+      "The OpenAPI document version must exactly match package.json.",
+    )
+  }
+  if (!changelogLines.has(`## [${options.packageVersion}]`)) {
+    failures.push(
+      "CHANGELOG.md must contain a release heading for the package version.",
+    )
+  }
+  if (
+    !changelogLines.has(
+      `[Unreleased]: ${releaseRepositoryUrl}/compare/v${options.packageVersion}...HEAD`,
+    )
+  ) {
+    failures.push(
+      "CHANGELOG.md must compare Unreleased changes from the package version tag.",
+    )
+  }
+  if (
+    !changelogLines.has(
+      `[${options.packageVersion}]: ${releaseRepositoryUrl}/releases/tag/v${options.packageVersion}`,
+    )
+  ) {
+    failures.push(
+      "CHANGELOG.md must link the package version to its matching release tag.",
     )
   }
 
