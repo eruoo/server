@@ -61,8 +61,8 @@ node --input-type=module -e "import { randomBytes } from 'node:crypto'; console.
 | 配置                                                               | 生产来源与存放位置                                                                                                                                                                                                     |
 | ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `APP_ENV`、`APP_ORIGIN`、`OWNER_GITHUB_ID`、`ALLOWED_CORS_ORIGINS` | 非敏感值已提交在 `wrangler.jsonc#env.production.vars`。`APP_ORIGIN` 固定为 `https://auth.eruoo.me`。                                                                                                                   |
-| `CF_ACCOUNT_ID`                                                    | 从 Cloudflare Dashboard 的账号信息或 `pnpm exec wrangler whoami --json` 读取；取得稳定值后提交到 production vars。                                                                                                     |
-| D1 binding `database_id` 与 `D1_DATABASE_ID`                       | 从获准创建的 production D1 输出或 `pnpm exec wrangler d1 list --json` 读取。两处必须填写同一个 UUID 并提交。                                                                                                           |
+| `CF_ACCOUNT_ID`                                                    | 已从当前生产 Cloudflare account 确认；权威值只维护在 `wrangler.jsonc#env.production.vars`，默认本地环境仍保持为空。                                                                                                    |
+| D1 binding `database_id` 与 `D1_DATABASE_ID`                       | 已从 production D1 `eruoo-server` 确认；权威 UUID 只维护在 `wrangler.jsonc#env.production`，发布门禁确保两处一致，默认本地 binding 仍不连接远端。                                                                      |
 | R2 bucket                                                          | 创建获准的私有 bucket `eruoo-server-backups` 后保持 `wrangler.jsonc` 中的 binding 名称一致；bucket 名不是 Secret。                                                                                                     |
 | `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`                         | 来自独立的生产 GitHub OAuth App，Homepage URL 使用 `https://auth.eruoo.me`，callback 精确使用 `https://auth.eruoo.me/api/auth/callback/github`。                                                                       |
 | `BETTER_AUTH_SECRETS`、`AUDIT_IP_HASH_SECRET`                      | 为生产重新生成，不能复用本地值。Better Auth 继续使用版本化格式，审计 Secret 单独生成。                                                                                                                                 |
@@ -80,7 +80,9 @@ pnpm exec wrangler secret put D1_EXPORT_API_TOKEN --env production --config wran
 
 这些命令会修改远端 Worker，不属于本地启动步骤。Wrangler 会交互式读取值，不要把 Secret 直接写进命令行参数或 shell 历史。
 
-Workers Builds 的 API token 和 `Settings > Environment variables` 中的 build variables/secrets 只在构建及部署阶段可用，运行时不可见。生产运行时的五个 Secret 仍必须放在 Worker 的 `Settings > Variables & Secrets` 或通过 `wrangler secret put` 写入。Workers Builds 的自定义部署 token 还要具备严格部署所需权限和 production D1 的 `D1 Edit`，因为发布流程会先应用远端 migration；它与只供运行时导出的 `D1_EXPORT_API_TOKEN` 必须分离。详见 [Cloudflare Workers Builds 配置文档](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#build-variables-and-secrets)。
+Workers Builds 的 API token 和 `Settings > Environment variables` 中的 build variables/secrets 只在构建及部署阶段可用，运行时不可见。生产运行时的五个 Secret 仍必须放在 Worker 的 `Settings > Variables & Secrets` 或通过 `wrangler secret put` 写入。production trigger 的自定义部署 token 还要具备严格部署所需权限和 production D1 的 `D1 Edit`，因为发布流程会先应用远端 migration；它不得提供给普通分支 build，并与只供运行时导出的 `D1_EXPORT_API_TOKEN` 分离。详见 [Cloudflare Workers Builds 配置文档](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#build-variables-and-secrets)。
+
+Workers Builds 必须设置非 Secret build variables `NODE_VERSION=24.18.0`、`PNPM_VERSION=11.22.0` 和 `SKIP_DEPENDENCY_INSTALL=1`。前两项分别与 `.node-version` 和 `package.json#packageManager` 对齐；最后一项避免平台自动安装依赖后，固定 build command 又执行一次 frozen install。完整的外部接线、production 分支和验收顺序见[生产发布](./releasing.md)。
 
 ## 本地 D1
 
@@ -140,7 +142,7 @@ pnpm run check
 
 这些命令不得创建或修改远端 D1、R2、Worker、Workflow 或 Secret。生产资源建立、migration 与 deployment 使用 foundation 第 22.3 节定义的独立命令，并遵守第 27 节的 owner 授权门禁。
 
-`pnpm run release:preflight` 也是只读检查，但会严格要求生产 D1 ID、Cloudflare account ID、正式域名、required-secret manifest 和生成后的 production 配置全部一致。当前远端资源尚未建立，所以该命令预期失败；它用于阻止 Wrangler 自动创建空数据库后误发布未迁移的 Worker。
+`pnpm run release:preflight` 也是只读检查，会严格要求已提交的 production D1 ID、Cloudflare account ID、正式域名、required-secret manifest 和生成后的 production 配置全部一致。它只验证 Secret 名称清单，不读取远端 Secret 值；任何本地成功都不构成生产部署授权。
 
 ## 本地备份与恢复验证
 
@@ -161,4 +163,4 @@ pnpm run db:restore:plan -- \
 
 ## 生产发布门禁
 
-`pnpm run deploy:production` 固定按以下顺序执行并在任一步失败时停止：`release:preflight`、production D1 migration、从已生成 production 配置执行严格 Wrangler deploy。它是为受控 Workers Builds production branch 准备的编排入口，不是本地验收命令；Workers Builds 必须使用目标账号范围内、同时具备严格部署所需权限和 D1 Edit 的自定义最小权限 token。只有 owner 对精确 commit 给出当次生产部署授权后才能真实执行。
+`pnpm run deploy:production` 会在每个步骤前确认 Workers Builds branch 为 `production`，且平台注入的完整 commit SHA、checkout 的 `HEAD` 与 GitHub 上受保护的远端 `production` ref 三者一致，同时要求源码工作区干净，然后固定按以下顺序执行并在任一步失败时停止：`release:preflight`、production D1 migration、从已生成 production 配置执行严格 Wrangler deploy。Worker deploy 返回后还会再次校验同一上下文，末次校验失败时整个 build 失败且不得打 tag。`WORKERS_CI_*` 只提供执行上下文，不能替代远端分支保护和隔离的部署 token；上一个 production build 结束前不得再次推进分支。该命令不是本地验收命令；Workers Builds 必须使用目标账号范围内、同时具备严格部署所需权限和 D1 Edit 的自定义最小权限 token。只有 owner 对精确 commit 给出当次生产部署授权后才能真实执行，具体流程见[生产发布](./releasing.md)。

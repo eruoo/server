@@ -33,8 +33,16 @@ pnpm run check
 
 `check` is read-only with respect to remote Cloudflare resources. Database
 migrations and deployment use separate, explicit commands. The independent
-`release:preflight` command intentionally fails until production resource IDs
-have been configured; it does not create or deploy those resources.
+`release:preflight` command validates the committed production resource IDs and
+generated deployment configuration without reading remote Secrets, applying
+migrations, or deploying resources.
+
+## Releases
+
+Production releases use the protected `production` branch and Cloudflare
+Workers Builds. See [`docs/releasing.md`](./docs/releasing.md) for the complete
+release, acceptance, tag, and failure-handling workflow. User-visible changes
+are recorded in [`CHANGELOG.md`](./CHANGELOG.md).
 
 ## License
 
