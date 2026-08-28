@@ -27,7 +27,7 @@
 
 ## Workers Builds 配置
 
-从现有 Worker `eruoo-server-production` 的 `Settings > Builds > Connect` 连接 `eruoo/server`，不要通过“创建应用程序”导入成另一个 Worker。如果 Cloudflare 提议修改 `wrangler.jsonc` 或重命名 Worker，停止接线并先审查差异。
+按照 [Cloudflare 的现有 Worker 接线流程](https://developers.cloudflare.com/workers/ci-cd/builds/#connect-an-existing-worker)，从 Worker `eruoo-server-production` 的 `Settings > Builds > Connect` 连接 `eruoo/server`，不要通过“创建应用程序”导入成另一个 Worker。如果 Cloudflare 提议修改 `wrangler.jsonc` 或重命名 Worker，停止接线并先审查差异。
 
 | 设置                          | 值                                                                                          |
 | ----------------------------- | ------------------------------------------------------------------------------------------- |
@@ -47,11 +47,13 @@ SKIP_DEPENDENCY_INSTALL=1
 
 `NODE_VERSION` 与 `.node-version` 对齐，`PNPM_VERSION` 与 `package.json#packageManager` 对齐。`SKIP_DEPENDENCY_INSTALL=1` 禁用平台自动 dependency install，依赖只由 build command 的 frozen install 安装一次。
 
-production trigger 使用独立的 user API token：Account Settings Read、Workers Scripts Edit、Workers R2 Storage Edit、D1 Edit，以及只限定 `eruoo.me` 的 Workers Routes Edit；保留 Wrangler 认证需要的 User Details Read 和 Memberships Read。不要加入未使用的 KV 权限，不得复用运行时 `D1_EXPORT_API_TOKEN`。Cloudflare 权限名称可能变化，首次接线和重要平台升级前必须以官方文档复核。
+production trigger 使用独立的 user API token：Account Settings Read、Workers Scripts Edit、Workers R2 Storage Edit、D1 Edit，以及只限定 `eruoo.me` 的 Workers Routes Edit；保留 Wrangler 认证需要的 User Details Read 和 Memberships Read。不要加入未使用的 KV 权限，不得复用运行时 `D1_EXPORT_API_TOKEN`。当前锁定的 Wrangler 4.124.0 会在包含 Custom Domain 的部署前读取目标 zone 的现有 Workers Routes 以检查冲突，因此该 zone 权限仍然必要，但不得扩大到其他 zone。Cloudflare 权限名称或 Wrangler 行为可能变化，首次接线和重要平台升级前必须以 [Workers Routes API](https://developers.cloudflare.com/api/resources/workers/subresources/routes/methods/list/) 和当前版本实现复核。
 
 默认关闭 non-production branch builds。普通分支中的仓库脚本不能接触上面的生产级 token；只有另建不含 production D1、Worker、Secret、route 或其他生产写权限的 preview trigger/token 后，才能启用非生产构建，并把 non-production deploy command 固定为 `pnpm run bundle:check`。如果 Cloudflare 无法为 preview trigger 隔离 token，就继续关闭该功能。
 
-不要在自定义 Build variables 中定义或覆盖 `WORKERS_CI`、`WORKERS_CI_BRANCH`、`WORKERS_CI_COMMIT_SHA`。这些变量只提供执行上下文，不是平台身份证明；实际授权边界是受保护的远端 `production` 分支与只交给 production trigger 的部署 token。`deploy:production` 会在执行任何命令前确认平台注入的 branch 为 `production`，并校验注入的完整 commit SHA、checkout 的 `HEAD` 和 GitHub 上 `eruoo/server` 的 `refs/heads/production` 三者一致，同时要求源码工作区干净；不匹配时停止，不执行 migration 或 deploy。如果 Cloudflare 页面不允许只保存而不部署，在最终生产授权前保持未连接；“Save and Deploy” 视为首次生产部署操作。
+不要在自定义 Build variables 中定义或覆盖 `WORKERS_CI`、`WORKERS_CI_BRANCH`、`WORKERS_CI_COMMIT_SHA`。这些变量只提供执行上下文，不是平台身份证明；实际授权边界是受保护的远端 `production` 分支与只交给 production trigger 的部署 token。`deploy:production` 会在执行任何命令前确认平台注入的 branch 为 `production`，并校验注入的完整 commit SHA、checkout 的 `HEAD` 和 GitHub 上 `eruoo/server` 的 `refs/heads/production` 三者一致，同时要求源码工作区干净；不匹配时停止，不执行 migration 或 deploy。
+
+完成现有 Worker 的 Connect 流程并保存 Build settings；按照 [Cloudflare 的配置语义](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)，保存后的设置从下一次 build 起生效，本身不应部署 Worker。保存后确认 Build history 没有新增 build，Active Deployment 没有变化。在此流程中如果页面出现 “Save and Deploy”、“Deploy now” 或其他会立即触发 build/deploy 的操作，停止且不要点击，先记录页面状态并重新核对当前平台流程。
 
 一次只允许一个 production build 进入部署流程。上一个 build 完成或明确失败前，不得再次推进 `production`。deploy 入口会在 preflight、migration 和 Worker deploy 每一步前重新读取并校验远端 `production` ref，并在 Worker deploy 返回后再校验一次；分支在流程中变化时，下一步或最终构建结果会停止。最终校验失败时不得打 tag，必须按本文故障流程核对 Active Deployment。
 
@@ -78,12 +80,15 @@ production trigger 使用独立的 user API token：Account Settings Read、Work
 
 - production GitHub OAuth App 使用 Homepage `https://auth.eruoo.me` 和精确 callback `https://auth.eruoo.me/api/auth/callback/github`。
 - Worker `eruoo-server-production` 已存在，且五个 required runtime Secrets 已写入。
+- 现有 Worker 已完成 Workers Builds 接线并保存配置；production branch、命令、variables 和 token 均与本文一致，保存时没有触发 build 或改变 Active Deployment。
 - Workers Builds 的 production token 与运行时 D1 export token 分离，且 non-production branch builds 保持关闭或使用无生产写权限的独立 token。
 - `eruoo.me` zone 为 Active，`auth.eruoo.me` 没有冲突的 A、AAAA 或 CNAME；不要预先手工创建 Custom Domain DNS 记录。
 - R2 bucket 保持私有，未启用 `r2.dev`、公开 Custom Domain 或浏览器 CORS；180 天 lifecycle 已启用。
 - 当前 `production` 尚未被未授权推进，准备发布的完整 `main` SHA 已取得 owner 当次授权。
 
 ## 触发生产部署
+
+Workers Builds 必须已经按上文连接到现有 Worker 并保存配置。再次确认 Build history 和 Active Deployment 没有因接线而变化，然后取得 owner 对精确 `main` commit 的当次部署授权。不要先推进 `production` 再接线，也不要通过 Dashboard 手动触发首次 build；下面这一次获准的 `production` fast-forward push 是首次 production build 的唯一触发器。
 
 只有 `LoTwT` 执行：
 
@@ -100,7 +105,7 @@ git switch main
 
 执行前把 `<AUTHORIZED_MAIN_SHA>` 替换为 owner 已授权的完整 `main` SHA。不要直接合并当时的 `origin/main`，因为它可能在授权后继续前进并包含尚未获准部署的 commit。
 
-若 Builds 尚未连接，先在没有 trigger 的情况下完成 `production` fast-forward，再连接现有 Worker 并点击 “Save and Deploy”。若 Builds 已连接，push 会自动触发 production build。
+push 成功后应自动出现且只出现一个 production build。若没有触发、触发了多个 build，或 build 对应的 branch/SHA 与授权值不一致，停止后续操作并按故障流程检查；不得点击 Dashboard 中的手动部署按钮补偿。
 
 `pnpm run deploy:production` 固定执行：
 
