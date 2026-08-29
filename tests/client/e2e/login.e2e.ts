@@ -5,6 +5,7 @@ import {
   e2eBootstrapPath,
   e2eBootstrapToken,
   e2eCurrentSessionPath,
+  e2eOrigin,
   e2eStaleSessionPath,
 } from "./support"
 
@@ -208,10 +209,7 @@ test("the owner can register, use, reauthenticate with, and delete a Passkey", a
         status: 200,
       })
     })
-    const authorizationUrl = new URL(
-      "/api/auth/oauth2/authorize",
-      "http://localhost:5173",
-    )
+    const authorizationUrl = new URL("/api/auth/oauth2/authorize", e2eOrigin)
     authorizationUrl.searchParams.set("client_id", "eruoo-desktop")
     authorizationUrl.searchParams.set("code_challenge", challenge)
     authorizationUrl.searchParams.set("code_challenge_method", "S256")
@@ -241,7 +239,7 @@ test("the owner can register, use, reauthenticate with, and delete a Passkey", a
     const callbackUrl = new URL(page.url())
     const authorizationCode = callbackUrl.searchParams.get("code")
     expect(authorizationCode).toMatch(/\S+/)
-    expect(callbackUrl.searchParams.get("iss")).toBe("http://localhost:5173")
+    expect(callbackUrl.searchParams.get("iss")).toBe(e2eOrigin)
     expect(callbackUrl.searchParams.get("state")).toBe(oauthState)
 
     if (!authorizationCode) {
