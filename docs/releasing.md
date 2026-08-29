@@ -7,7 +7,7 @@
 - `eruoos` 只在功能分支创建 commit 和 PR。
 - `LoTwT` review、approve、squash merge 到 `main`，并且是唯一允许更新 `production` 的 release actor。
 - `production` 只能 fast-forward 到已经审查的 `main` commit；禁止 merge commit、force push 和删除分支。
-- 普通 `main` merge、通过本地门禁或创建 PR 都不构成生产部署授权。
+- 普通 `main` merge、通过本地门禁、PR check 或 GitHub CI 成功都不构成生产部署授权。
 - 更新 `production`、连接 Workers Builds、部署 Worker、创建 Custom Domain、写入真实 Secret、创建 tag 或 GitHub Release 前，都需要 owner 对当次精确对象明确授权。
 
 ## 稳定生产标识
@@ -25,17 +25,25 @@
 
 生产 Secret 的来源、格式和写入命令由[本地开发的生产变量与 Secret](./development.md#生产变量与-secret)维护。Secret 值不得进入仓库、PR、issue、聊天、命令参数或构建日志。
 
+## GitHub CI 与 production status gate
+
+`.github/workflows/check.yml` 使用稳定 job 名 `check`，只监听指向 `main` 的 pull request 和 `main` push。它以只读仓库权限固定 Node.js 24.18.0，并从 `package.json#packageManager` 读取带完整性声明的 pnpm 版本，依次执行 frozen install、`pnpm exec playwright install --with-deps chromium` 和完整 `pnpm run check`；不得使用 `pull_request_target`、读取生产 Secret 或 Cloudflare token、执行远端 migration/deploy、监听 `production` 或使用 path filter 跳过 required check。
+
+PR run 只提供合入前反馈。squash merge 会产生新的 commit，所以发布候选必须等待 `main` push 对最终完整 SHA 产生 conclusion 为 `success` 的 `check`。`production` 的 required status check 固定为 `check`，期望来源限定为 GitHub Actions，并位于没有 bypass actor 的 ruleset；LoTwT 的 release actor 权限不得绕过这一门禁。GitHub 的 required status 名称使用 job name，不能改用 workflow 文件名或近似名称。
+
+只有上述 workflow 首次成功运行后，GitHub 才能在 ruleset 中选择其真实 status source。配置或修改该 ruleset 是外部操作，必须取得 owner 当次授权；配置完成后通过 GitHub 页面或 API 只读复核 Active 状态、目标 `production`、精确 status 名、expected source 和空 bypass 列表。
+
 ## Workers Builds 配置
 
 按照 [Cloudflare 的现有 Worker 接线流程](https://developers.cloudflare.com/workers/ci-cd/builds/#connect-an-existing-worker)，从 Worker `eruoo-server-production` 的 `Settings > Builds > Connect` 连接 `eruoo/server`，不要通过“创建应用程序”导入成另一个 Worker。如果 Cloudflare 提议修改 `wrangler.jsonc` 或重命名 Worker，停止接线并先审查差异。
 
-| 设置                          | 值                                                                                          |
-| ----------------------------- | ------------------------------------------------------------------------------------------- |
-| Production branch             | `production`                                                                                |
-| Root directory                | `/`                                                                                         |
-| Build command                 | `pnpm install --frozen-lockfile && pnpm exec playwright install chromium && pnpm run check` |
-| Production deploy command     | `pnpm run deploy:production`                                                                |
-| Non-production deploy command | `pnpm run bundle:check`                                                                     |
+| 设置                          | 值                               |
+| ----------------------------- | -------------------------------- |
+| Production branch             | `production`                     |
+| Root directory                | `/`                              |
+| Build command                 | `pnpm install --frozen-lockfile` |
+| Production deploy command     | `pnpm run deploy:production`     |
+| Non-production deploy command | `pnpm run bundle:check`          |
 
 设置以下非 Secret build variables：
 
@@ -45,9 +53,13 @@ PNPM_VERSION=11.22.0
 SKIP_DEPENDENCY_INSTALL=1
 ```
 
-`NODE_VERSION` 与 `.node-version` 对齐，`PNPM_VERSION` 与 `package.json#packageManager` 对齐。`SKIP_DEPENDENCY_INSTALL=1` 禁用平台自动 dependency install，依赖只由 build command 的 frozen install 安装一次。
+`NODE_VERSION` 与 `.node-version` 对齐，`PNPM_VERSION` 与 `package.json#packageManager` 对齐。`SKIP_DEPENDENCY_INSTALL=1` 禁用平台自动 dependency install，依赖只由 build command 的 frozen install 安装一次。Workers Builds 不安装 Playwright 系统依赖，也不重复完整 CI；production artifact、binding 和启动门禁仍由 `deploy:production` 的首个 `release:preflight` 执行，成功后才允许 migration。
 
 production trigger 使用独立的 user API token：Account Settings Read、Workers Scripts Edit、Workers R2 Storage Edit、D1 Edit，以及只限定 `eruoo.me` 的 Workers Routes Edit；保留 Wrangler 认证需要的 User Details Read 和 Memberships Read。不要加入未使用的 KV 权限，不得复用运行时 `D1_EXPORT_API_TOKEN`。当前锁定的 Wrangler 4.124.0 会在包含 Custom Domain 的部署前读取目标 zone 的现有 Workers Routes 以检查冲突，因此该 zone 权限仍然必要，但不得扩大到其他 zone。Cloudflare 权限名称或 Wrangler 行为可能变化，首次接线和重要平台升级前必须以 [Workers Routes API](https://developers.cloudflare.com/api/resources/workers/subresources/routes/methods/list/) 和当前版本实现复核。
+
+当前首次接线存在一项 owner 已明确接受的临时例外：production trigger 选中的 `eruoo-server-production-build` 是由 Cloudflare “Create new token” 自动创建的 token，暂时保留平台自动加入的额外权限；未被 trigger 选中的 `eruoo-server-production-deploy` 暂留，等待后续单独决定。该状态不代表最小权限已经完成。在首次成功部署和验收前，non-production branch builds 必须保持关闭，build token 只能用于这个 production trigger，不得复制到 GitHub 或其他项目；首次部署完成后必须重新取得 owner 授权，收敛 build token 权限并决定旧 token 的保留或删除，不能自动删除任何 token。
+
+GitHub Actions 不需要也不得取得该 token。生产部署凭证继续只保存在 Workers Builds trigger 中，不能以 GitHub CI 已通过为由复制到 GitHub Secrets。
 
 默认关闭 non-production branch builds。普通分支中的仓库脚本不能接触上面的生产级 token；只有另建不含 production D1、Worker、Secret、route 或其他生产写权限的 preview trigger/token 后，才能启用非生产构建，并把 non-production deploy command 固定为 `pnpm run bundle:check`。如果 Cloudflare 无法为 preview trigger 隔离 token，就继续关闭该功能。
 
@@ -69,10 +81,10 @@ production trigger 使用独立的 user API token：Account Settings Read、Work
    pnpm run check
    ```
 
-5. 检查 staged diff 和 Secret 扫描结果，创建 PR，由 `LoTwT` approve 并 squash merge 到 `main`。
-6. 记录合并后的完整 `main` SHA。squash merge 会创建新 SHA，不能继续使用功能分支 commit。
+5. 检查 staged diff 和 Secret 扫描结果，创建 PR，由 `LoTwT` approve 并 squash merge 到 `main`。PR run 通过不能替代下一步。
+6. 记录合并后的完整 `main` SHA。squash merge 会创建新 SHA，不能继续使用功能分支 commit；等待该 SHA 的 GitHub Actions `check` conclusion 精确为 `success`，缺失、排队、进行中、跳过、取消或失败都不得推进 `production`。
 
-`release:preflight` 只验证 source/generated production 配置和 required-secret 名称清单，不读取远端 Secret，也不证明 Worker、OAuth App、DNS 或 Builds trigger 已正确接线。
+`release:preflight` 只验证 source/generated production 配置和 required-secret 名称清单，不读取远端 Secret，也不证明 Worker、OAuth App、DNS、GitHub status gate 或 Builds trigger 已正确接线。GitHub Actions 的完整 `check` 证明仓库门禁在该 commit 上成功，但不构成 owner 的生产部署授权。
 
 ## 首次生产接线门禁
 
@@ -80,15 +92,16 @@ production trigger 使用独立的 user API token：Account Settings Read、Work
 
 - production GitHub OAuth App 使用 Homepage `https://auth.eruoo.me` 和精确 callback `https://auth.eruoo.me/api/auth/callback/github`。
 - Worker `eruoo-server-production` 已存在，且五个 required runtime Secrets 已写入。
-- 现有 Worker 已完成 Workers Builds 接线并保存配置；production branch、命令、variables 和 token 均与本文一致，保存时没有触发 build 或改变 Active Deployment。
-- Workers Builds 的 production token 与运行时 D1 export token 分离，且 non-production branch builds 保持关闭或使用无生产写权限的独立 token。
+- `.github/workflows/check.yml` 已在最终 `main` commit 上产生成功的 `check`，`production` 的 required status ruleset 为 Active、expected source 是 GitHub Actions 且没有 bypass actor。
+- 现有 Worker 已完成 Workers Builds 接线并保存配置；production branch、命令和 variables 均与本文一致，保存时没有触发 build 或改变 Active Deployment。
+- Workers Builds 的 production token 与运行时 D1 export token 分离；当前 broad-token 临时例外已按上文记录，non-production branch builds 必须保持关闭，且未选中的旧 token 不得被误用。
 - `eruoo.me` zone 为 Active，`auth.eruoo.me` 没有冲突的 A、AAAA 或 CNAME；不要预先手工创建 Custom Domain DNS 记录。
 - R2 bucket 保持私有，未启用 `r2.dev`、公开 Custom Domain 或浏览器 CORS；180 天 lifecycle 已启用。
 - 当前 `production` 尚未被未授权推进，准备发布的完整 `main` SHA 已取得 owner 当次授权。
 
 ## 触发生产部署
 
-Workers Builds 必须已经按上文连接到现有 Worker 并保存配置。再次确认 Build history 和 Active Deployment 没有因接线而变化，然后取得 owner 对精确 `main` commit 的当次部署授权。不要先推进 `production` 再接线，也不要通过 Dashboard 手动触发首次 build；下面这一次获准的 `production` fast-forward push 是首次 production build 的唯一触发器。
+Workers Builds 必须已经按上文连接到现有 Worker 并保存配置。再次确认 Build history 和 Active Deployment 没有因接线而变化，确认最终 `main` SHA 的 GitHub Actions `check` 为 `success` 且 production ruleset 会强制该结果，然后取得 owner 对同一精确 commit 的当次部署授权。不要先推进 `production` 再完成 CI/status gate 接线，也不要通过 Dashboard 手动触发其他 branch/SHA 的 build 或直接 deploy；下面这一次获准的 `production` fast-forward push 是该候选 SHA 初始 production build 的唯一触发器。只有本文故障流程明确允许、精确 SHA 和代码均未变化并重新取得 owner 授权时，才可重试同一个失败 build。
 
 只有 `LoTwT` 执行：
 
@@ -103,9 +116,9 @@ git push origin HEAD:production
 git switch main
 ```
 
-执行前把 `<AUTHORIZED_MAIN_SHA>` 替换为 owner 已授权的完整 `main` SHA。不要直接合并当时的 `origin/main`，因为它可能在授权后继续前进并包含尚未获准部署的 commit。
+执行前把 `<AUTHORIZED_MAIN_SHA>` 替换为 GitHub Actions `check` 已成功且 owner 已授权的完整 `main` SHA。不要直接合并当时的 `origin/main`，因为它可能在授权后继续前进并包含尚未获准部署的 commit。ruleset 是服务端强制边界，人工复核 status 是发布操作门禁；两者都必须存在。
 
-push 成功后应自动出现且只出现一个 production build。若没有触发、触发了多个 build，或 build 对应的 branch/SHA 与授权值不一致，停止后续操作并按故障流程检查；不得点击 Dashboard 中的手动部署按钮补偿。
+push 成功后应自动出现且只出现一个 production build。若没有触发、触发了多个 build，或 build 对应的 branch/SHA 与授权值不一致，停止后续操作并按故障流程检查；不得选择其他 branch/SHA 或点击直接部署按钮补偿，同一失败 build 的受控重试只能遵守下文例外。
 
 `pnpm run deploy:production` 固定执行：
 
@@ -119,7 +132,7 @@ release:preflight
 
 ## 上线验收
 
-Cloudflare build 详情中的 branch 必须是 `production`，commit SHA 必须等于获准 SHA，deploy 入口必须通过远端 `production` ref 校验。构建日志必须显示 frozen install、Playwright Chromium、完整 `pnpm run check`、release preflight、D1 migration 和 strict Worker deploy 均成功，且日志中没有 Secret。
+GitHub Actions 中最终 `main` SHA 对应的 `check` 必须为 `success`，日志显示 frozen install、`playwright install --with-deps chromium` 和完整 `pnpm run check` 均成功，且没有读取生产 Secret、Cloudflare token 或执行 deploy。Cloudflare build 详情中的 branch 必须是 `production`，commit SHA 必须等于同一获准 SHA，deploy 入口必须通过远端 `production` ref 校验；Cloudflare 日志显示 frozen install、release preflight、D1 migration 和 strict Worker deploy 均成功。两边日志都不得包含 Secret。
 
 随后确认：
 
@@ -141,7 +154,8 @@ tag、GitHub Release 和 package version 不一致时停止发布；不得通过
 
 ## 失败处理
 
-- Build、`check` 或 preflight 失败：没有执行 migration 或 deploy；修复 `main` 后重新走 PR。
+- GitHub Actions `check` 缺失、跳过、取消或失败：required status gate 必须阻止 `production` 更新；修复 `main` 后重新走 PR，不能通过 Dashboard 手动部署补偿。
+- Workers Builds frozen install 或 release preflight 失败：没有执行 migration 或 deploy。若根因在仓库，修复 `main` 后重新走 PR；若根因是 Cloudflare Build setting，取得 owner 授权后修改并只读回查，无须制造无意义的代码 PR。仅外部瞬时故障或已获准的 Build setting 修正、代码与精确 SHA 均未变化时，才可在重新核对 SHA、ruleset、Active Deployment 并取得 owner 对本次重试的明确授权后重试同一失败 build。
 - Migration 失败：deploy 自动停止；检查远端 migration ledger，不修改已应用 migration，不删除或重建 production D1。
 - Migration 成功但 Worker deploy 失败：D1 可能已升级而 Worker 仍是旧版本；保持向后兼容，修复配置后重试同一已审查 commit，代码变化则走新 PR。
 - Worker deploy 成功但最终远端 ref 校验失败：不得打 tag；核对 Active Deployment 与当前 `production` 的完整 SHA。等待当前 `production` 的获准 build 成功，或对该精确 commit 重新取得部署授权后再恢复一致，不能用强推或移动公开 tag 掩盖漂移。

@@ -10,6 +10,7 @@ import {
   e2eBootstrapPath,
   e2eBootstrapToken,
   e2eCurrentSessionPath,
+  e2eOrigin,
   e2eStaleSessionPath,
 } from "../client/e2e/support"
 import { splitD1MigrationStatements } from "./e2e-migrations"
@@ -30,6 +31,22 @@ const migrationModules = import.meta.glob<string>("../../migrations/*.sql", {
   import: "default",
   query: "?raw",
 })
+const e2eEnvironmentBySource = new WeakMap<object, E2EEnv>()
+
+function getE2EEnvironment(env: E2EEnv): E2EEnv {
+  const cached = e2eEnvironmentBySource.get(env)
+  if (cached) return cached
+
+  const normalized = new Proxy(env, {
+    get(target, property, receiver) {
+      return property === "APP_ORIGIN"
+        ? e2eOrigin
+        : Reflect.get(target, property, receiver)
+    },
+  })
+  e2eEnvironmentBySource.set(env, normalized)
+  return normalized
+}
 
 function toHex(bytes: ArrayBuffer): string {
   return [...new Uint8Array(bytes)]
@@ -341,17 +358,18 @@ async function staleCurrentSession(
 
 export default {
   async fetch(request, env, context) {
+    const e2eEnv = getE2EEnvironment(env)
     const url = new URL(request.url)
     const isAuthorizedFixture =
       request.headers.get("x-e2e-bootstrap-token") === e2eBootstrapToken &&
-      env.E2E_BOOTSTRAP_TOKEN === e2eBootstrapToken
+      e2eEnv.E2E_BOOTSTRAP_TOKEN === e2eBootstrapToken
 
     if (
       isAuthorizedFixture &&
       request.method === "POST" &&
       url.pathname === e2eBootstrapPath
     ) {
-      return bootstrapOwner(env)
+      return bootstrapOwner(e2eEnv)
     }
 
     if (
@@ -359,7 +377,7 @@ export default {
       request.method === "POST" &&
       url.pathname === e2eStaleSessionPath
     ) {
-      return staleCurrentSession(request, env)
+      return staleCurrentSession(request, e2eEnv)
     }
 
     if (
@@ -367,9 +385,9 @@ export default {
       request.method === "GET" &&
       url.pathname === e2eCurrentSessionPath
     ) {
-      return readCurrentSession(request, env)
+      return readCurrentSession(request, e2eEnv)
     }
 
-    return productionWorker.fetch(request, env, context)
+    return productionWorker.fetch(request, e2eEnv, context)
   },
 } satisfies ExportedHandler<E2EEnv>

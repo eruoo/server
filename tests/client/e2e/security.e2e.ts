@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test"
 import type { BrowserContext, Page } from "@playwright/test"
 
-import { e2eBootstrapPath, e2eBootstrapToken } from "./support"
+import { e2eBootstrapPath, e2eBootstrapToken, e2eOrigin } from "./support"
 
 interface E2EBootstrapPayload {
   cookie: Parameters<BrowserContext["addCookies"]>[0][number]
@@ -142,7 +142,7 @@ test("the owner can copy a newly created API Key by keyboard or button", async (
   page,
 }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"], {
-    origin: "http://localhost:5173",
+    origin: e2eOrigin,
   })
   await bootstrapOwner(context)
   await page.goto("/")

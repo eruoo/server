@@ -82,7 +82,9 @@ pnpm exec wrangler secret put D1_EXPORT_API_TOKEN --env production --config wran
 
 Workers Builds 的 API token 和 `Settings > Environment variables` 中的 build variables/secrets 只在构建及部署阶段可用，运行时不可见。生产运行时的五个 Secret 仍必须放在 Worker 的 `Settings > Variables & Secrets` 或通过 `wrangler secret put` 写入。production trigger 的自定义部署 token 还要具备严格部署所需权限和 production D1 的 `D1 Edit`，因为发布流程会先应用远端 migration；它不得提供给普通分支 build，并与只供运行时导出的 `D1_EXPORT_API_TOKEN` 分离。详见 [Cloudflare Workers Builds 配置文档](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#build-variables-and-secrets)。
 
-Workers Builds 必须设置非 Secret build variables `NODE_VERSION=24.18.0`、`PNPM_VERSION=11.22.0` 和 `SKIP_DEPENDENCY_INSTALL=1`。前两项分别与 `.node-version` 和 `package.json#packageManager` 对齐；最后一项避免平台自动安装依赖后，固定 build command 又执行一次 frozen install。完整的外部接线、production 分支和验收顺序见[生产发布](./releasing.md)。
+GitHub Actions 只运行仓库完整门禁，不配置生产 Secret 或 Cloudflare token，也不执行远端 migration/deploy。完整 CI 和生产部署分别位于独立信任域；不能为了复用同一 workflow 把 Workers Builds token 复制到 GitHub Secrets。
+
+Workers Builds 必须设置非 Secret build variables `NODE_VERSION=24.18.0`、`PNPM_VERSION=11.22.0` 和 `SKIP_DEPENDENCY_INSTALL=1`。前两项分别与 `.node-version` 和 `package.json#packageManager` 对齐；最后一项避免平台自动安装依赖后，固定 build command `pnpm install --frozen-lockfile` 又执行一次安装。生产构建产物由 deploy 阶段首个 `release:preflight` 生成并验证；完整的外部接线、production 分支和验收顺序见[生产发布](./releasing.md)。
 
 ## 本地 D1
 
@@ -138,7 +140,9 @@ curl --noproxy localhost,127.0.0.1 -i \
 pnpm run check
 ```
 
-`check` 依次覆盖格式、lint、secret scan、生产依赖安全公告、Wrangler binding 类型、TypeScript、Vue SFC、Better Auth schema drift、组件测试、真实 workerd/D1 集成测试、Playwright、OpenAPI drift、生产构建、Wrangler dry-run 和本地 startup profile。执行前需要先安装 Playwright Chromium：`pnpm exec playwright install chromium`。
+`check` 依次覆盖格式、lint、secret scan、生产依赖安全公告、Wrangler binding 类型、TypeScript、Vue SFC、Better Auth schema drift、组件测试、真实 workerd/D1 集成测试、Playwright、OpenAPI drift、生产构建、Wrangler dry-run 和本地 startup profile。本机执行前使用 `pnpm exec playwright install chromium` 安装浏览器；GitHub Actions 的 Ubuntu runner 使用 `pnpm exec playwright install --with-deps chromium` 安装浏览器和系统依赖，然后运行同一个 `pnpm run check`。
+
+`.github/workflows/check.yml` 只监听指向 `main` 的 PR 和 `main` push。PR run 提供合入前反馈，最终 squash commit 必须由 `main` push 再次运行并以稳定 job 名 `check` 成功，才能进入 `production`。该 workflow 固定 Node.js 版本、从 `package.json#packageManager` 读取 pnpm，并使用只读仓库权限；它没有生产凭证、远端 migration 或 deploy，Cloudflare Workers Builds 也不重复 Playwright 和完整 `check`。
 
 这些命令不得创建或修改远端 D1、R2、Worker、Workflow 或 Secret。生产资源建立、migration 与 deployment 使用 foundation 第 22.3 节定义的独立命令，并遵守第 27 节的 owner 授权门禁。
 
@@ -163,4 +167,4 @@ pnpm run db:restore:plan -- \
 
 ## 生产发布门禁
 
-`pnpm run deploy:production` 会在每个步骤前确认 Workers Builds branch 为 `production`，且平台注入的完整 commit SHA、checkout 的 `HEAD` 与 GitHub 上受保护的远端 `production` ref 三者一致，同时要求源码工作区干净，然后固定按以下顺序执行并在任一步失败时停止：`release:preflight`、production D1 migration、从已生成 production 配置执行严格 Wrangler deploy。Worker deploy 返回后还会再次校验同一上下文，末次校验失败时整个 build 失败且不得打 tag。`WORKERS_CI_*` 只提供执行上下文，不能替代远端分支保护和隔离的部署 token；上一个 production build 结束前不得再次推进分支。该命令不是本地验收命令；Workers Builds 必须使用目标账号范围内、同时具备严格部署所需权限和 D1 Edit 的自定义最小权限 token。只有 owner 对精确 commit 给出当次生产部署授权后才能真实执行，具体流程见[生产发布](./releasing.md)。
+`pnpm run deploy:production` 只能在最终 `main` commit 的 GitHub Actions `check` 已成功、无 bypass status gate 允许同一 SHA 进入 `production`，且 owner 对该 SHA 给出当次生产部署授权后执行。它会在每个步骤前确认 Workers Builds branch 为 `production`，且平台注入的完整 commit SHA、checkout 的 `HEAD` 与 GitHub 上受保护的远端 `production` ref 三者一致，同时要求源码工作区干净，然后固定按以下顺序执行并在任一步失败时停止：`release:preflight`、production D1 migration、从已生成 production 配置执行严格 Wrangler deploy。Worker deploy 返回后还会再次校验同一上下文，末次校验失败时整个 build 失败且不得打 tag。`WORKERS_CI_*` 只提供执行上下文，不能替代远端分支保护和隔离的部署 token；上一个 production build 结束前不得再次推进分支。该命令不是本地验收命令；Workers Builds 必须使用目标账号范围内、同时具备严格部署所需权限和 D1 Edit 的自定义最小权限 token。具体流程见[生产发布](./releasing.md)。
