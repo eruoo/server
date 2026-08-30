@@ -25,7 +25,23 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Resolve production migration baseline
+        id: migration-baseline
+        shell: bash
+        run: |
+          git fetch --no-tags origin \
+            +refs/heads/production:refs/remotes/origin/production
+          baseline_sha="$(
+            git show-ref --verify --hash refs/remotes/origin/production
+          )"
+          if [[ ! "$baseline_sha" =~ ^[0-9a-f]{40}$ || "$baseline_sha" =~ ^0+$ ]]; then
+            echo "The production migration baseline is not a valid commit SHA." >&2
+            exit 1
+          fi
+          printf 'sha=%s\n' "$baseline_sha" >> "$GITHUB_OUTPUT"
 
       - name: Set up pnpm and Node.js
         uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
@@ -48,4 +64,6 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Check
+        env:
+          PRODUCTION_MIGRATION_BASELINE_SHA: ${{ steps.migration-baseline.outputs.sha }}
         run: pnpm run check
