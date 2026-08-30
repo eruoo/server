@@ -82,10 +82,7 @@ const expectedCheckCommands = [
   "pnpm run test",
   "pnpm run test:integration",
   "pnpm run test:e2e",
-  "pnpm run openapi:check",
-  "pnpm run build",
-  "pnpm run bundle:check",
-  "pnpm run startup:check",
+  "pnpm run release:preflight",
 ]
 
 describe("GitHub CI contract", () => {
@@ -116,6 +113,21 @@ describe("GitHub CI contract", () => {
       "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
       "uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0",
     ])
+    expect(workflow).toContain("fetch-depth: 0")
+    expect(workflow).toContain("id: migration-baseline")
+    expect(workflow).toContain(
+      "+refs/heads/production:refs/remotes/origin/production",
+    )
+    expect(workflow).not.toMatch(/--depth(?:=|\s)/u)
+    expect(workflow).toContain(
+      "git show-ref --verify --hash refs/remotes/origin/production",
+    )
+    expect(workflow).toContain(
+      "PRODUCTION_MIGRATION_BASELINE_SHA: ${{ steps.migration-baseline.outputs.sha }}",
+    )
+    expect(workflow.indexOf("id: migration-baseline")).toBeLessThan(
+      workflow.indexOf("run: pnpm install --frozen-lockfile"),
+    )
     expect(pnpmVersion).toMatch(/^\d+\.\d+\.\d+$/u)
     expect(workflow).not.toMatch(/^\s+version:/mu)
     expect(workflow).toContain("runtime: node@24.18.0")

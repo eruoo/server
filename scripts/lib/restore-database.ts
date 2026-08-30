@@ -16,12 +16,12 @@ import {
   BACKUP_SINGLE_OBJECT_MAX_BYTES,
 } from "../../src/worker/backup/constants"
 import { createBackupObjectDescriptor } from "../../src/worker/backup/storage"
+import { isProductionMigrationFileName } from "./production-migrations"
 
 const uuidPattern =
   /^[a-f\d]{8}-[a-f\d]{4}-[1-5][a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i
 const targetDatabaseNamePattern =
   /^eruoo-server-restore-[a-z0-9]+(?:-[a-z0-9]+)*$/
-const migrationFileNamePattern = /^\d{4}_[a-z0-9][a-z0-9_-]*\.sql$/
 const d1MigrationsTableSql = `
   CREATE TABLE "d1_migrations" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -486,7 +486,7 @@ function validateRepositoryMigrationManifest(
     new Set(repositoryMigrationNames).size !==
       repositoryMigrationNames.length ||
     repositoryMigrationNames.some(
-      (name) => !migrationFileNamePattern.test(name),
+      (name) => !isProductionMigrationFileName(name),
     )
   ) {
     throw new Error(

@@ -49,6 +49,7 @@
     {
       "binding": "DB",
       "database_name": "eruoo-server",
+      "migrations_table": "d1_migrations",
       "migrations_dir": "./migrations",
       "migrations_pattern": "./migrations/*.sql",
       "remote": false,
@@ -81,6 +82,8 @@
   ],
   "env": {
     "production": {
+      "account_id": "1d204c847b5870d3438dc79534b91798",
+      "streaming_tail_consumers": [],
       "version_metadata": {
         "binding": "CF_VERSION_METADATA",
       },
@@ -115,6 +118,7 @@
           "binding": "DB",
           "database_name": "eruoo-server",
           "database_id": "652f931e-a445-46fa-bc2b-72be095fdc01",
+          "migrations_table": "d1_migrations",
           "migrations_dir": "./migrations",
           "migrations_pattern": "./migrations/*.sql",
           "remote": false,
