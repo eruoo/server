@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   assertProductionWorkerBootstrapPostcondition,
   assertProductionWorkerBootstrapPrecondition,
+  createProductionWorkerBootstrapApiUrl,
   createProductionWorkerBootstrapIdentity,
   createProductionWorkerBootstrapWranglerArguments,
   createProductionWorkerBootstrapWranglerEnvironment,
@@ -304,21 +305,36 @@ describe("production Worker bootstrap identity", () => {
 })
 
 describe("production Worker bootstrap inspection boundary", () => {
+  it("pins direct Cloudflare API requests to the public canonical URL", () => {
+    expect(
+      createProductionWorkerBootstrapApiUrl(
+        "/accounts/account-id/workers/domains/changeset",
+      ),
+    ).toBe(
+      "https://api.cloudflare.com/client/v4/accounts/account-id/workers/domains/changeset",
+    )
+  })
+
   it("pins Wrangler inputs, preserves proxies, and retains only the API token", () => {
     const environment = createProductionWorkerBootstrapWranglerEnvironment({
       CF_ACCOUNT_ID: "wrong",
+      CLOUDFLARE_API_BASE_URL:
+        "https://workers-builds.example.invalid/client/v4",
       CLOUDFLARE_API_TOKEN: "token",
       HTTPS_PROXY: "http://proxy.example",
+      WRANGLER_CI_GENERATE_PREVIEW_ALIAS: "true",
       WRANGLER_CI_OVERRIDE_NAME: "wrong",
     })
     expect(environment).toMatchObject({
       CLOUDFLARE_API_TOKEN: "token",
       HTTPS_PROXY: "http://proxy.example",
       WRANGLER_API_ENVIRONMENT: "production",
+      WRANGLER_CI_GENERATE_PREVIEW_ALIAS: "false",
       WRANGLER_CI_OVERRIDE_NAME: workerName,
       WRANGLER_WRITE_LOGS: "false",
     })
     expect(environment["CF_ACCOUNT_ID"]).toBeUndefined()
+    expect(environment["CLOUDFLARE_API_BASE_URL"]).toBeUndefined()
     expect(readProductionWorkerBootstrapApiToken(environment)).toBe("token")
     expect(
       createProductionWorkerBootstrapWranglerArguments(["secret", "list"]),
@@ -341,20 +357,23 @@ describe("production Worker bootstrap inspection boundary", () => {
     ).toThrow("may not override")
   })
 
-  it("rejects missing tokens and endpoint or log overrides", () => {
+  it("rejects missing tokens and log overrides", () => {
     expect(() => readProductionWorkerBootstrapApiToken({})).toThrow(
       "requires CLOUDFLARE_API_TOKEN",
     )
     expect(() =>
       createProductionWorkerBootstrapWranglerEnvironment({
-        CLOUDFLARE_API_BASE_URL: "https://example.invalid",
-      }),
-    ).toThrow("endpoint overrides")
-    expect(() =>
-      createProductionWorkerBootstrapWranglerEnvironment({
         WRANGLER_LOG_PATH: "/tmp/raw.log",
       }),
     ).toThrow("WRANGLER_LOG_PATH")
+  })
+
+  it("rejects the deprecated API base alias even at the canonical URL", () => {
+    expect(() =>
+      createProductionWorkerBootstrapWranglerEnvironment({
+        CF_API_BASE_URL: "https://api.cloudflare.com/client/v4",
+      }),
+    ).toThrow("forbids the deprecated CF_API_BASE_URL")
   })
 })
 

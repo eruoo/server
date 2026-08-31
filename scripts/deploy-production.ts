@@ -151,7 +151,6 @@ const productionRepositoryRoot = path.resolve(
 
 const forbiddenRuntimeOverrides = [
   "CF_API_BASE_URL",
-  "CLOUDFLARE_API_BASE_URL",
   "WRANGLER_AUTH_DOMAIN",
   "WRANGLER_AUTH_URL",
   "WRANGLER_LOG_PATH",
@@ -164,7 +163,6 @@ const exactRuntimeOverrides = {
   CLOUDFLARE_ACCOUNT_ID: productionCloudflareAccountId,
   CLOUDFLARE_COMPLIANCE_REGION: "public",
   WRANGLER_API_ENVIRONMENT: "production",
-  WRANGLER_CI_GENERATE_PREVIEW_ALIAS: "false",
   WRANGLER_CI_OVERRIDE_NAME: productionWorkerName,
   WRANGLER_WRITE_LOGS: "false",
 } as const satisfies Partial<Record<keyof ProductionDeployEnvironment, string>>
