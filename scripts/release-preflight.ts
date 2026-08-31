@@ -384,9 +384,15 @@ check(
   "The default Wrangler environment must resolve without cron triggers.",
 )
 check(
-  hasExactEntries(sourceConfig.triggers?.crons, [DAILY_CLEANUP_SCHEDULE]) &&
-    hasExactEntries(generatedConfig.triggers.crons, [DAILY_CLEANUP_SCHEDULE]),
-  `Source and generated production configs must schedule daily cleanup with ${DAILY_CLEANUP_SCHEDULE} UTC and no additional cron triggers.`,
+  hasExactEntries(sourceConfig.triggers?.crons, [
+    DAILY_CLEANUP_SCHEDULE,
+    DATABASE_BACKUP_SCHEDULE,
+  ]) &&
+    hasExactEntries(generatedConfig.triggers.crons, [
+      DAILY_CLEANUP_SCHEDULE,
+      DATABASE_BACKUP_SCHEDULE,
+    ]),
+  `Source and generated production configs must schedule cleanup with ${DAILY_CLEANUP_SCHEDULE} UTC and backup dispatch with ${DATABASE_BACKUP_SCHEDULE} UTC as the only Worker cron triggers.`,
 )
 check(
   sourceConfig.r2_buckets.length === 1 &&
@@ -411,13 +417,9 @@ check(
     generatedBackupWorkflow?.name === "eruoo-database-backup" &&
     sourceBackupWorkflow.class_name === "DatabaseBackupWorkflow" &&
     generatedBackupWorkflow?.class_name === "DatabaseBackupWorkflow" &&
-    hasExactEntries(sourceBackupWorkflow.schedules, [
-      DATABASE_BACKUP_SCHEDULE,
-    ]) &&
-    hasExactEntries(generatedBackupWorkflow?.schedules, [
-      DATABASE_BACKUP_SCHEDULE,
-    ]),
-  `Production must schedule only DatabaseBackupWorkflow with ${DATABASE_BACKUP_SCHEDULE} UTC.`,
+    sourceBackupWorkflow.schedules === undefined &&
+    generatedBackupWorkflow?.schedules === undefined,
+  "Production must bind DatabaseBackupWorkflow without a paid direct Workflow schedule.",
 )
 failures.push(
   ...validateReleaseBindingIdentity({

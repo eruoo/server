@@ -88,7 +88,7 @@
         "binding": "CF_VERSION_METADATA",
       },
       "triggers": {
-        "crons": ["0 20 * * *"],
+        "crons": ["0 20 * * *", "0 19 * * SAT"],
       },
       "routes": [
         {
@@ -136,7 +136,6 @@
           "binding": "DATABASE_BACKUP_WORKFLOW",
           "name": "eruoo-database-backup",
           "class_name": "DatabaseBackupWorkflow",
-          "schedules": ["0 19 * * 6"],
         },
       ],
       "ratelimits": [

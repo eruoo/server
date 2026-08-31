@@ -1,4 +1,5 @@
 import {
+  D1_EXPORT_MAX_POLL_OBSERVATIONS,
   D1_EXPORT_MAX_POLL_DURATION_MS,
   D1_EXPORT_POLL_INTERVAL_MS,
 } from "./constants"
@@ -59,7 +60,7 @@ export async function completeD1ExportWithinDeadline(
         retryable: false,
       })
     }
-    if (pollIndex > 90) {
+    if (pollIndex >= D1_EXPORT_MAX_POLL_OBSERVATIONS) {
       throw new DatabaseBackupError("backup_export_timed_out", {
         retryable: false,
       })

@@ -2,7 +2,7 @@ import { createApp } from "./app"
 import { cleanupExpiredOAuthTokenState } from "./auth/oauth-token-cleanup"
 import { deleteExpiredVerifications } from "./auth/verification-cleanup"
 import { deleteExpiredAuditEvents } from "./modules/audit/repository"
-import { DAILY_CLEANUP_SCHEDULE } from "./schedules"
+import { DAILY_CLEANUP_SCHEDULE, DATABASE_BACKUP_SCHEDULE } from "./schedules"
 
 export { DatabaseBackupWorkflow } from "./workflows/database-backup"
 
@@ -14,6 +14,39 @@ export default {
   },
   async scheduled(controller, env) {
     const requestId = crypto.randomUUID()
+
+    if (controller.cron === DATABASE_BACKUP_SCHEDULE) {
+      const instanceId = `database-backup-v1-${controller.scheduledTime}`
+      try {
+        const [instance] = await env.DATABASE_BACKUP_WORKFLOW.createBatch([
+          { id: instanceId },
+        ])
+        if (instance === undefined) {
+          console.info({
+            event: "database_backup_workflow_duplicate_skipped",
+            instanceId,
+            requestId,
+            scheduledTime: controller.scheduledTime,
+          })
+          return
+        }
+        console.info({
+          event: "database_backup_workflow_started",
+          instanceId: instance.id,
+          requestId,
+          scheduledTime: controller.scheduledTime,
+        })
+      } catch (error) {
+        console.error({
+          error: error instanceof Error ? error.name : "unknown_error",
+          event: "database_backup_schedule_failed",
+          requestId,
+          scheduledTime: controller.scheduledTime,
+        })
+        throw error
+      }
+      return
+    }
 
     if (controller.cron !== DAILY_CLEANUP_SCHEDULE) {
       console.warn({
