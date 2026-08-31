@@ -444,6 +444,29 @@ describe("OAuth transport failures", () => {
   })
 })
 
+describe("Session request observability", () => {
+  it("does not add a custom information log for a successful Session read", async () => {
+    const cookie = await createFreshOwnerSession()
+    const infoLog = vi.spyOn(console, "info").mockImplementation(() => {})
+
+    try {
+      const response = await createApp().fetch(
+        new Request("http://local.test/api/auth/get-session", {
+          headers: {
+            cookie: `eruoo.session_token=${cookie}`,
+          },
+        }),
+        env,
+      )
+
+      expect(response.status).toBe(200)
+      expect(infoLog).not.toHaveBeenCalled()
+    } finally {
+      infoLog.mockRestore()
+    }
+  })
+})
+
 describe("application timeout boundaries", () => {
   it.each([
     ["GET", "/api/status", true],
