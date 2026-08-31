@@ -57,7 +57,7 @@ SKIP_DEPENDENCY_INSTALL=1
 
 ### 一次性 Dashboard 模板接管
 
-常驻 Build variables 只有上面的三项。现有 `eruoo-server-production` 第一次由仓库配置接管时，必须在取得 owner 对当次外部配置变更的明确授权后，临时增加下面这个非 Secret、仅构建期变量：
+常驻自定义 Build variables 只有上面的三项。现有 `eruoo-server-production` 第一次由仓库配置接管时，必须在取得 owner 对当次外部配置变更的明确授权后，临时增加下面这个非 Secret、仅构建期变量：
 
 ```text
 PRODUCTION_WORKER_BOOTSTRAP_VERSION_ID=<DASHBOARD_TEMPLATE_VERSION_UUID>
@@ -85,7 +85,7 @@ GitHub Actions 不需要也不得取得该 token。生产部署凭证继续只�
 
 不要在自定义 Build variables 中定义或覆盖 `WORKERS_CI`、`WORKERS_CI_BRANCH`、`WORKERS_CI_COMMIT_SHA` 或 `PRODUCTION_MIGRATION_BASELINE_SHA`。前三项只提供执行上下文，不是平台身份证明；最后一项只允许 GitHub Actions 为仓库检查注入，Workers Builds 手工设置它会被拒绝。实际授权边界是受保护的远端 `production` 分支与只交给 production trigger 的部署 token。`deploy:production` 会在执行任何命令前确认平台注入的 branch 为 `production`，并校验注入的完整 commit SHA、checkout 的 `HEAD` 和 GitHub 上 `eruoo/server` 的 `refs/heads/production` 三者一致，同时要求源码工作区干净；不匹配时停止，不执行 migration 或 deploy。
 
-同一入口还会拒绝自定义 Cloudflare API endpoint、staging API、非 public compliance region、Preview Alias，以及指向其他 Worker 或 account 的 Wrangler 覆盖。入口要求 trigger 提供非空 `CLOUDFLARE_API_TOKEN`，缺失或空白时在任何发布命令启动前失败，禁止回退到 Wrangler 磁盘 OAuth 或全局凭证。`release:preflight` 与 Git 校验子进程不接收 token；常规路径只有 D1 migration 与 Worker deploy 接收 token，一次性 bootstrap 的最小只读探针也可使用同一 token。所有生产 Wrangler 命令都禁用磁盘日志，并显式使用 `/dev/null` 作为唯一 env file，不能从仓库中的 `.env*` 注入覆盖。不要把这些受约束值另行添加为自定义 Build variables。
+Workers Builds 可能在构建父环境中提供 `CLOUDFLARE_API_BASE_URL` 和 `WRANGLER_CI_GENERATE_PREVIEW_ALIAS`；入口不信任或使用这些值，并从 Git、preflight、Wrangler 和 bootstrap inspection 子进程中剥离，后两个执行边界还会把 Preview Alias 明确固定为 `false`。Wrangler 子进程回落到 production/public 的默认 endpoint，一次性 bootstrap 的直接 API 检查则固定使用 `https://api.cloudflare.com/client/v4`。旧别名 `CF_API_BASE_URL` 仍一律拒绝；入口还会拒绝 staging API、非 public compliance region，以及指向其他 Worker 或 account 的 Wrangler 覆盖。入口要求 trigger 提供非空 `CLOUDFLARE_API_TOKEN`，缺失或空白时在任何发布命令启动前失败，禁止回退到 Wrangler 磁盘 OAuth 或全局凭证。`release:preflight` 与 Git 校验子进程不接收 token；常规路径只有 D1 migration 与 Worker deploy 接收 token，一次性 bootstrap 的最小只读探针也可使用同一 token。所有生产 Wrangler 命令都禁用磁盘日志，并显式使用 `/dev/null` 作为唯一 env file，不能从仓库中的 `.env*` 注入覆盖。不要把 API endpoint 或 Preview Alias 变量另行添加为自定义 Build variables。
 
 发布流程信任 GitHub 上受保护的 `production` 分支、Cloudflare 提供的构建容器和单写者操作窗口。clean worktree 与 preflight 用于发现正常的 checkout 或配置漂移，不是同一 UID 恶意进程的隔离边界。如果构建容器、已执行依赖或同一 UID 进程可能在命令间替换文件、读取子进程环境或并发操作远端，应停止发布并重新建立可信构建，不依赖脚本内重复哈希或快照来抵御。
 
@@ -183,7 +183,7 @@ tag、GitHub Release 和 package version 不一致时停止发布；不得通过
 ## 失败处理
 
 - GitHub Actions `check` 缺失、跳过、取消或失败：required status gate 必须阻止 `production` 更新；修复 `main` 后重新走 PR，不能通过 Dashboard 手动部署补偿。
-- Workers Builds frozen install 或 release preflight 失败：没有执行 migration 或 deploy。若根因在仓库，修复 `main` 后重新走 PR；若根因是 Cloudflare Build setting，取得 owner 授权后修改并只读回查，无须制造无意义的代码 PR。仅外部瞬时故障或已获准的 Build setting 修正、代码与精确 SHA 均未变化时，才可在重新核对 SHA、ruleset、Active Deployment 并取得 owner 对本次重试的明确授权后重试同一失败 build。
+- Workers Builds frozen install、部署入口或 release preflight 失败：没有执行 migration 或 deploy。若根因在仓库，或来自平台而无法在 Dashboard Build variables 中枚举和修正，修复 `main` 后重新走 PR；若根因是可枚举的 Cloudflare Build setting，取得 owner 授权后修改并只读回查，无须制造无意义的代码 PR。仅外部瞬时故障或已获准的 Build setting 修正、代码与精确 SHA 均未变化时，才可在重新核对 SHA、ruleset、Active Deployment 并取得 owner 对本次重试的明确授权后重试同一失败 build。
 - Migration 失败：deploy 自动停止；检查远端 migration ledger，不修改已应用 migration，不删除或重建 production D1。
 - Migration 成功但 Worker deploy 失败：D1 可能已升级而 Worker 仍是旧版本；保持向后兼容。已经进入 production ledger 的 migration 文件不得修改、重命名或删除，修复 schema 必须新增 migration；再次 apply 已存在的 migration 应为 no-op。
 - bootstrap 的 Worker deploy 一旦开始后报错，不能假定 Active Deployment 仍是模板。先删除 bootstrap variable 的操作仍需单独授权；在任何重试前只读核对 Active Deployment、version bindings、五个 Secret、Workflow、cron、Custom Domain 和 route。若仓库 version 已经 Active，禁止重新添加 bootstrap variable；取得对同一精确 SHA 的新部署授权后，改用默认 strict deploy 收敛未完成配置。只有远端仍是原锁定模板、无新 binding/Workflow/trigger/domain 且所有检查一致时，才可重新申请一次 bootstrap。任何混合状态、读取失败或来源不明都必须停止，不能自动 rollback 或 retry。

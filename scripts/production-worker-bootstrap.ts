@@ -12,6 +12,7 @@ import {
 } from "./release-preflight-validation"
 
 const productionWorkerName = "eruoo-server-production"
+const productionCloudflareApiBaseUrl = "https://api.cloudflare.com/client/v4"
 const generatedProductionConfigPath = "dist/eruoo_server/wrangler.json"
 const productionWorkerEnvironment = "production"
 const productionWorkerCustomDomain = "auth.eruoo.me"
@@ -24,6 +25,10 @@ const wranglerInspectionTimeoutMs = 30_000
 const cloudflareApiTimeoutMs = 30_000
 const postconditionAttempts = 5
 const postconditionRetryDelayMs = 2_000
+
+export function createProductionWorkerBootstrapApiUrl(apiPath: string): string {
+  return `${productionCloudflareApiBaseUrl}${apiPath}`
+}
 
 const secretSchema = z
   .object({
@@ -354,15 +359,11 @@ export function createProductionWorkerBootstrapWranglerEnvironment(
       "Production Worker bootstrap forbids WRANGLER_LOG_PATH for inspection commands.",
     )
   }
-  if (
-    source["CLOUDFLARE_API_BASE_URL"] !== undefined ||
-    source["CF_API_BASE_URL"] !== undefined
-  ) {
+  if (source["CF_API_BASE_URL"] !== undefined) {
     throw new Error(
-      "Production Worker bootstrap forbids Cloudflare API endpoint overrides for inspection commands.",
+      "Production Worker bootstrap forbids the deprecated CF_API_BASE_URL override for inspection commands.",
     )
   }
-
   const cloudflareApiToken = source["CLOUDFLARE_API_TOKEN"]
   const environment: NodeJS.ProcessEnv = { ...process.env }
   for (const name of Object.keys(environment)) delete environment[name]
@@ -462,22 +463,19 @@ function createDefaultInspector(): ProductionWorkerBootstrapInspector {
       const token = readProductionWorkerBootstrapApiToken()
       let response: Response
       try {
-        response = await fetch(
-          `https://api.cloudflare.com/client/v4${apiPath}`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              ...(request.body === undefined
-                ? {}
-                : { "Content-Type": "application/json" }),
-            },
-            method: request.method ?? "GET",
-            signal: AbortSignal.timeout(cloudflareApiTimeoutMs),
+        response = await fetch(createProductionWorkerBootstrapApiUrl(apiPath), {
+          headers: {
+            Authorization: `Bearer ${token}`,
             ...(request.body === undefined
               ? {}
-              : { body: JSON.stringify(request.body) }),
+              : { "Content-Type": "application/json" }),
           },
-        )
+          method: request.method ?? "GET",
+          signal: AbortSignal.timeout(cloudflareApiTimeoutMs),
+          ...(request.body === undefined
+            ? {}
+            : { body: JSON.stringify(request.body) }),
+        })
       } catch {
         throw new Error(
           "Production Worker bootstrap could not complete the required Custom Domain inspection.",

@@ -201,8 +201,11 @@ describe("production deployment context", () => {
     expect(
       resolveProductionDeployContext(
         {
+          CLOUDFLARE_API_BASE_URL:
+            "https://workers-builds.example.invalid/client/v4",
           CLOUDFLARE_API_TOKEN: "token",
           PRODUCTION_WORKER_BOOTSTRAP_VERSION_ID: templateVersionId,
+          WRANGLER_CI_GENERATE_PREVIEW_ALIAS: "true",
           WORKERS_CI: "1",
           WORKERS_CI_BRANCH: "production",
           WORKERS_CI_COMMIT_SHA: commitSha,
@@ -244,7 +247,6 @@ describe("production deployment context", () => {
 
   it.each([
     "CF_API_BASE_URL",
-    "CLOUDFLARE_API_BASE_URL",
     "WRANGLER_AUTH_DOMAIN",
     "WRANGLER_AUTH_URL",
     "WRANGLER_LOG_PATH",
@@ -265,12 +267,26 @@ describe("production deployment context", () => {
     ).toThrow(`forbids the ${name} override`)
   })
 
+  it("rejects the deprecated API base alias even at the canonical URL", () => {
+    expect(() =>
+      resolveProductionDeployContext(
+        {
+          CF_API_BASE_URL: "https://api.cloudflare.com/client/v4",
+          CLOUDFLARE_API_TOKEN: "token",
+          WORKERS_CI: "1",
+          WORKERS_CI_BRANCH: "production",
+          WORKERS_CI_COMMIT_SHA: commitSha,
+        },
+        () => "",
+      ),
+    ).toThrow("forbids the CF_API_BASE_URL override")
+  })
+
   it.each([
     ["CLOUDFLARE_ACCOUNT_ID", "another-account"],
     ["CF_ACCOUNT_ID", "another-account"],
     ["CLOUDFLARE_COMPLIANCE_REGION", "eu"],
     ["WRANGLER_API_ENVIRONMENT", "staging"],
-    ["WRANGLER_CI_GENERATE_PREVIEW_ALIAS", "true"],
     ["WRANGLER_CI_OVERRIDE_NAME", "another-worker"],
     ["WRANGLER_WRITE_LOGS", "true"],
   ] as const)("rejects %s=%s", (name, value) => {
@@ -291,12 +307,14 @@ describe("production deployment context", () => {
 
 describe("production child environments", () => {
   const source = {
+    CLOUDFLARE_API_BASE_URL: "https://workers-builds.example.invalid/client/v4",
     CLOUDFLARE_API_TOKEN: "secret-token",
     CF_API_BASE_URL: "https://example.invalid",
     GIT_DIR: "/tmp/fake-git",
     HTTPS_PROXY: "http://proxy.example.invalid",
     PATH: "/usr/bin",
     WRANGLER_CI_MATCH_TAG: "match-tag",
+    WRANGLER_CI_GENERATE_PREVIEW_ALIAS: "true",
     WRANGLER_LOG_PATH: "/tmp/wrangler.log",
   }
 
@@ -304,9 +322,11 @@ describe("production child environments", () => {
     const environment = createProductionGitChildEnvironment(source)
 
     expect(environment["CLOUDFLARE_API_TOKEN"]).toBeUndefined()
+    expect(environment["CLOUDFLARE_API_BASE_URL"]).toBeUndefined()
     expect(environment["CF_API_BASE_URL"]).toBeUndefined()
     expect(environment["GIT_DIR"]).toBeUndefined()
     expect(environment["WRANGLER_CI_MATCH_TAG"]).toBeUndefined()
+    expect(environment["WRANGLER_CI_GENERATE_PREVIEW_ALIAS"]).toBeUndefined()
     expect(environment["PATH"]).toBe("/usr/bin")
     expect(environment["HTTPS_PROXY"]).toBe("http://proxy.example.invalid")
     expect(environment["GIT_CONFIG_GLOBAL"]).toBe("/dev/null")
@@ -317,6 +337,8 @@ describe("production child environments", () => {
     const environment = createProductionPreflightChildEnvironment(source)
 
     expect(environment["CLOUDFLARE_API_TOKEN"]).toBeUndefined()
+    expect(environment["CLOUDFLARE_API_BASE_URL"]).toBeUndefined()
+    expect(environment["WRANGLER_CI_GENERATE_PREVIEW_ALIAS"]).toBe("false")
     expect(environment["WRANGLER_LOG_PATH"]).toBeUndefined()
     expect(environment["WRANGLER_CI_OVERRIDE_NAME"]).toBe(
       "eruoo-server-production",
@@ -328,6 +350,8 @@ describe("production child environments", () => {
     const environment = createProductionDeployChildEnvironment(source)
 
     expect(environment["CLOUDFLARE_API_TOKEN"]).toBe("secret-token")
+    expect(environment["CLOUDFLARE_API_BASE_URL"]).toBeUndefined()
+    expect(environment["WRANGLER_CI_GENERATE_PREVIEW_ALIAS"]).toBe("false")
     expect(environment["CLOUDFLARE_ACCOUNT_ID"]).toBe(
       productionCloudflareAccountId,
     )
