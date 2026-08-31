@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import worker from "../../src/worker"
 import { deleteExpiredVerifications } from "../../src/worker/auth/verification-cleanup"
-import { DAILY_CLEANUP_SCHEDULE } from "../../src/worker/schedules"
+import {
+  DAILY_CLEANUP_SCHEDULE,
+  DATABASE_BACKUP_SCHEDULE,
+} from "../../src/worker/schedules"
 
 const now = 2_000_000_000_000
 const day = 24 * 60 * 60 * 1000
@@ -55,6 +58,17 @@ async function storedVerificationIds(): Promise<string[]> {
   return rows.results.map(({ id }) => id)
 }
 
+function environmentWithWorkflowCreateBatch(
+  createBatch: Env["DATABASE_BACKUP_WORKFLOW"]["createBatch"],
+): Env {
+  return new Proxy(env, {
+    get(target, property, receiver) {
+      if (property === "DATABASE_BACKUP_WORKFLOW") return { createBatch }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+}
+
 describe("audit cleanup schedule", () => {
   beforeEach(async () => {
     await env.DB.batch([
@@ -95,6 +109,103 @@ describe("audit cleanup schedule", () => {
     await expect(storedVerificationIds()).resolves.toEqual(["boundary", "live"])
   })
 
+  it("starts only the backup Workflow for the weekly backup cron", async () => {
+    const createBatch = vi.fn<Env["DATABASE_BACKUP_WORKFLOW"]["createBatch"]>(
+      async () =>
+        [{ id: "database-backup-v1-2000000000000" }] as WorkflowInstance[],
+    )
+    const information = vi.spyOn(console, "info").mockImplementation(() => {})
+    await insertAuditEvent("expired", now - 180 * day - 1)
+    await insertVerification("expired", now - 1)
+
+    await worker.scheduled(
+      createScheduledController({
+        cron: DATABASE_BACKUP_SCHEDULE,
+        scheduledTime: now,
+      }),
+      environmentWithWorkflowCreateBatch(createBatch),
+    )
+
+    expect(createBatch).toHaveBeenCalledTimes(1)
+    expect(createBatch).toHaveBeenCalledWith([
+      { id: "database-backup-v1-2000000000000" },
+    ])
+    await expect(storedEventIds()).resolves.toEqual(["expired"])
+    await expect(storedVerificationIds()).resolves.toEqual(["expired"])
+    expect(information).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "database_backup_workflow_started",
+        instanceId: "database-backup-v1-2000000000000",
+        scheduledTime: now,
+      }),
+    )
+  })
+
+  it("treats a duplicate backup schedule delivery as already started", async () => {
+    const createBatch = vi.fn<Env["DATABASE_BACKUP_WORKFLOW"]["createBatch"]>(
+      async () => [],
+    )
+    const information = vi.spyOn(console, "info").mockImplementation(() => {})
+
+    await worker.scheduled(
+      createScheduledController({
+        cron: DATABASE_BACKUP_SCHEDULE,
+        scheduledTime: now,
+      }),
+      environmentWithWorkflowCreateBatch(createBatch),
+    )
+
+    expect(createBatch).toHaveBeenCalledWith([
+      { id: "database-backup-v1-2000000000000" },
+    ])
+    expect(information).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "database_backup_workflow_duplicate_skipped",
+        instanceId: "database-backup-v1-2000000000000",
+        scheduledTime: now,
+      }),
+    )
+  })
+
+  it("does not start the backup Workflow during daily cleanup", async () => {
+    const createBatch = vi.fn<Env["DATABASE_BACKUP_WORKFLOW"]["createBatch"]>()
+
+    await worker.scheduled(
+      createScheduledController({
+        cron: DAILY_CLEANUP_SCHEDULE,
+        scheduledTime: now,
+      }),
+      environmentWithWorkflowCreateBatch(createBatch),
+    )
+
+    expect(createBatch).not.toHaveBeenCalled()
+  })
+
+  it("reports and propagates a backup Workflow start failure", async () => {
+    const failure = new Error("synthetic Workflow start failure")
+    const createBatch = vi.fn<Env["DATABASE_BACKUP_WORKFLOW"]["createBatch"]>(
+      async () => Promise.reject(failure),
+    )
+    const logging = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    await expect(
+      worker.scheduled(
+        createScheduledController({
+          cron: DATABASE_BACKUP_SCHEDULE,
+          scheduledTime: now,
+        }),
+        environmentWithWorkflowCreateBatch(createBatch),
+      ),
+    ).rejects.toBe(failure)
+    expect(logging).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: "Error",
+        event: "database_backup_schedule_failed",
+        scheduledTime: now,
+      }),
+    )
+  })
+
   it("uses the expiration index for verification cleanup", async () => {
     const plan = await env.DB.prepare(
       `EXPLAIN QUERY PLAN
@@ -120,6 +231,7 @@ describe("audit cleanup schedule", () => {
 
   it("ignores an unrecognized scheduled trigger", async () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const createBatch = vi.fn<Env["DATABASE_BACKUP_WORKFLOW"]["createBatch"]>()
     await insertAuditEvent("expired", now - 180 * day - 1)
     await insertVerification("expired", now - 1)
 
@@ -128,11 +240,12 @@ describe("audit cleanup schedule", () => {
         cron: "0 0 * * *",
         scheduledTime: now,
       }),
-      env,
+      environmentWithWorkflowCreateBatch(createBatch),
     )
 
     await expect(storedEventIds()).resolves.toEqual(["expired"])
     await expect(storedVerificationIds()).resolves.toEqual(["expired"])
+    expect(createBatch).not.toHaveBeenCalled()
     expect(warning).toHaveBeenCalledWith(
       expect.objectContaining({
         cron: "0 0 * * *",

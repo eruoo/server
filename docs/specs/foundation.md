@@ -815,12 +815,12 @@ D1 中维护 `security_audit_events`，只记录安全事件，不记录每次�
 
 - D1 Time Travel 保留为 Cloudflare 提供的短期平台能力。
 - 长期备份使用 Cloudflare Workflow。
-- 默认/本地配置只注册 `DATABASE_BACKUP_WORKFLOW` binding，不配置 schedule；production Workflow binding 直接配置 `0 19 * * 6`。审计、verification 与 OAuth 状态清理使用独立的 Worker Cron Trigger `0 20 * * *`，两类调度不得互相代跑。
-- 每周日 03:00 Asia/Shanghai 调度，对应每周六 19:00 UTC。Workflow 的首个 durable step 记录真实执行起点；从该起点开始最多持续轮询 15 分钟，并以 30 分钟作为 upload deadline。平台延迟启动会让实际维护影响相对 03:00 顺延，不再用计划时间压缩本次实例的健康执行预算。仍未进入终态时停止轮询，让 Cloudflare 自动取消 export，记录结构化超时并保留上一份有效备份。部署前必须在真实 D1 验证停止轮询后的自动取消行为。
+- 默认/本地配置只注册 `DATABASE_BACKUP_WORKFLOW` binding，不配置 cron。production 顶层 Worker Cron 只包含每日清理 `0 20 * * *` 与每周备份派发 `0 19 * * SAT`；Workflow binding 不使用只适用于 Workers Paid 的 direct schedule。`scheduled` handler 必须按原始 cron 字符串精确分派：每日 cron 只执行审计、verification 与 OAuth 状态清理，备份 cron 使用固定版本前缀加 `scheduledTime` 的确定性 ID，等待单元素 `DATABASE_BACKUP_WORKFLOW.createBatch()` 幂等创建实例；Workers Free 当前默认保留已终止实例状态 3 天，在该保留期内重复投递返回空数组时记录去重日志并成功结束，未知 cron 只记录告警。Workflow 启动失败必须记录不含原始错误消息的结构化日志并让 Cron invocation 失败，不能在尚未建立 durable 起点时伪造备份健康状态。D1 lease 只串行化重叠执行；超过上述 3 天后对同一 `scheduledTime` 的顺序重放可能重新创建 Workflow 并产生另一份备份，这是不增加永久时间槽台账时接受的残余风险。其他入口的并发仍由 D1 lease 兜底。
+- 每周日 03:00 Asia/Shanghai 调度，对应每周六 19:00 UTC；星期字段使用无歧义的 `SAT`。Workflow 的首个 durable step 记录真实执行起点；从该起点开始每 55 秒、最多 15 次持续轮询，并以 15 分钟作为 export 截止、30 分钟作为 upload deadline。15 次名义 sleep 共 13 分 45 秒，至少给 start/poll API 调用延迟保留 75 秒；任何一次观察到达硬截止都必须停止，不能为凑满次数越过 deadline。平台延迟启动会让实际维护影响相对 03:00 顺延，不再用计划时间压缩本次实例的健康执行预算。仍未进入终态时停止轮询，让 Cloudflare 自动取消 export，记录结构化超时并保留上一份有效备份。部署前必须在真实 D1 验证停止轮询后的自动取消行为。
 - 通过官方 D1 REST API 发起一次不带 `tables` 或 `no_data` 的完整 SQL export，并写入私有 R2 Standard bucket。单次 export 是唯一快照边界，不用两个 export 拼接数据。每份 format v2 快照记录 export bookmark 与 `CF_VERSION_METADATA` 的 Worker version ID、tag、timestamp；其中 version ID 是快照的运行时 revision 标识，精确 Git commit 继续由受控发布记录关联，不把无法保证存在的 commit SHA 伪装成对象 metadata。
 - 当前备份方案禁止 D1 virtual table，包括 FTS5。schema 门禁必须在逐条执行 migration SQL 时通过 SQLite authorizer 拒绝 `SQLITE_CREATE_VTABLE`，并在最终 schema 上再次检查；即使创建语句用注释分隔关键字或由后续 migration 删除，也不得逃过门禁。任何引入 virtual table 的 migration 必须被拒绝，除非先替换并验证新的备份方案。
 - 完整 export 包含 `security_audit_events`、migration ledger、业务数据和数据库内凭证状态；该敏感对象不得公开。Cloudflare Secret 本身不在 D1，因此不进入快照。
-- Workflow 持续轮询至 export 进入终态或真实执行起点后的 15 分钟截止时间，以先到者为准；发起 export 的 step 配置 `retries.limit: 1`，该值按 Cloudflare 的“总尝试次数”语义作为唯一的不重试机制，避免产生两个 export，不再额外依赖 `NonRetryableError` 兜底。可幂等 step 仍按错误类别重试。超时后停止轮询，验证 Cloudflare 自动取消，并按本节前述要求记录超时和保留上一份有效备份。
+- Workflow 持续轮询至 export 进入终态、完成第 15 次 poll 或真实执行起点后的 15 分钟截止时间，以先到者为准；发起 export 的 step 配置 `retries.limit: 1`，poll 与 signed URL upload step 各配置总尝试次数 2。按最坏路径计算，外部请求上限为 `1 + 15 × 2 + 2 = 33`，相对 Workers Free 每实例 50 次 external subrequest 保留 17 次余量；D1 REST API 和 signed URL 请求都必须使用 `redirect: error`，防止重定向额外消耗预算或转发 Bearer 凭证。可幂等 step 仍按错误类别重试。超时后停止轮询，验证 Cloudflare 自动取消，并按本节前述要求记录超时和保留上一份有效备份。
 - export 成功后必须在 signed URL 有效期内下载。响应必须提供规范、正整数形式的 `Content-Length`；缺失、非法或达到 5 GiB 单对象上限时 fail closed。signed URL 的 `ReadableStream` 直接交给一次 `R2Bucket.put`，对象使用 `.sql` 后缀与 `Content-Type: application/sql`，不 gzip、不在 JavaScript 中分块复制、不使用 multipart。对象 custom metadata 同时记录该 `Content-Length`；put 返回对象的实际大小与 metadata 必须匹配。长度或 metadata 不符的对象不得在 Workflow 重试时复用，也不得视为有效备份；如果它是当前 conditional put 刚创建的精确对象，必须立即 best-effort 删除并在删除失败时记录不含凭证的结构化错误。该补偿删除不适用于此前已存在或竞争写入的对象，也不改变合法快照的 180 天保留期。
 - R2 lifecycle 在对象满 180 天后删除。
 - 每个 Workflow 实例在盘点或 export 前先用 D1 `maintenance_lease` 原子取得 `database-backup` 租约，owner 为 Workflow instance ID。租约覆盖从首个 durable step 记录的真实执行起点计算的 30 分钟 deadline，再增加长于 15 分钟 upload step timeout 的 16 分钟提交保护期；即使 deadline 前发起且无法显式取消的 `R2Bucket.put` 延迟结束，新实例也不能在它仍可能提交时接管。提交保护期只阻止另一备份启动，不延长当前实例的 export 或 upload deadline。同一实例可幂等续约，其他实例在租约过期前以 `backup_concurrency_conflict` 停止并记录结构化协调失败，但不得把该拒绝写入 `database_backup_health`。该租约串行化 cron、手动启动和重试实例，不能用 isolate 内存锁替代。
@@ -945,7 +945,7 @@ HTTP 和契约：
 - 自有 API 隐式 HEAD 的 404、CSRF 的 `permission-denied` 403、撤销 operation 的 413 契约，以及 token endpoint 超限 400 与超时 503 的协议/transport 分界。
 - 高风险认证与 owner OAuth 授权撤销端点的外层 10/60 平台限流、动态 client ID 归一化、429/503 fail-closed、限流拒绝不产生审计写，以及 mutation 不进入应用级 timeout race。
 - `/api/status` 的 owner Session/API Key 二选一认证、200、400、401、403、503、no-store 和 CORS 限制。
-- `/api/security/backup-status` 的 owner-only 认证、严格响应契约、较旧 Workflow 终态不能覆盖较新状态，以及 success 自动恢复 failed 状态；租约冲突不得改变 `never-run` 或既有健康状态，首个 execution-start step 失败时也不得生成伪健康记录。
+- `/api/security/backup-status` 的 owner-only 认证、严格响应契约、较旧 Workflow 终态不能覆盖较新状态，以及 success 自动恢复 failed 状态；租约冲突不得改变 `never-run` 或既有健康状态，首个 execution-start step 失败时也不得生成伪健康记录。调度测试必须证明两个顶层 Worker Cron 不互相代跑、备份 Cron 以确定性 ID 幂等创建 Workflow、重复投递被安全跳过、启动失败被传播、Workflow 无 direct schedule，并把 start/poll/upload retry 配置与最多 15 次 poll 的最坏外部请求上限固定为 33，低于 Free 的 50 次限制。
 
 部署编排：
 
@@ -982,7 +982,7 @@ HTTP 和契约：
 - 对比 OAuth Authorization Server Metadata 与 OIDC discovery，issuer 或 `jwks_uri` 不一致时阻止部署。
 - 验证未知 `kid` 刷新受到冷却或负缓存限制，并验证轮换期 `kid` 唯一。
 - 通过 D1 REST API 确认生产数据库的 `read_replication.mode` 为 `disabled`。
-- 用持久存在与“注释分隔创建后再删除”两种真实 SQLite virtual table 负向门禁，加上真实完整 export 测试确认数据库不含 virtual table；备份 Workflow 首个 durable step 固化真实执行起点，start step 总尝试次数为 1，poll 会持续至终态或真实起点后 15 分钟截止，超时后平台自动取消且上一份有效备份仍保留。
+- 用持久存在与“注释分隔创建后再删除”两种真实 SQLite virtual table 负向门禁，加上真实完整 export 测试确认数据库不含 virtual table；备份 Workflow 首个 durable step 固化真实执行起点，start step 总尝试次数为 1，poll 每 55 秒执行且最多 15 次，持续至终态或真实起点后 15 分钟截止，外部请求最坏为 33 次且禁止自动重定向，超时后平台自动取消且上一份有效备份仍保留。
 - 导入备份到隔离空 D1，验证真实 migration ledger 可继续向前执行，并在任何 binding 切换前清除全部旧凭证、JWKS、审计事件、维护租约和旧环境备份健康状态；验证完成后才写入单条恢复完成审计。
 
 ## 22. Cloudflare 环境和部署
@@ -1034,11 +1034,11 @@ HTTP 和契约：
 
 本项目以个人低流量下维持零平台固定费用为目标，但不承诺任何数据量下永久免费。
 
-截至 2026-08-19 的部署校验基线：
+截至 2026-08-31 的部署校验基线：
 
 | 产品 | Free 基线 | 主要风险 |
 | --- | --- | --- |
-| Workers | 100,000 requests/day、每请求 10 ms CPU | Better Auth、Passkey 和复杂验证可能单次超限 |
+| Workers | 100,000 requests/day、每请求 10 ms CPU、每账号 5 个 Cron Trigger、每次调用 50 个 external 与 1,000 个 Cloudflare-service subrequest | Better Auth、Passkey、复杂验证或无界外部轮询可能单次超限 |
 | D1 | 5,000,000 rows read/day、100,000 rows written/day、5 GB/account | API Key 每次验证同步计数可能放大写入 |
 | R2 Standard | 10 GB-month、每月 1,000,000 Class A 和 10,000,000 Class B | 约 26 份周快照的累计体积可能超过免费存储 |
 | Workers Logs | 200,000 events/day、保留 3 天 | 只适合短期诊断 |
@@ -1054,6 +1054,7 @@ HTTP 和契约：
 - 不启用付费可观测性、短信、邮件、外部 Redis 或托管 Scalar。
 - R2 备份总体积持续受控。
 - 备份对象在 8 GB 告警，只在规范 `Content-Length` 与专用 bucket 全部现有对象总量之和严格小于 9 GB 时直写 R2，避免未经授权越过免费存储边界。
+- production 本 Worker 使用 2 个顶层 Worker Cron；部署前必须从 Cloudflare 账号级资源确认更新后 Cron 总数不超过 Free 的 5 个，部署后确认本 Worker 精确存在这两个 Cron。备份 Workflow 不使用 Workers Paid direct schedule，且每实例外部请求上限固定为 33/50。
 - 所有关键认证路由实测未超过 Workers Free 单请求 CPU 上限。
 
 域名注册与续费不属于 Workers Free 额度，但 `eruoo.me` 已确定为本服务域名。
@@ -1099,7 +1100,7 @@ HTTP 和契约：
 6. 180 天安全审计、过期 verification、OAuth replay payload、过期 token 与达到 31 天保护窗且无活跃 token 的 family tombstone 每日清理，每周单次完整 D1 Workflow export 直写私有 R2、D1 租约串行化的 8/9 GB 免费额度保护、无效新写对象的精确补偿删除、持久化备份健康状态与管理 SPA 提醒，以及会在内存 SQLite 中语义执行但只生成本地计划的隔离恢复校验器。
 7. GitHub Actions 上的 OpenAPI/schema/config drift、secret scan、组件/workerd/D1/浏览器测试、production build、Wrangler dry-run/startup check，以及 Cloudflare Workers Builds 中 strict-by-default、首次接管受版本锁定双重门禁保护的生产发布编排。
 
-已获准完成的生产基础输入包括 Cloudflare account ID、D1、私有 R2 bucket、R2 180 天 lifecycle、GitHub OAuth App 与凭证、生产 Worker、Cloudflare runtime Secret、Workers Builds trigger、frozen install Build command，以及 `production` 分支的发布 actor、无 bypass required `check` gate 和历史安全 ruleset。GitHub Actions workflow 与 required gate 已投入使用；每个新的 release candidate 仍须等待其最终 `main` SHA 的 `check` 成功。production D1 ledger 已包含当前 migration，已应用 migration 保持不可改写。当前 trigger 使用的 broad build token 是 owner 已接受但尚未收敛的临时例外，不代表最小权限完成；non-production builds 必须保持关闭，未选中的旧 token 仍待单独处置。当前仍未完成的外部步骤是通过受版本锁定的一次性流程让仓库配置接管现有 Dashboard template、完成首次成功部署和 Custom Domain 验收；这些步骤及临时 Build variable 的添加、删除仍受第 27 节约束。生产 CORS 继续保持 `[]`，Web/Mobile 接线继续禁用。仓库保持 fail-closed；缺少这些输入必须阻止对应外部接线或客户端启用，但不阻止本地实现与验证。
+已获准完成的生产基础输入包括 Cloudflare account ID、D1、私有 R2 bucket、R2 180 天 lifecycle、GitHub OAuth App 与凭证、生产 Worker、Cloudflare runtime Secret、Workers Builds trigger、frozen install Build command，以及 `production` 分支的发布 actor、无 bypass required `check` gate 和历史安全 ruleset。GitHub Actions workflow 与 required gate 已投入使用；每个新的 release candidate 仍须等待其最终 `main` SHA 的 `check` 成功。production D1 ledger 已包含当前 migration，已应用 migration 保持不可改写。当前 trigger 使用的 broad build token 是 owner 已接受但尚未收敛的临时例外，不代表最小权限完成；non-production builds 必须保持关闭，未选中的旧 token 仍待单独处置。一次性 Dashboard template 接管已经把仓库生成的 Worker version 与 Custom Domain 写入生产，但该 build 随后因 Workers Free 不允许 direct Workflow schedule 而失败，因此尚未完成首次成功发布、完整验收、tag 或 GitHub Release；临时 bootstrap Build variable 已获准删除且必须保持不存在，下一个获准的精确 SHA 只能用本变更的顶层 Worker Cron 方案执行 strict 发布。生产 CORS 继续保持 `[]`，Web/Mobile 接线继续禁用。仓库保持 fail-closed；缺少这些输入必须阻止对应外部接线或客户端启用，但不阻止本地实现与验证。
 
 ## 27. 实施授权与外部操作门禁
 
@@ -1118,7 +1119,7 @@ HTTP 和契约：
 当前生产接线输入采用以下 fail-closed 状态，不构成设计阻塞：
 
 - `eruoo-web` 与 `eruoo-mobile` 在精确 redirect URI 和 app-link 获批前不启用；生产 CORS allowlist 保持 `[]`。
-- production D1、R2、Cloudflare account、Worker、GitHub OAuth App、Workers Builds trigger 和全部 Cloudflare runtime Secret 已通过获准的外部配置建立，稳定非敏感标识提交在 `wrangler.jsonc`，仓库中只保留 Secret 名称与校验规则；GitHub CI status gate 与 Workers Builds frozen install 已完成，production D1 ledger 已包含当前 migration。当前 broad build token 仅为 owner 批准的首次接线临时例外，最小权限收敛和未使用 token 处置仍待后续授权；一次性 Dashboard template 接管、首次成功部署与 Custom Domain 验收尚未完成，临时 Build variable 的添加、删除和新精确 SHA 部署仍需各自当次授权，不能据此宣称生产已上线。
+- production D1、R2、Cloudflare account、Worker、GitHub OAuth App、Workers Builds trigger 和全部 Cloudflare runtime Secret 已通过获准的外部配置建立，稳定非敏感标识提交在 `wrangler.jsonc`，仓库中只保留 Secret 名称与校验规则；GitHub CI status gate 与 Workers Builds frozen install 已完成，production D1 ledger 已包含当前 migration。当前 broad build token 仅为 owner 批准的首次接线临时例外，最小权限收敛和未使用 token 处置仍待后续授权。一次性 Dashboard template 接管已经把仓库 Worker version 与 Custom Domain 写入生产，但首次完整成功部署与验收尚未完成；临时 bootstrap Build variable 已获准删除且必须保持不存在，后续新精确 SHA 必须按 strict deploy 取得当次授权，不能据此宣称生产已上线。
 - API Key permission allowlist 当前只包含 `status:read`，API Key 创建固定使用该权限和 180 天有效期。后续每个允许 API Key 访问的业务 operation 仍必须在同一变更中加入精确 `resource:action`、运行时门禁、14 天内的 `API-Key-Expires-At` 响应头、需要时的 CORS expose header、OpenAPI 和测试；测试用 `fixture:*` 不得进入生产 allowlist。
 
 ## 28. 主要风险
@@ -1126,6 +1127,8 @@ HTTP 和契约：
 | 风险 | 影响 | 当前缓解措施 |
 | --- | --- | --- |
 | Workers Free 单请求 10 ms CPU | 登录、Passkey 或复杂 schema 可能返回 CPU exceeded | 远端逐路由实测，必要时升级 Workers Paid |
+| Workers Paid 专属的 direct Workflow schedule | Free 部署在写入部分 Worker 状态后失败 | Workflow binding 不配置 `schedules`；第二个顶层 Worker Cron 通过 binding 创建实例，发布门禁同时拒绝 direct schedule 回归 |
+| Workers Free 每实例 50 次 external subrequest | D1 export 轮询或重试过多会让 Workflow 以资源超限失败 | 55 秒轮询且最多 15 次；15 次 sleep 距硬截止保留 75 秒；start/poll/upload 最坏 33 次；外部 fetch 禁止自动重定向；测试把预算与 retry 配置绑定 |
 | D1 export 阻塞请求 | 每周备份可能短暂影响登录和 API；平台延迟启动会让实际影响晚于 03:00 | 每周日 03:00 Asia/Shanghai 调度；真实执行起点后 15 分钟未完成即停止轮询并验证平台自动取消；管理 SPA 显示持久失败状态 |
 | API Key 计数写放大 | 接近 D1 日写入额度 | 个人低流量、指标实测、每请求只验证一次 |
 | Better Auth API Key 验证吞掉 D1 故障 | 依赖故障可能被误报为无效凭证 401 | 固定并验证 API Key 依赖补丁，使非协议依赖故障继续抛出并由 `/api/status` 映射为 503 |
@@ -1161,11 +1164,16 @@ HTTP 和契约：
 - [Better Auth on npm](https://www.npmjs.com/package/better-auth)
 - [Hono Documentation](https://hono.dev/docs)
 - [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)
+- [Cloudflare Workers Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)
+- [Cloudflare Workers Limits](https://developers.cloudflare.com/workers/platform/limits/)
 - [Cloudflare Workers Rate Limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)
 - [Cloudflare D1 Documentation](https://developers.cloudflare.com/d1/)
 - [Cloudflare D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/)
 - [Cloudflare D1 Import and Export](https://developers.cloudflare.com/d1/best-practices/import-export-data/)
 - [Cloudflare Workflow D1 Backup Example](https://developers.cloudflare.com/workflows/examples/backup-d1/)
+- [Cloudflare Trigger Workflows](https://developers.cloudflare.com/workflows/build/trigger-workflows/)
+- [Cloudflare Workflows Workers API](https://developers.cloudflare.com/workflows/build/workers-api/)
+- [Cloudflare Workflows Limits](https://developers.cloudflare.com/workflows/reference/limits/)
 - [Cloudflare R2 Pricing](https://developers.cloudflare.com/r2/pricing/)
 - [pnpm Settings](https://pnpm.io/settings)
 - [pnpm Continuous Integration](https://pnpm.io/continuous-integration)

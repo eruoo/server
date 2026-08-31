@@ -10,6 +10,9 @@ import {
   BACKUP_STORAGE_SOFT_LIMIT_BYTES,
   DATABASE_BACKUP_LEASE_DURATION_MS,
   DATABASE_BACKUP_MAX_DURATION_MS,
+  D1_EXPORT_POLL_STEP_MAX_ATTEMPTS,
+  D1_EXPORT_START_STEP_MAX_ATTEMPTS,
+  D1_EXPORT_UPLOAD_STEP_MAX_ATTEMPTS,
 } from "../backup/constants"
 import {
   pollD1Export,
@@ -78,22 +81,27 @@ export const START_EXPORT_STEP_CONFIG = {
   retries: {
     backoff: "constant",
     delay: "1 second",
-    limit: 1,
+    limit: D1_EXPORT_START_STEP_MAX_ATTEMPTS,
   },
   sensitive: "output",
   timeout: "30 seconds",
 } as const
 
-const POLL_EXPORT_STEP_CONFIG = {
-  ...DATABASE_STEP_CONFIG,
+export const POLL_EXPORT_STEP_CONFIG = {
+  retries: {
+    backoff: "linear",
+    delay: "1 second",
+    limit: D1_EXPORT_POLL_STEP_MAX_ATTEMPTS,
+  },
   sensitive: "output",
+  timeout: "30 seconds",
 } as const
 
-const UPLOAD_STEP_CONFIG = {
+export const UPLOAD_STEP_CONFIG = {
   retries: {
     backoff: "linear",
     delay: "10 seconds",
-    limit: 2,
+    limit: D1_EXPORT_UPLOAD_STEP_MAX_ATTEMPTS,
   },
   timeout: "15 minutes",
 } as const

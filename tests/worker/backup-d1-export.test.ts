@@ -49,6 +49,7 @@ describe("D1 REST export client", () => {
       Authorization: `Bearer ${apiToken}`,
       "Content-Type": "application/json",
     })
+    expect(request?.[1]?.redirect).toBe("error")
     expect(JSON.parse(String(request?.[1]?.body))).toEqual({
       output_format: "polling",
     })
@@ -81,6 +82,7 @@ describe("D1 REST export client", () => {
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
       current_bookmark: "bookmark-1",
     })
+    expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe("error")
   })
 
   it("accepts optional inner export discriminators omitted by the API", async () => {
@@ -141,6 +143,7 @@ describe("D1 REST export client", () => {
     )
 
     expect(download.contentLength).toBe(9)
+    expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe("error")
     await expect(new Response(download.body).text()).resolves.toBe("SELECT 1;")
     await expect(
       downloadD1Export(fetcher, "http://signed.example/dump.sql"),

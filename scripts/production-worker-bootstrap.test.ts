@@ -48,6 +48,7 @@ function generatedConfig(): Record<string, unknown> {
     routes: [{ custom_domain: true, pattern: "auth.eruoo.me" }],
     secrets: { required: [...requiredProductionSecrets] },
     streaming_tail_consumers: [],
+    triggers: { crons: ["0 20 * * *", "0 19 * * SAT"] },
     vars: {
       APP_ENV: "production",
       CF_ACCOUNT_ID: accountId,
@@ -59,7 +60,6 @@ function generatedConfig(): Record<string, unknown> {
         binding: "DATABASE_BACKUP_WORKFLOW",
         class_name: "DatabaseBackupWorkflow",
         name: "eruoo-database-backup",
-        schedules: ["0 19 * * 6"],
       },
     ],
   }
@@ -443,6 +443,30 @@ describe("production Worker bootstrap precondition", () => {
         harness.inspector,
       ),
     ).rejects.toThrow(message)
+  })
+
+  it("rejects a missing Worker cron or a residual direct Workflow schedule", async () => {
+    const missingBackupCron = generatedConfig()
+    missingBackupCron["triggers"] = { crons: ["0 20 * * *"] }
+    const directWorkflowSchedule = generatedConfig()
+    directWorkflowSchedule["workflows"] = [
+      {
+        ...(
+          directWorkflowSchedule["workflows"] as Record<string, unknown>[]
+        )[0],
+        schedules: ["0 19 * * SAT"],
+      },
+    ]
+
+    for (const config of [missingBackupCron, directWorkflowSchedule]) {
+      const harness = createHarness("pre", { config })
+      await expect(
+        assertProductionWorkerBootstrapPrecondition(
+          templateVersionId,
+          harness.inspector,
+        ),
+      ).rejects.toThrow("approved core identity")
+    }
   })
 
   it("does not expose Wrangler stderr or an API exception", async () => {

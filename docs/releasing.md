@@ -112,23 +112,25 @@ Workers Builds 可能在构建父环境中提供 `CLOUDFLARE_API_BASE_URL` 和 `
 
 `release:preflight` 验证 source/generated production 配置和 required-secret 名称清单中的核心契约，包括顶层 `account_id` 与 runtime `CF_ACCOUNT_ID` 的一致性、production D1 ID、唯一 Custom Domain route、Static Assets 目录、固定 binding 名称与 ID、migration 配置，以及显式清空 Streaming Tail Consumer 等外发 telemetry。它不枚举 Wrangler 的全部可选字段，也不读取远端 Secret；因此不能证明 Worker、OAuth App、DNS、GitHub status gate 或 Builds trigger 已正确接线。GitHub Actions 的完整 `check` 证明仓库门禁在该 commit 上成功，但不构成 owner 的生产部署授权。
 
-## 首次生产接线门禁
+## 首次成功生产部署门禁
 
-首次部署前逐项确认：
+首次成功部署前逐项确认：
 
 - production GitHub OAuth App 使用 Homepage `https://auth.eruoo.me` 和精确 callback `https://auth.eruoo.me/api/auth/callback/github`。
 - Worker `eruoo-server-production` 已存在，且五个 required runtime Secrets 已写入。
 - `.github/workflows/check.yml` 已在最终 `main` commit 上产生成功的 `check`，`production` 的 required status ruleset 为 Active、expected source 是 GitHub Actions 且没有 bypass actor。
 - 现有 Worker 已完成 Workers Builds 接线并保存配置；production branch、命令和 variables 均与本文一致，保存时没有触发 build 或改变 Active Deployment。
-- 只读确认 Active Deployment 仍是准备接管的 Dashboard template，并记录其当前 `version_id`；远端只有精确五个 required Secret，Custom Domain changeset 只会新增 `auth.eruoo.me`。首次接管变量只能锁定这个精确 template ID。
+- 只读确认 Active Deployment 已是先前部分接管写入的仓库 version，远端只有精确五个 required Secret，`auth.eruoo.me` Custom Domain 仍归属本 Worker；`PRODUCTION_WORKER_BOOTSTRAP_VERSION_ID` 已删除且必须保持不存在，本次只允许 strict deploy。
 - Workers Builds 的 production token 与运行时 D1 export token 分离；当前 broad-token 临时例外已按上文记录，non-production branch builds 必须保持关闭，且未选中的旧 token 不得被误用。
-- `eruoo.me` zone 为 Active，`auth.eruoo.me` 没有冲突的 A、AAAA 或 CNAME；不要预先手工创建 Custom Domain DNS 记录。
+- `eruoo.me` zone 为 Active，`auth.eruoo.me` 只保留当前 Worker Custom Domain 管理的 DNS，没有平行或冲突的 A、AAAA 或 CNAME；不要手工创建或修改它的 DNS 记录。
 - R2 bucket 保持私有，未启用 `r2.dev`、公开 Custom Domain 或浏览器 CORS；180 天 lifecycle 已启用。
 - 当前 `production` 尚未被未授权推进，准备发布的完整 `main` SHA 已取得 owner 当次授权。
 
 ## 触发生产部署
 
 Workers Builds 必须已经按上文连接到现有 Worker 并保存配置。再次确认 Build history 和 Active Deployment 没有因接线而变化，确认最终 `main` SHA 的 GitHub Actions `check` 为 `success` 且 production ruleset 会强制该结果，然后取得 owner 对同一精确 commit 的当次部署授权。不要先推进 `production` 再完成 CI/status gate 接线，也不要通过 Dashboard 手动触发其他 branch/SHA 的 build 或直接 deploy；下面这一次获准的 `production` fast-forward push 是该候选 SHA 的初始 production build 的唯一触发器。只有本文故障流程明确允许、精确 SHA 和代码均未变化并重新取得 owner 授权时，才可重试同一个失败 build。
+
+使用 Workers Free 时，部署前还必须在 Cloudflare 账号级资源中确认：`账号现有 Cron 总数 - 本 Worker 现有 Cron 数 + 2 <= 5`。本 Worker 从一个每日清理 Cron 增为每日清理与每周备份两个 Cron，不能仅凭仓库配置写成“2/5”来推断账号仍有容量。无法读取或确认账号总数时停止发布。
 
 只有 `LoTwT` 执行：
 
@@ -170,7 +172,8 @@ GitHub Actions 中最终 `main` SHA 对应的 `check` 必须为 `success`，日�
 - production D1 migration ledger 包含当前全部 migration。
 - Active Deployment 已由仓库生成配置创建，不再来自 Dashboard template；首次接管的临时 Build variable 已删除。
 - Worker bindings 包含 `DB`、`BACKUPS`、`DATABASE_BACKUP_WORKFLOW` 和 `CF_VERSION_METADATA`；`workers.dev` 与 Preview URL 保持关闭。
-- 每日清理 cron 为 `0 20 * * *`，每周备份 Workflow schedule 为 `0 19 * * 6`。
+- 等待 Cron 变更完成传播（最长可达 15 分钟）后，确认顶层 Worker Cron 只有每日清理 `0 20 * * *` 与每周备份派发 `0 19 * * SAT`；`DATABASE_BACKUP_WORKFLOW` binding 不含 direct schedule。传播期间不重复部署。
+- Cloudflare 账号级 Cron Trigger 总数不超过当前 Free 上限 5 个；该结果必须在远端核对，不能由当前 Worker 的配置推断。
 
 D1 export 可能让数据库短暂不可用。首次人工备份或 export-token 权限验证必须另行取得授权，并在无业务流量的受控窗口执行；普通上线验收不主动触发备份。
 
@@ -185,8 +188,8 @@ tag、GitHub Release 和 package version 不一致时停止发布；不得通过
 - GitHub Actions `check` 缺失、跳过、取消或失败：required status gate 必须阻止 `production` 更新；修复 `main` 后重新走 PR，不能通过 Dashboard 手动部署补偿。
 - Workers Builds frozen install、部署入口或 release preflight 失败：没有执行 migration 或 deploy。若根因在仓库，或来自平台而无法在 Dashboard Build variables 中枚举和修正，修复 `main` 后重新走 PR；若根因是可枚举的 Cloudflare Build setting，取得 owner 授权后修改并只读回查，无须制造无意义的代码 PR。仅外部瞬时故障或已获准的 Build setting 修正、代码与精确 SHA 均未变化时，才可在重新核对 SHA、ruleset、Active Deployment 并取得 owner 对本次重试的明确授权后重试同一失败 build。
 - Migration 失败：deploy 自动停止；检查远端 migration ledger，不修改已应用 migration，不删除或重建 production D1。
-- Migration 成功但 Worker deploy 失败：D1 可能已升级而 Worker 仍是旧版本；保持向后兼容。已经进入 production ledger 的 migration 文件不得修改、重命名或删除，修复 schema 必须新增 migration；再次 apply 已存在的 migration 应为 no-op。
-- bootstrap 的 Worker deploy 一旦开始后报错，不能假定 Active Deployment 仍是模板。先删除 bootstrap variable 的操作仍需单独授权；在任何重试前只读核对 Active Deployment、version bindings、五个 Secret、Workflow、cron、Custom Domain 和 route。若仓库 version 已经 Active，禁止重新添加 bootstrap variable；取得对同一精确 SHA 的新部署授权后，改用默认 strict deploy 收敛未完成配置。只有远端仍是原锁定模板、无新 binding/Workflow/trigger/domain 且所有检查一致时，才可重新申请一次 bootstrap。任何混合状态、读取失败或来源不明都必须停止，不能自动 rollback 或 retry。
+- Migration 成功但 Worker deploy 失败：D1 可能已升级；Worker version、binding、trigger 或其他配置也可能已经部分生效，不能假定仍是旧版本。先只读核对 Active Deployment、version bindings、`DATABASE_BACKUP_WORKFLOW` 不含 direct schedule、本 Worker 精确两个 Cron 与账号 Cron 总数；禁止自动回滚或重试。已经进入 production ledger 的 migration 文件不得修改、重命名或删除，修复 schema 必须新增 migration；再次 apply 已存在的 migration 应为 no-op。
+- bootstrap 的 Worker deploy 一旦开始后报错，不能假定 Active Deployment 仍是模板。当前 bootstrap variable 已获准删除，必须保持不存在；在任何重试前只读核对 Active Deployment、version bindings、五个 Secret、Workflow、cron、Custom Domain 和 route。仓库 version 已经 Active，禁止重新添加 bootstrap variable；取得对同一精确 SHA 的新部署授权后，改用默认 strict deploy 收敛未完成配置。任何混合状态、读取失败或来源不明都必须停止，不能自动 rollback 或 retry。
 - bootstrap postcondition 失败：Worker 可能已经完整上线，也可能只完成 version、Secret、Workflow 或 trigger 的一部分；按上一条做相同只读盘点，在状态收敛并完成验收前不得打 tag、创建 Release 或宣称上线成功。
 - 代码、测试或文档发生任何变化时，必须走新 PR、新 squash SHA、最终 `main` CI 和该新 SHA 的生产授权。只有代码和精确 SHA 都未变化，且失败属于外部瞬时故障或已经获准修正的 Build setting 时，才可在重新核对 migration ledger、Active Deployment、ruleset 和 build 变量后申请重试同一 SHA；每次失败都会结束当次部署授权。
 - Worker deploy 成功但最终远端 ref 校验失败：不得打 tag；核对 Active Deployment 与当前 `production` 的完整 SHA。等待当前 `production` 的获准 build 成功，或对该精确 commit 重新取得部署授权后再恢复一致，不能用强推或移动公开 tag 掩盖漂移。

@@ -150,7 +150,7 @@ pnpm run check
 
 ## 本地备份与恢复验证
 
-本地 Wrangler 配置会注册 `DATABASE_BACKUP_WORKFLOW` binding，但不配置 schedule；每周六 `19:00 UTC` 的 schedule 只存在于生成的 production 配置。日常 `dev` 和 `check` 不会导出 D1、写入远端 R2 或启动生产备份。
+本地 Wrangler 配置会注册 `DATABASE_BACKUP_WORKFLOW` binding，但不配置 cron。production 使用两个顶层 Worker Cron：`0 20 * * *` 执行每日清理，`0 19 * * SAT` 在每周六 `19:00 UTC` 通过 binding 启动备份 Workflow；Workflow binding 本身不使用只适用于 Workers Paid 的 direct schedule。日常 `dev` 和 `check` 不会导出 D1、写入远端 R2 或启动生产备份。
 
 恢复规划器只读取已经下载到本地的原始 `.sql` 快照与 R2 HEAD 描述文件；描述文件必须保留未加引号的单次 put `etag`，供本地 MD5 比对。规划器会在启用 defensive mode、关闭 extension loading 且配置 fail-closed authorizer 的 `:memory:` SQLite 中真实执行快照，验证实际 schema、`d1_migrations` 与仓库 migration 清单的 schema 精确一致，并拒绝附着到 migration ledger 的用户定义 index，再在本地事务中执行凭证/旧审计 scrub 并验证结果；最后只输出凭证清理 SQL 和人工后续步骤：
 

@@ -7,6 +7,11 @@ import type {
 import { NonRetryableError } from "cloudflare:workflows"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import {
+  D1_EXPORT_MAX_POLL_DURATION_MS,
+  D1_EXPORT_MAX_POLL_OBSERVATIONS,
+  D1_EXPORT_POLL_INTERVAL_MS,
+} from "../../src/worker/backup/constants"
 import type { BackupFetch } from "../../src/worker/backup/d1-export"
 import { DatabaseBackupError } from "../../src/worker/backup/errors"
 import {
@@ -16,15 +21,19 @@ import {
 import {
   createDurableExportOperations,
   DatabaseBackupWorkflow,
+  type DatabaseBackupWorkflowResult,
+  POLL_EXPORT_STEP_CONFIG,
   recordDatabaseBackupExecutionStart,
   recordDatabaseBackupWorkflowTerminalTime,
   recordDatabaseBackupWorkflowTerminalState,
   START_EXPORT_STEP_CONFIG,
+  UPLOAD_STEP_CONFIG,
 } from "../../src/worker/workflows/database-backup"
 
 const accountId = "a".repeat(32)
 const databaseId = "00000000-0000-4000-8000-000000000001"
 const apiToken = "synthetic-test-token"
+const workersFreeExternalSubrequestLimit = 50
 
 type StepDo = (
   name: string,
@@ -47,6 +56,7 @@ function exportEnvironment() {
 function databaseBackupWorkflowEnvironment() {
   return new Proxy(env, {
     get(target, property, receiver) {
+      if (property === "CF_ACCOUNT_ID") return accountId
       if (property === "CF_VERSION_METADATA") {
         return {
           id: "synthetic-workflow-version",
@@ -54,6 +64,8 @@ function databaseBackupWorkflowEnvironment() {
           timestamp: "2033-05-18T03:20:00.000Z",
         }
       }
+      if (property === "D1_DATABASE_ID") return databaseId
+      if (property === "D1_EXPORT_API_TOKEN") return apiToken
 
       return Reflect.get(target, property, receiver)
     },
@@ -87,19 +99,39 @@ async function holdDatabaseBackupLease(
 function runDatabaseBackupWorkflow(
   event: WorkflowEvent<unknown>,
   doStep: StepDo,
-): Promise<unknown> {
+): Promise<DatabaseBackupWorkflowResult> {
   return Reflect.apply(
     DatabaseBackupWorkflow.prototype.run,
     { env: databaseBackupWorkflowEnvironment() },
     [event, workflowStep(doStep)],
-  )
+  ) as Promise<DatabaseBackupWorkflowResult>
 }
 
 describe("database backup Workflow durability", () => {
   afterEach(async () => {
+    vi.unstubAllGlobals()
     vi.useRealTimers()
     await env.DB.prepare("DELETE FROM database_backup_health").run()
     await env.DB.prepare("DELETE FROM maintenance_lease").run()
+  })
+
+  it("keeps the worst-case external request budget below Workers Free", () => {
+    expect(POLL_EXPORT_STEP_CONFIG.retries.limit).toBe(2)
+    expect(UPLOAD_STEP_CONFIG.retries.limit).toBe(2)
+
+    const configuredMaximum =
+      START_EXPORT_STEP_CONFIG.retries.limit +
+      D1_EXPORT_MAX_POLL_OBSERVATIONS * POLL_EXPORT_STEP_CONFIG.retries.limit +
+      UPLOAD_STEP_CONFIG.retries.limit
+
+    expect(
+      D1_EXPORT_MAX_POLL_DURATION_MS -
+        D1_EXPORT_MAX_POLL_OBSERVATIONS * D1_EXPORT_POLL_INTERVAL_MS,
+    ).toBeGreaterThanOrEqual(60_000)
+    expect(configuredMaximum).toBe(33)
+    expect(
+      workersFreeExternalSubrequestLimit - configuredMaximum,
+    ).toBeGreaterThanOrEqual(10)
   })
 
   it("persists the actual first-step time and reuses it during replay", async () => {
@@ -405,10 +437,62 @@ describe("database backup Workflow durability", () => {
       .catch((failure: unknown) => failure)
 
     expect(error).toBeInstanceOf(NonRetryableError)
+    expect(doStep.mock.calls[0]?.[1]).toBe(POLL_EXPORT_STEP_CONFIG)
     expect(error).toMatchObject({
       message: "backup_export_authentication_failed",
       name: "DatabaseBackup/backup_export_authentication_failed",
     })
+  })
+
+  it("wires the upload retry budget into the durable upload step", async () => {
+    const sql = "SELECT 1;"
+    const signedUrl = "https://signed.example/database.sql"
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      if (String(input) === signedUrl) {
+        return new Response(sql, {
+          headers: {
+            "Content-Length": String(new TextEncoder().encode(sql).length),
+          },
+        })
+      }
+
+      return Response.json({
+        result: {
+          at_bookmark: "bookmark-1",
+          result: {
+            filename: "database.sql",
+            signed_url: signedUrl,
+          },
+          status: "complete",
+          success: true,
+          type: "export",
+        },
+        success: true,
+      })
+    })
+    vi.stubGlobal("fetch", fetcher)
+    const doStep = vi.fn<StepDo>(
+      async (
+        _name: string,
+        _config: WorkflowStepConfig,
+        callback: () => Promise<unknown>,
+      ) => callback(),
+    )
+
+    const result = await runDatabaseBackupWorkflow(
+      databaseBackupWorkflowEvent(
+        "workflow-upload-config-test",
+        new Date("2033-05-18T03:20:00.000Z"),
+      ),
+      doStep,
+    )
+
+    const uploadCall = doStep.mock.calls.find(
+      ([name]) => name === "stream full D1 export directly to R2",
+    )
+    await env.BACKUPS.delete(result.key)
+    expect(uploadCall?.[1]).toBe(UPLOAD_STEP_CONFIG)
+    expect(fetcher).toHaveBeenCalledTimes(2)
   })
 
   it("persists a terminal result inside a retryable durable step", async () => {

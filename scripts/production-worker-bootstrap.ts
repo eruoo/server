@@ -6,6 +6,10 @@ import { isDeepStrictEqual } from "node:util"
 import { z } from "zod"
 
 import {
+  DAILY_CLEANUP_SCHEDULE,
+  DATABASE_BACKUP_SCHEDULE,
+} from "../src/worker/schedules"
+import {
   hasNoProductionOutboundTelemetry,
   productionCustomDomainRoutesSchema,
   requiredProductionSecrets,
@@ -112,6 +116,11 @@ const generatedConfigSchema = z
     routes: productionCustomDomainRoutesSchema,
     secrets: z.object({ required: z.array(z.string()) }).loose(),
     streaming_tail_consumers: z.tuple([]),
+    triggers: z
+      .object({
+        crons: z.array(z.string()),
+      })
+      .strict(),
     vars: z.record(z.string(), z.string()),
     version_metadata: z.object({ binding: z.string() }).loose(),
     workflows: z.array(
@@ -120,7 +129,7 @@ const generatedConfigSchema = z
           binding: z.string(),
           class_name: z.string(),
           name: z.string(),
-          schedules: z.array(z.string()),
+          schedules: z.array(z.string()).optional(),
         })
         .loose(),
     ),
@@ -343,8 +352,10 @@ function hasApprovedGeneratedCore(generatedConfig: GeneratedConfig): boolean {
     generatedConfig.workflows[0]?.binding === "DATABASE_BACKUP_WORKFLOW" &&
     generatedConfig.workflows[0]?.class_name === "DatabaseBackupWorkflow" &&
     generatedConfig.workflows[0]?.name === "eruoo-database-backup" &&
-    hasExactUniqueEntries(generatedConfig.workflows[0]?.schedules ?? [], [
-      "0 19 * * 6",
+    generatedConfig.workflows[0]?.schedules === undefined &&
+    hasExactUniqueEntries(generatedConfig.triggers.crons, [
+      DAILY_CLEANUP_SCHEDULE,
+      DATABASE_BACKUP_SCHEDULE,
     ]) &&
     generatedConfig.version_metadata.binding === "CF_VERSION_METADATA" &&
     new Set(expectedBindingNames).size === expectedBindingNames.length
