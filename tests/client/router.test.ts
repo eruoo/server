@@ -82,7 +82,7 @@ describe("app router accessibility", () => {
     window.history.replaceState({}, "", "/")
   })
 
-  it("renders the requested route immediately while Session verification is pending", async () => {
+  it("renders a Session boundary without protected content while verification is pending", async () => {
     const router = createAppRouter()
     const wrapper = mount(App, {
       attachTo: document.body,
@@ -99,7 +99,7 @@ describe("app router accessibility", () => {
       await router.isReady()
       await flushPromises()
 
-      expect(wrapper.get("#workspace-title").text()).toBe("身份与访问状态")
+      expect(wrapper.find("#workspace-title").exists()).toBe(false)
       expect(wrapper.text()).toContain("正在验证 Session")
       expect(authMocks.getSession).not.toHaveBeenCalled()
     } finally {
@@ -283,6 +283,13 @@ describe("app router accessibility", () => {
 
   it("restores scroll positions and focuses the destination heading", async () => {
     window.history.replaceState({}, "", "/security/audit-log")
+    sessionState.value = {
+      data: { user: { name: "Synthetic Owner" } },
+      error: null,
+      isPending: false,
+      isRefetching: false,
+      refetch: createSessionRefetch(),
+    }
 
     const router = createAppRouter()
     const wrapper = mount(App, {

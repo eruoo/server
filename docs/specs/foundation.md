@@ -690,7 +690,7 @@ OAuth form 中语义为 singleton 的已知参数必须在交给 Better Auth 前
 3. CORS。先处理合法 preflight。
 4. CSRF。只用于 Cookie 或其他 ambient credential 的浏览器 unsafe 请求。
 5. Body limit。普通 JSON 默认上限 1 MiB，上传另设专用策略；自有 API 超限使用 413 Problem Details，token endpoint 使用第 11.3 节的 400 `invalid_request`。
-6. 请求与下游调用 timeout。应用级 timeout 只包裹无副作用的自有 API `GET`/`HEAD`；mutation 和全部 `/api/auth/*` handler 不使用不会取消实际工作的 timeout race。对支持取消的下游 `fetch` 传播 AbortSignal，不得假设 D1 支持取消已发出的 statement。安全只读请求超时使用 504 Problem Details；token endpoint 仅在第 11.3 节的可取消边界返回非协议 503 transport response。
+6. 请求与下游调用 timeout。应用级 timeout 只包裹无副作用的自有 API `GET`/`HEAD`，以及固定不刷新有效凭证的精确 `GET /api/auth/get-session`；后者是 `/api/auth/*` 的唯一例外并复用 15 秒边界。mutation 和其他 `/api/auth/*` handler 不使用不会取消实际工作的 timeout race。对支持取消的下游 `fetch` 传播 AbortSignal，不得假设 D1 支持取消已发出的 statement。安全只读请求超时使用 504 Problem Details；Better Auth Session 读取保持其原生 JSON 错误契约；token endpoint 仅在第 11.3 节的可取消边界返回非协议 503 transport response。
 7. Authentication。
 8. OpenAPI request validation。
 9. 粗粒度 permission/scope 检查和领域资源授权。
@@ -712,6 +712,7 @@ OAuth form 中语义为 singleton 的已知参数必须在交给 Better Auth 前
 - 使用 Composition API 和 `<script setup lang="ts">`。
 - 不引入 Nuxt。
 - 首版不引入 Pinia。Session 使用 Better Auth Vue reactive client，页面状态优先使用局部状态或 composable。
+- Better Auth 客户端的 30 秒网络 deadline 必须与库或调用方提供的 AbortSignal 合并，不能因已有 signal 而失效；Session 未确认有效前不得启动备份状态等额外 owner-only 请求。
 - SPA 通过 Workers Static Assets 发布，完整路由配置以 [Worker 和 Assets](#222-worker-和-assets)为准。
 - 其他普通静态资源直接由 Assets 提供，不消耗不必要的 Worker 动态请求。
 - 前端 route guard 只改善 UX，不是安全边界。所有数据和操作仍由后端验证。
@@ -944,6 +945,7 @@ HTTP 和契约：
 - OAuth authorization endpoint 不返回 CORS header。
 - 自有 API 隐式 HEAD 的 404、CSRF 的 `permission-denied` 403、撤销 operation 的 413 契约，以及 token endpoint 超限 400 与超时 503 的协议/transport 分界。
 - 高风险认证与 owner OAuth 授权撤销端点的外层 10/60 平台限流、动态 client ID 归一化、429/503 fail-closed、限流拒绝不产生审计写，以及 mutation 不进入应用级 timeout race。
+- 精确 `GET /api/auth/get-session` 进入 15 秒服务端 timeout，其他 Better Auth 路由保持排除；真实 Vue Session 读取即使自带 AbortSignal 也必须在 30 秒客户端 deadline 后退出 pending，Session 未确认前不得发起备份状态请求。
 - `/api/status` 的 owner Session/API Key 二选一认证、200、400、401、403、503、no-store 和 CORS 限制。
 - `/api/security/backup-status` 的 owner-only 认证、严格响应契约、较旧 Workflow 终态不能覆盖较新状态，以及 success 自动恢复 failed 状态；租约冲突不得改变 `never-run` 或既有健康状态，首个 execution-start step 失败时也不得生成伪健康记录。调度测试必须证明两个顶层 Worker Cron 不互相代跑、备份 Cron 以确定性 ID 幂等创建 Workflow、重复投递被安全跳过、启动失败被传播、Workflow 无 direct schedule，并把 start/poll/upload retry 配置与最多 15 次 poll 的最坏外部请求上限固定为 33，低于 Free 的 50 次限制。
 

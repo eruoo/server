@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { effectScope } from "vue"
 
 type FetchImplementation = (
   input: RequestInfo | URL,
@@ -8,6 +9,12 @@ type FetchImplementation = (
 function requestFromFetchCall(input: RequestInfo | URL, init?: RequestInit) {
   if (input instanceof Request) return input
   return new Request(new URL(input.toString(), window.location.origin), init)
+}
+
+function mockAuthRequestTimeout(): AbortController {
+  const timeoutController = new AbortController()
+  vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutController.signal)
+  return timeoutController
 }
 
 function setSignedAuthorizeLocation() {
@@ -27,16 +34,17 @@ function expectAuthorizeContinuation(body: Record<string, unknown>) {
   expect(String(body["oauth_query"])).not.toContain("unsigned-error")
 }
 
-describe("authClient OAuth continuation", () => {
+describe("authClient", () => {
   afterEach(() => {
     window.history.replaceState(null, "", "/")
     vi.useRealTimers()
+    vi.restoreAllMocks()
     vi.unstubAllGlobals()
     vi.resetModules()
   })
 
   it("aborts an auth request after the configured client timeout", async () => {
-    vi.useFakeTimers()
+    const timeoutController = mockAuthRequestTimeout()
     let requestSignal: AbortSignal | undefined
     const fetchMock = vi.fn<FetchImplementation>(
       (input: RequestInfo | URL, init?: RequestInit) =>
@@ -60,13 +68,207 @@ describe("authClient OAuth continuation", () => {
         (error: unknown) => ({ error, result: undefined }),
       )
 
-    await vi.advanceTimersByTimeAsync(30_000)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    timeoutController.abort(
+      new DOMException("The auth request timed out.", "TimeoutError"),
+    )
     const outcome = await requestOutcome
 
     expect(fetchMock).toHaveBeenCalledOnce()
     expect(requestSignal?.aborted).toBe(true)
     expect(outcome.result).toBeUndefined()
+    expect(outcome.error).toMatchObject({ name: "TimeoutError" })
+  })
+
+  it("settles Session reads when Better Auth supplies a cancellation signal", async () => {
+    const timeoutController = mockAuthRequestTimeout()
+    let requestSignal: AbortSignal | undefined
+    const fetchMock = vi.fn<FetchImplementation>(
+      (input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          const request = requestFromFetchCall(input, init)
+          requestSignal = request.signal
+          request.signal.addEventListener(
+            "abort",
+            () => reject(request.signal.reason),
+            { once: true },
+          )
+        }),
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    const { authClient } = await import("@client/lib/auth-client")
+    const scope = effectScope()
+    const session = scope.run(() => authClient.useSession())
+    if (!session) throw new Error("The Session store was not created.")
+
+    try {
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+      timeoutController.abort(
+        new DOMException("The auth request timed out.", "TimeoutError"),
+      )
+      await vi.waitFor(() => expect(session.value.isPending).toBe(false))
+
+      expect(requestSignal?.aborted).toBe(true)
+      expect(session.value.isPending).toBe(false)
+      expect(session.value.isRefetching).toBe(false)
+      expect(session.value.error).toMatchObject({ name: "TimeoutError" })
+    } finally {
+      scope.stop()
+    }
+  })
+
+  it("keeps the client timeout active while the response body is pending", async () => {
+    const timeoutController = mockAuthRequestTimeout()
+    let requestSignal: AbortSignal | undefined
+    const fetchMock = vi.fn<FetchImplementation>(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestFromFetchCall(input, init)
+        requestSignal = request.signal
+        const body = new ReadableStream<Uint8Array<ArrayBuffer>>({
+          start(controller) {
+            request.signal.addEventListener(
+              "abort",
+              () => controller.error(request.signal.reason),
+              { once: true },
+            )
+          },
+        })
+
+        return new Response(body, {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        })
+      },
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    const { authClient } = await import("@client/lib/auth-client")
+    const requestOutcome = authClient
+      .$fetch("/passkey/list-user-passkeys", { method: "GET" })
+      .then(
+        (result) => ({ error: undefined, result }),
+        (error: unknown) => ({ error, result: undefined }),
+      )
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    timeoutController.abort(
+      new DOMException("The auth request timed out.", "TimeoutError"),
+    )
+    const outcome = await requestOutcome
+
+    expect(requestSignal?.aborted).toBe(true)
+    expect(outcome.result).toBeUndefined()
+    expect(outcome.error).toMatchObject({ name: "TimeoutError" })
+  })
+
+  it("preserves caller cancellation while adding the client timeout", async () => {
+    const caller = new AbortController()
+    let requestSignal: AbortSignal | undefined
+    const fetchMock = vi.fn<FetchImplementation>(
+      (input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          const request = requestFromFetchCall(input, init)
+          requestSignal = request.signal
+          request.signal.addEventListener(
+            "abort",
+            () => reject(request.signal.reason),
+            { once: true },
+          )
+        }),
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    const { authClient } = await import("@client/lib/auth-client")
+    const requestOutcome = authClient
+      .$fetch("/passkey/list-user-passkeys", {
+        method: "GET",
+        signal: caller.signal,
+      })
+      .then(
+        (result) => ({ error: undefined, result }),
+        (error: unknown) => ({ error, result: undefined }),
+      )
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    caller.abort()
+    const outcome = await requestOutcome
+
+    expect(requestSignal?.aborted).toBe(true)
+    expect(outcome.result).toBeUndefined()
     expect(outcome.error).toMatchObject({ name: "AbortError" })
+  })
+
+  it("preserves caller cancellation while the response body is pending", async () => {
+    const caller = new AbortController()
+    let bodyController:
+      | ReadableStreamDefaultController<Uint8Array<ArrayBuffer>>
+      | undefined
+    let requestSignal: AbortSignal | undefined
+    const fetchMock = vi.fn<FetchImplementation>(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestFromFetchCall(input, init)
+        requestSignal = request.signal
+
+        const body = new ReadableStream<Uint8Array<ArrayBuffer>>({
+          start(controller) {
+            bodyController = controller
+            request.signal.addEventListener(
+              "abort",
+              () => controller.error(request.signal.reason),
+              { once: true },
+            )
+          },
+        })
+
+        return new Response(body, {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        })
+      },
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    const { authClient } = await import("@client/lib/auth-client")
+    const requestOutcome = authClient
+      .$fetch("/passkey/list-user-passkeys", {
+        method: "GET",
+        signal: caller.signal,
+      })
+      .then(
+        (result) => ({ error: undefined, result }),
+        (error: unknown) => ({ error, result: undefined }),
+      )
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    caller.abort()
+
+    let outcome:
+      | Awaited<typeof requestOutcome>
+      | { error: undefined; result: "still-pending" }
+
+    try {
+      outcome = await Promise.race([
+        requestOutcome,
+        new Promise<{ error: undefined; result: "still-pending" }>(
+          (resolve) => {
+            window.setTimeout(
+              () => resolve({ error: undefined, result: "still-pending" }),
+              25,
+            )
+          },
+        ),
+      ])
+
+      expect(outcome.result).toBeUndefined()
+      expect(outcome.error).toMatchObject({ name: "AbortError" })
+      expect(requestSignal?.aborted).toBe(true)
+    } finally {
+      if (!requestSignal?.aborted) {
+        bodyController?.error(new DOMException("Test cleanup", "AbortError"))
+        await requestOutcome
+      }
+    }
   })
 
   it("supplies the signed authorize query when GitHub login starts", async () => {
