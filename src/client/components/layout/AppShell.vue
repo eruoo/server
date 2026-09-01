@@ -11,17 +11,42 @@ import { authClient } from "@client/lib/auth-client"
 import {
   AppWindow,
   KeyRound,
+  LogIn,
   LogOut,
+  RefreshCw,
   ScrollText,
   ShieldCheck,
   X,
 } from "@lucide/vue"
-import { computed, nextTick, onMounted, shallowRef, useTemplateRef } from "vue"
+import {
+  computed,
+  nextTick,
+  onMounted,
+  shallowRef,
+  useTemplateRef,
+  watch,
+} from "vue"
 import { RouterLink, useRoute, useRouter } from "vue-router"
+
+type SessionGateState =
+  | "authenticated"
+  | "unauthenticated"
+  | "unavailable"
+  | "verifying"
 
 const router = useRouter()
 const route = useRoute()
 const { scheme, setScheme } = useTheme()
+const session = authClient.useSession()
+const sessionGateState = computed<SessionGateState>(() => {
+  if (session.value.isPending || session.value.isRefetching) return "verifying"
+  if (session.value.error) return "unavailable"
+  return session.value.data ? "authenticated" : "unauthenticated"
+})
+const sessionIsConfirmed = computed(
+  () => sessionGateState.value === "authenticated",
+)
+const protectedContentMounted = shallowRef(sessionIsConfirmed.value)
 const isSigningOut = shallowRef(false)
 const signOutError = shallowRef(false)
 const mainContent = useTemplateRef<HTMLElement>("main-content")
@@ -54,6 +79,28 @@ onMounted(() => {
   delete query["reauthentication"]
   void router.replace({ query })
 })
+
+watch(sessionIsConfirmed, async (isConfirmed) => {
+  if (!isConfirmed || protectedContentMounted.value) return
+
+  protectedContentMounted.value = true
+  await nextTick()
+  mainContent.value
+    ?.querySelector<HTMLElement>("[data-route-heading]")
+    ?.focus({ preventScroll: true })
+})
+
+function canRequestOwnerData(): boolean {
+  return sessionIsConfirmed.value
+}
+
+async function retrySession(): Promise<void> {
+  try {
+    await session.value.refetch()
+  } catch {
+    // Better Auth retains the current error so the owner can retry again.
+  }
+}
 
 async function signOut() {
   signOutError.value = false
@@ -138,9 +185,72 @@ async function dismissGitHubReauthenticationFailure(): Promise<void> {
         <X :size="18" aria-hidden="true" />
       </button>
     </div>
-    <BackupStatusNotice />
+    <BackupStatusNotice
+      v-if="protectedContentMounted"
+      v-show="sessionIsConfirmed"
+      :can-request-owner-data="canRequestOwnerData"
+    />
     <main id="main-content" ref="main-content" class="app-main" tabindex="-1">
-      <slot />
+      <div
+        v-if="protectedContentMounted"
+        v-show="sessionIsConfirmed"
+        class="session-content"
+        :inert="!sessionIsConfirmed"
+        :aria-hidden="sessionIsConfirmed ? undefined : 'true'"
+      >
+        <slot />
+      </div>
+      <section
+        v-if="!sessionIsConfirmed"
+        class="session-boundary"
+        :class="`session-boundary--${sessionGateState}`"
+        :role="sessionGateState === 'verifying' ? 'status' : 'alert'"
+        :aria-labelledby="`session-boundary-${sessionGateState}-title`"
+      >
+        <p class="session-boundary-eyebrow">SESSION CHECK</p>
+        <h1
+          :id="`session-boundary-${sessionGateState}-title`"
+          class="session-boundary-title"
+          data-route-heading
+          tabindex="-1"
+        >
+          <template v-if="sessionGateState === 'verifying'">
+            正在验证 Session
+          </template>
+          <template v-else-if="sessionGateState === 'unavailable'">
+            暂时无法验证 Session
+          </template>
+          <template v-else>管理功能已暂停</template>
+        </h1>
+        <p class="session-boundary-copy">
+          <template v-if="sessionGateState === 'verifying'">
+            验证完成前不会读取凭证、应用授权、审计或备份状态。
+          </template>
+          <template v-else-if="sessionGateState === 'unavailable'">
+            服务或网络暂时不可用，没有将你视为退出登录。请稍后重试。
+          </template>
+          <template v-else>
+            当前 Session 已失效。重新登录后才能继续使用管理功能。
+          </template>
+        </p>
+        <button
+          v-if="sessionGateState === 'unavailable'"
+          class="session-boundary-action pressable focus-ring"
+          type="button"
+          @click="retrySession"
+        >
+          <RefreshCw :size="18" aria-hidden="true" />
+          重试
+        </button>
+        <RouterLink
+          v-else-if="sessionGateState === 'unauthenticated'"
+          class="session-boundary-action pressable focus-ring"
+          to="/login"
+        >
+          <LogIn :size="18" aria-hidden="true" />
+          重新登录
+        </RouterLink>
+      </section>
     </main>
   </div>
 </template>
@@ -229,6 +339,69 @@ async function dismissGitHubReauthenticationFailure(): Promise<void> {
 .app-main {
   width: min(100% - 2rem, 76rem);
   margin-inline: auto;
+}
+
+.session-content {
+  display: contents;
+}
+
+.session-boundary {
+  display: grid;
+  gap: var(--spacing-4);
+  max-width: 46rem;
+  padding: clamp(var(--spacing-6), 7vw, var(--spacing-12));
+  margin-block: clamp(var(--spacing-10), 10vw, var(--spacing-20));
+  border: var(--border-width-surface) solid var(--status-warning-border);
+  background: var(--status-warning-bg);
+  box-shadow: var(--shadow-panel);
+  color: var(--status-warning-fg);
+}
+
+.session-boundary--unauthenticated {
+  border-color: var(--status-danger-border);
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+
+.session-boundary-eyebrow,
+.session-boundary-title,
+.session-boundary-copy {
+  margin: 0;
+}
+
+.session-boundary-eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--tracking-widest);
+}
+
+.session-boundary-title {
+  font-family: var(--font-display);
+  font-size: clamp(var(--text-3xl), 7vw, var(--text-5xl));
+  line-height: var(--leading-tight);
+}
+
+.session-boundary-copy {
+  max-width: 42rem;
+  line-height: var(--leading-relaxed);
+}
+
+.session-boundary-action {
+  appearance: none;
+  display: inline-flex;
+  gap: var(--spacing-2);
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-height: var(--touch-target-min);
+  padding: var(--spacing-2) var(--spacing-4);
+  border: var(--border-width-control) solid var(--border-default);
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-hard-sm);
+  color: var(--text-primary);
+  font-weight: var(--font-weight-bold);
+  text-decoration: none;
 }
 
 .session-error {

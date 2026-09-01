@@ -474,7 +474,11 @@ describe("application timeout boundaries", () => {
     ["POST", "/api/oauth/authorizations/client", false],
     ["DELETE", "/api/oauth/authorizations/client", false],
     ["POST", "/api/auth/oauth2/token", false],
-    ["GET", "/api/auth/get-session", false],
+    ["GET", "/api/auth/get-session", true],
+    ["HEAD", "/api/auth/get-session", false],
+    ["POST", "/api/auth/get-session", false],
+    ["GET", "/api/auth/get-session/", false],
+    ["GET", "/api/auth/jwks", false],
     ["GET", "/problems/not-found", false],
   ])("selects %s %s = %s", (method, path, expected) => {
     expect(usesApplicationTimeout(method, path)).toBe(expected)

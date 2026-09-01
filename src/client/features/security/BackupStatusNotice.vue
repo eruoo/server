@@ -15,6 +15,10 @@ type NoticeState =
   | Readonly<{ kind: "authentication-required" }>
   | Readonly<{ kind: "unavailable" }>
 
+const props = defineProps<{
+  canRequestOwnerData?: () => boolean
+}>()
+
 const shanghaiDateTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
   dateStyle: "medium",
   hourCycle: "h23",
@@ -82,6 +86,10 @@ function scheduleFailedStatusRevalidation(): void {
 }
 
 async function loadBackupStatus(): Promise<void> {
+  // Better Auth schedules foreground Session refetch in a microtask. Yield
+  // once so that its live state wins before this owner-only D1 request starts.
+  await Promise.resolve()
+  if (!isMounted || !(props.canRequestOwnerData?.() ?? true)) return
   if (isLoading.value) return
 
   clearScheduledRevalidation()

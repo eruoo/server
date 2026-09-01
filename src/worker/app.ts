@@ -72,6 +72,8 @@ const safeReadTimeout = timeout(
 )
 
 export function usesApplicationTimeout(method: string, path: string): boolean {
+  if (method === "GET" && path === "/api/auth/get-session") return true
+
   return (
     (method === "GET" || method === "HEAD") &&
     path.startsWith("/api/") &&
