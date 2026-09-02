@@ -78,7 +78,9 @@ export function createConfiguredCors(
       allowMethods,
       credentials: false,
       exposeHeaders: [
-        ...(isApiKeyOperation ? [API_KEY_EXPIRATION_HEADER] : []),
+        ...(isApiKeyOperation
+          ? [API_KEY_EXPIRATION_HEADER, "Retry-After"]
+          : []),
         "X-Request-ID",
       ],
       maxAge: 600,

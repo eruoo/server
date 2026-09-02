@@ -1,9 +1,12 @@
 import type { MiddlewareHandler } from "hono"
 
+import { API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS } from "../../shared/api-key"
 import { problem } from "../http/problem"
 import type { AppBindings } from "../http/types"
 
 export const AUTH_RATE_LIMIT_WINDOW_SECONDS = 60
+export const API_KEY_STATUS_RATE_LIMIT_PATH = "/api/status:api-key"
+export const RATE_LIMIT_DEPENDENCY_TIMEOUT_MS = 5_000
 export const OAUTH_AUTHORIZATION_REVOCATION_RATE_LIMIT_PATH =
   "/api/oauth/authorizations/:clientId"
 
@@ -59,14 +62,99 @@ export function resolveAuthRateLimitRequestPath(
   return resolvedPath
 }
 
+interface RateLimitMessages {
+  dependencyEvent: string
+  dependencyFailureDetail: string
+  rejectionDetail: string
+}
+
+const authenticationRateLimitMessages: RateLimitMessages = {
+  dependencyEvent: "auth_rate_limit_dependency_failed",
+  dependencyFailureDetail: "The authentication rate limiter is unavailable.",
+  rejectionDetail: "Too many authentication requests were received.",
+}
+
+const apiKeyStatusRateLimitMessages: RateLimitMessages = {
+  dependencyEvent: "api_key_status_rate_limit_dependency_failed",
+  dependencyFailureDetail: "The API key request limiter is unavailable.",
+  rejectionDetail: "Too many API key requests were received.",
+}
+
+async function checkRateLimitBeforeDeadline(
+  limiter: RateLimit,
+  key: string,
+): Promise<RateLimitOutcome> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+
+  try {
+    return await Promise.race([
+      limiter.limit({ key }),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(
+            new DOMException(
+              "The rate limiter dependency timed out.",
+              "TimeoutError",
+            ),
+          )
+        }, RATE_LIMIT_DEPENDENCY_TIMEOUT_MS)
+      }),
+    ])
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
+  }
+}
+
+async function enforceRateLimit(
+  context: Parameters<MiddlewareHandler<AppBindings>>[0],
+  next: Parameters<MiddlewareHandler<AppBindings>>[1],
+  limiter: RateLimit,
+  rateLimitPath: string,
+  messages: RateLimitMessages,
+  windowSeconds: number,
+): Promise<Response | void> {
+  let outcome: RateLimitOutcome
+
+  try {
+    const ipAddress = context.req.header("CF-Connecting-IP") ?? "unknown"
+    outcome = await checkRateLimitBeforeDeadline(
+      limiter,
+      `${rateLimitPath}:${ipAddress}`,
+    )
+  } catch (error) {
+    console.error({
+      error: error instanceof Error ? error.name : "unknown_error",
+      event: messages.dependencyEvent,
+      path: context.req.path,
+      requestId: context.get("requestId"),
+    })
+
+    return problem(context, {
+      detail: messages.dependencyFailureDetail,
+      slug: "service-unavailable",
+    })
+  }
+
+  if (outcome.success) {
+    await next()
+    return
+  }
+
+  const response = problem(context, {
+    detail: messages.rejectionDetail,
+    slug: "rate-limit-exceeded",
+  })
+  response.headers.set("Retry-After", String(windowSeconds))
+  return response
+}
+
 export const authRateLimit: MiddlewareHandler<AppBindings> = async (
   context,
   next,
 ) => {
-  const path = context.req.path
   const rateLimitPath = resolveAuthRateLimitRequestPath(
     context.req.method,
-    path,
+    context.req.path,
   )
 
   if (context.req.method === "OPTIONS" || rateLimitPath === undefined) {
@@ -74,34 +162,35 @@ export const authRateLimit: MiddlewareHandler<AppBindings> = async (
     return
   }
 
-  try {
-    const ipAddress = context.req.header("CF-Connecting-IP") ?? "unknown"
-    const outcome = await context.env.AUTH_RATE_LIMITER.limit({
-      key: `${rateLimitPath}:${ipAddress}`,
-    })
+  return enforceRateLimit(
+    context,
+    next,
+    context.env.AUTH_RATE_LIMITER,
+    rateLimitPath,
+    authenticationRateLimitMessages,
+    AUTH_RATE_LIMIT_WINDOW_SECONDS,
+  )
+}
 
-    if (outcome.success) {
-      await next()
-      return
-    }
-  } catch (error) {
-    console.error({
-      error: error instanceof Error ? error.name : "unknown_error",
-      event: "auth_rate_limit_dependency_failed",
-      path,
-      requestId: context.get("requestId"),
-    })
-
-    return problem(context, {
-      detail: "The authentication rate limiter is unavailable.",
-      slug: "service-unavailable",
-    })
+export const apiKeyStatusRateLimit: MiddlewareHandler<AppBindings> = async (
+  context,
+  next,
+) => {
+  if (
+    context.req.method !== "GET" ||
+    context.req.path !== "/api/status" ||
+    context.req.header("x-api-key") === undefined
+  ) {
+    await next()
+    return
   }
 
-  const response = problem(context, {
-    detail: "Too many authentication requests were received.",
-    slug: "rate-limit-exceeded",
-  })
-  response.headers.set("Retry-After", String(AUTH_RATE_LIMIT_WINDOW_SECONDS))
-  return response
+  return enforceRateLimit(
+    context,
+    next,
+    context.env.API_KEY_RATE_LIMITER,
+    API_KEY_STATUS_RATE_LIMIT_PATH,
+    apiKeyStatusRateLimitMessages,
+    API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS,
+  )
 }

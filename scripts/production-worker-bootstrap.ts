@@ -6,6 +6,10 @@ import { isDeepStrictEqual } from "node:util"
 import { z } from "zod"
 
 import {
+  API_KEY_STATUS_INGRESS_RATE_LIMIT_MAX_REQUESTS,
+  API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS,
+} from "../src/shared/api-key"
+import {
   DAILY_CLEANUP_SCHEDULE,
   DATABASE_BACKUP_SCHEDULE,
 } from "../src/worker/schedules"
@@ -336,6 +340,12 @@ function hasApprovedGeneratedCore(generatedConfig: GeneratedConfig): boolean {
   const expectedBindingNames = expectedBindingContract(generatedConfig).map(
     ({ name }) => name,
   )
+  const authRateLimiter = generatedConfig.ratelimits.find(
+    ({ name }) => name === "AUTH_RATE_LIMITER",
+  )
+  const apiKeyRateLimiter = generatedConfig.ratelimits.find(
+    ({ name }) => name === "API_KEY_RATE_LIMITER",
+  )
   return (
     generatedConfig.account_id === generatedConfig.vars["CF_ACCOUNT_ID"] &&
     hasExactUniqueEntries(
@@ -346,8 +356,15 @@ function hasApprovedGeneratedCore(generatedConfig: GeneratedConfig): boolean {
     generatedConfig.d1_databases[0]?.binding === "DB" &&
     generatedConfig.r2_buckets.length === 1 &&
     generatedConfig.r2_buckets[0]?.binding === "BACKUPS" &&
-    generatedConfig.ratelimits.length === 1 &&
-    generatedConfig.ratelimits[0]?.name === "AUTH_RATE_LIMITER" &&
+    generatedConfig.ratelimits.length === 2 &&
+    authRateLimiter?.namespace_id === "1002" &&
+    authRateLimiter.simple.limit === 10 &&
+    authRateLimiter.simple.period === 60 &&
+    apiKeyRateLimiter?.namespace_id === "1004" &&
+    apiKeyRateLimiter.simple.limit ===
+      API_KEY_STATUS_INGRESS_RATE_LIMIT_MAX_REQUESTS &&
+    apiKeyRateLimiter.simple.period ===
+      API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS &&
     generatedConfig.workflows.length === 1 &&
     generatedConfig.workflows[0]?.binding === "DATABASE_BACKUP_WORKFLOW" &&
     generatedConfig.workflows[0]?.class_name === "DatabaseBackupWorkflow" &&

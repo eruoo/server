@@ -2,6 +2,10 @@ import { env } from "cloudflare:test"
 import { beforeEach, describe, expect, it } from "vitest"
 
 import {
+  API_KEY_STATUS_INGRESS_RATE_LIMIT_MAX_REQUESTS,
+  API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS,
+} from "../../src/shared/api-key"
+import {
   deleteExpiredAuditEvents,
   InvalidAuditCursorError,
   InvalidStoredAuditEventError,
@@ -158,6 +162,31 @@ describe("audit event repository", () => {
 
     expect(details).toContain("security_audit_events_occurredAt_id_idx")
     expect(details).not.toContain("SCAN security_audit_events")
+  })
+
+  it("keeps the single-bucket indexed audit model below half the D1 Free write baseline", async () => {
+    const indexes = await env.DB.prepare(
+      `SELECT name
+       FROM pragma_index_list('security_audit_events')
+       ORDER BY name`,
+    ).all<{ name: string }>()
+    const expectedIndexes = [
+      "security_audit_events_occurredAt_id_idx",
+      "security_audit_events_outcome_occurredAt_id_idx",
+      "security_audit_events_type_occurredAt_id_idx",
+      "security_audit_events_type_outcome_occurredAt_id_idx",
+      "sqlite_autoindex_security_audit_events_1",
+    ]
+    const windowsPerDay =
+      (24 * 60 * 60) / API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS
+    const minimumRowsWrittenPerAudit = 1 + indexes.results.length
+    const modeledIndexedAuditRowsWrittenPerDay =
+      API_KEY_STATUS_INGRESS_RATE_LIMIT_MAX_REQUESTS *
+      windowsPerDay *
+      minimumRowsWrittenPerAudit
+
+    expect(indexes.results.map(({ name }) => name)).toEqual(expectedIndexes)
+    expect(modeledIndexedAuditRowsWrittenPerDay).toBeLessThanOrEqual(50_000)
   })
 
   it("rejects invalid page and time bounds", async () => {

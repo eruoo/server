@@ -65,6 +65,18 @@ function requirePasskeyOptions(options: BetterAuthOptions): PasskeyOptions {
   return plugin.options as PasskeyOptions
 }
 
+function requireOAuthProviderOptions(options: BetterAuthOptions): {
+  resourceSeedMode?: "insertOnly" | "merge" | "overwrite"
+} {
+  const plugin = options.plugins?.find(({ id }) => id === "oauth-provider")
+
+  if (!plugin?.options) {
+    throw new Error("The OAuth Provider plugin is not configured.")
+  }
+
+  return plugin.options
+}
+
 function captureError(operation: () => unknown): Error {
   try {
     operation()
@@ -245,6 +257,66 @@ describe("Better Auth owner and session invariants", () => {
     expect(context.authCookies.sessionToken.attributes).not.toHaveProperty(
       "domain",
     )
+  })
+
+  it("configures Session reads without D1 rate limiting and enables native joins", () => {
+    const options = createAuthOptions(productionAuthEnv(), env.DB)
+
+    expect(options.rateLimit).toMatchObject({
+      customRules: { "/get-session": false },
+      enabled: true,
+      storage: "database",
+    })
+    expect(options.advanced.database).toEqual({ joins: true })
+  })
+
+  it("uses insert-only OAuth resource seeding", () => {
+    const options = createAuthOptions(productionAuthEnv(), env.DB)
+
+    expect(requireOAuthProviderOptions(options).resourceSeedMode).toBe(
+      "insertOnly",
+    )
+  })
+
+  it("allows the isolated RS256 conformance fixture to overwrite its resource", () => {
+    const options = createAuthOptions(productionAuthEnv(), env.DB, {
+      oauthAccessTokenSigningAlgorithm: "RS256",
+    })
+
+    expect(requireOAuthProviderOptions(options).resourceSeedMode).toBe(
+      "overwrite",
+    )
+  })
+
+  it("does not persist Better Auth rate-limit state for Session reads", async () => {
+    const cookie = await createOwnerSession()
+    const anonymousResponse = await SELF.fetch(
+      "http://local.test/api/auth/get-session",
+      {
+        headers: { "CF-Connecting-IP": "203.0.113.10" },
+      },
+    )
+    const authenticatedResponse = await SELF.fetch(
+      "http://local.test/api/auth/get-session",
+      {
+        headers: {
+          "CF-Connecting-IP": "203.0.113.10",
+          cookie: `eruoo.session_token=${cookie}`,
+        },
+      },
+    )
+    const rateLimitRows = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM rateLimit",
+    ).first<{ count: number }>()
+
+    expect(anonymousResponse.status).toBe(200)
+    await expect(anonymousResponse.json()).resolves.toBeNull()
+    expect(authenticatedResponse.status).toBe(200)
+    await expect(authenticatedResponse.json()).resolves.toMatchObject({
+      session: expect.objectContaining({ userId: expect.any(String) }),
+      user: expect.objectContaining({ id: expect.any(String) }),
+    })
+    expect(rateLimitRows?.count).toBe(0)
   })
 
   it("persists a newly created Session with a fixed 30-day expiry", async () => {

@@ -166,7 +166,7 @@ describe("CORS boundaries", () => {
       "X-API-Key",
     )
     expect(response.headers.get("access-control-expose-headers")).toBe(
-      "API-Key-Expires-At,X-Request-ID",
+      "API-Key-Expires-At,Retry-After,X-Request-ID",
     )
   })
 
@@ -217,7 +217,7 @@ describe("CORS boundaries", () => {
       allowedOrigin,
     )
     expect(statusResponse.headers.get("access-control-expose-headers")).toBe(
-      "API-Key-Expires-At,X-Request-ID",
+      "API-Key-Expires-At,Retry-After,X-Request-ID",
     )
     expect(statusPreflight.status).toBe(204)
     expect(statusPreflight.headers.get("access-control-allow-origin")).toBe(
@@ -469,20 +469,71 @@ describe("Session request observability", () => {
 
 describe("application timeout boundaries", () => {
   it.each([
-    ["GET", "/api/status", true],
-    ["HEAD", "/api/openapi.json", true],
-    ["POST", "/api/oauth/authorizations/client", false],
-    ["DELETE", "/api/oauth/authorizations/client", false],
-    ["POST", "/api/auth/oauth2/token", false],
-    ["GET", "/api/auth/get-session", true],
-    ["HEAD", "/api/auth/get-session", false],
-    ["POST", "/api/auth/get-session", false],
-    ["GET", "/api/auth/get-session/", false],
-    ["GET", "/api/auth/jwks", false],
-    ["GET", "/problems/not-found", false],
-  ])("selects %s %s = %s", (method, path, expected) => {
-    expect(usesApplicationTimeout(method, path)).toBe(expected)
-  })
+    { expected: true, method: "GET", path: "/api/status" },
+    {
+      expected: false,
+      headers: { "x-api-key": "eruoo_synthetic" },
+      method: "GET",
+      path: "/api/status",
+    },
+    {
+      expected: false,
+      headers: { "x-api-key": "" },
+      method: "GET",
+      path: "/api/status",
+    },
+    {
+      expected: false,
+      headers: {
+        cookie: "eruoo.session_token=session",
+        "x-api-key": "eruoo_synthetic",
+      },
+      method: "GET",
+      path: "/api/status",
+    },
+    {
+      expected: true,
+      headers: { cookie: "eruoo.session_token=session" },
+      method: "GET",
+      path: "/api/status",
+    },
+    {
+      expected: true,
+      headers: { "x-api-key": "eruoo_synthetic" },
+      method: "GET",
+      path: "/api/status/",
+    },
+    { expected: true, method: "HEAD", path: "/api/openapi.json" },
+    {
+      expected: false,
+      method: "POST",
+      path: "/api/oauth/authorizations/client",
+    },
+    {
+      expected: false,
+      method: "DELETE",
+      path: "/api/oauth/authorizations/client",
+    },
+    { expected: false, method: "POST", path: "/api/auth/oauth2/token" },
+    { expected: true, method: "GET", path: "/api/auth/get-session" },
+    { expected: false, method: "HEAD", path: "/api/auth/get-session" },
+    { expected: false, method: "POST", path: "/api/auth/get-session" },
+    { expected: false, method: "GET", path: "/api/auth/get-session/" },
+    { expected: false, method: "GET", path: "/api/auth/jwks" },
+    { expected: false, method: "GET", path: "/problems/not-found" },
+  ] satisfies {
+    expected: boolean
+    headers?: HeadersInit
+    method: string
+    path: string
+  }[])(
+    "selects $method $path = $expected",
+    ({ expected, headers, method, path }) => {
+      expect(usesApplicationTimeout(method, path, new Headers(headers))).toBe(
+        expected,
+      )
+    },
+  )
 })
 
 describe("runtime security configuration", () => {

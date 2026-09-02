@@ -37,6 +37,9 @@ const contractCheckEnvironment = {
   AUTH_RATE_LIMITER: {
     limit: async () => ({ success: true }),
   },
+  API_KEY_RATE_LIMITER: {
+    limit: async () => ({ success: true }),
+  },
   AUDIT_IP_HASH_SECRET:
     "synthetic-openapi-audit-secret-at-least-thirty-two-bytes",
   BETTER_AUTH_SECRETS:

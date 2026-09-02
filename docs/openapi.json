@@ -1019,7 +1019,16 @@
             }
           },
           "429": {
-            "description": "The API key request limit was exceeded.",
+            "description": "The platform ingress or credential-level API key request limit was exceeded.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until this API key request may be retried.",
+                "schema": {
+                  "pattern": "^[1-9][0-9]*$",
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1039,7 +1048,7 @@
             }
           },
           "503": {
-            "description": "The credential dependency could not be checked.",
+            "description": "The platform rate limiter or credential dependency could not be checked.",
             "content": {
               "application/problem+json": {
                 "schema": {

@@ -71,8 +71,15 @@ const safeReadTimeout = timeout(
   new HTTPException(504, { message: "The request timed out." }),
 )
 
-export function usesApplicationTimeout(method: string, path: string): boolean {
+export function usesApplicationTimeout(
+  method: string,
+  path: string,
+  headers: Headers,
+): boolean {
   if (method === "GET" && path === "/api/auth/get-session") return true
+  if (method === "GET" && path === "/api/status" && headers.has("x-api-key")) {
+    return false
+  }
 
   return (
     (method === "GET" || method === "HEAD") &&
@@ -85,7 +92,13 @@ async function configuredApplicationTimeout(
   context: Context<AppBindings>,
   next: () => Promise<void>,
 ) {
-  if (!usesApplicationTimeout(context.req.method, context.req.path)) {
+  if (
+    !usesApplicationTimeout(
+      context.req.method,
+      context.req.path,
+      context.req.raw.headers,
+    )
+  ) {
     return next()
   }
 
