@@ -5,7 +5,11 @@ import type { BetterAuthOptions, BetterAuthPlugin } from "better-auth"
 import { APIError, betterAuth } from "better-auth"
 import { jwt } from "better-auth/plugins"
 
-import { API_KEY_DEFAULT_PERMISSIONS } from "../shared/api-key"
+import {
+  API_KEY_CREDENTIAL_RATE_LIMIT_MAX_REQUESTS,
+  API_KEY_CREDENTIAL_RATE_LIMIT_WINDOW_SECONDS,
+  API_KEY_DEFAULT_PERMISSIONS,
+} from "../shared/api-key"
 import {
   enabledOAuthClientIds,
   OAUTH_REFRESH_TOKEN_MAX_TTL_SECONDS,
@@ -73,8 +77,8 @@ function createApiKeyPlugin() {
     },
     rateLimit: {
       enabled: true,
-      maxRequests: 60,
-      timeWindow: 60_000,
+      maxRequests: API_KEY_CREDENTIAL_RATE_LIMIT_MAX_REQUESTS,
+      timeWindow: API_KEY_CREDENTIAL_RATE_LIMIT_WINDOW_SECONDS * 1_000,
     },
     requireName: true,
     storage: "database",
@@ -125,7 +129,7 @@ function createOAuthProviderPlugin(
     refreshTokenExpiresIn: OAUTH_REFRESH_TOKEN_MAX_TTL_SECONDS,
     refreshTokenReuseInterval: 30,
     resourcePrivileges: () => false,
-    resourceSeedMode: "overwrite",
+    resourceSeedMode: usesIsolatedResourcePolicy ? "overwrite" : "insertOnly",
     resources: [
       {
         accessTokenTtl: 60 * 60,
@@ -238,10 +242,16 @@ export function createAuthOptions(
       },
     },
     rateLimit: {
+      customRules: {
+        "/get-session": false,
+      },
       enabled: true,
       storage: "database",
     },
     advanced: {
+      database: {
+        joins: true,
+      },
       cookiePrefix: "eruoo",
       crossSubDomainCookies: {
         enabled: false,

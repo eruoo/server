@@ -350,6 +350,7 @@ API Key 不用于浏览器登录，不替代 OAuth/OIDC，也不用于同一 Wor
 - 权限命名采用 `resource:action`，不启用 wildcard。
 - 默认每把 key 每分钟 60 次请求。
 - 限流计数同步写入 D1，不使用延迟更新。
+- 携带 `x-api-key` 的精确 `GET /api/status` 在读取 D1 前先进入独立的 Workers Rate Limiting binding，按 canonical operation 与连接 IP 使用 5 次每 60 秒的粗粒度入口上限。Session 调用不进入该桶；平台入口限流不替代每把 key 的 D1 凭证级限流。
 - `enableSessionForAPIKeys` 保持 `false`，API Key 不得模拟浏览器 Session。
 - 服务端验证 key 后仍必须按路由检查 permission，插件验证成功不等于业务授权成功。
 - 首个 API Key 业务 operation 为 `GET /api/status`，唯一允许的 permission 是 `status:read`。Better Auth 把 permission 保持为 server-only 属性：HTTP 创建请求不得提交 `permissions`，服务端通过 `defaultPermissions` 固定写入 `{ "status": ["read"] }`；首版不提供 permission 更新。客户端提交任何 `permissions` 字段均 fail closed，未知 resource、action、重复值和 wildcard 也不得进入生产数据。
@@ -434,7 +435,7 @@ Desktop 登记 `http://127.0.0.1/oauth/callback` 和 `http://[::1]/oauth/callbac
 
 Authorization Server 和 Resource Server 必须共享这份映射。所有签发到 access token `scope` claim 的值都必须存在于映射中，且对应 audience 必须出现在同一 token 的 `aud`；Resource Server 在构造 `Principal` 前执行同样的 allowlist 和映射校验。业务 resource 可以在没有 `api:read` 或 `api:write` 的 token 中出现，但这种 token 不具备相应端点权限。
 
-业务 `oauthResource.allowedScopes` 必须登记上述全部五个 scope，包括映射到内部 UserInfo audience 的 `openid` 与 `profile`。这是 Better Auth 生成 OIDC ID token 并保留完整 JWT scope claim 的运行时前提；静态清单、运行时 resource seed 和 migration 必须保持一致。
+业务 `oauthResource.allowedScopes` 必须登记上述全部五个 scope，包括映射到内部 UserInfo audience 的 `openid` 与 `profile`。这是 Better Auth 生成 OIDC ID token 并保留完整 JWT scope claim 的运行时前提；静态清单、运行时 resource seed 和 migration 必须保持一致。migration 是生产既有 resource 行的权威更新路径；正常运行时 seed 使用 `insertOnly`，只补建缺失行，不得在 Worker 冷初始化时对内容一致的既有行重复写入 D1。仅隔离的 RS256 conformance fixture 可使用 `overwrite` 建立独立算法策略，不得进入生产配置。
 
 本项目把 scope 视为集合并要求 canonical input：authorization、refresh 和未来 client-credentials 入口都必须在交给 Better Auth 前拒绝重复 scope，返回 `invalid_scope`。Better Auth 1.7 默认不会去重，因此不能依赖插件自动保证；Resource Server 也继续拒绝 scope claim 中的重复值，避免掩盖签发端回归。
 
@@ -674,7 +675,7 @@ OAuth form 中语义为 singleton 的已知参数必须在交给 Better Auth 前
 - 允许跨 Origin 的业务 API 只对已登记 Web Origin 返回 CORS header。
 - `GET /api/status` 是首个允许 API Key 的业务 operation，并进入 operation allowlist；生产 Origin allowlist 仍为空，因此在 owner 批准具体 Web Origin 前不会实际返回跨域许可。
 - 上述 OAuth/OIDC 与 Bearer API 请求不使用 Cookie credentials，不返回 `Access-Control-Allow-Credentials: true`。
-- 允许 Web 客户端使用 API Key 的 operation 必须显式把 `API-Key-Expires-At` 加入 `Access-Control-Expose-Headers`；不允许 API Key 的 operation 不必暴露该 header。
+- 允许 Web 客户端使用 API Key 的 operation 必须显式把 `API-Key-Expires-At` 和 `Retry-After` 加入 `Access-Control-Expose-Headers`；不允许 API Key 的 operation 不必暴露这些 header。
 - 管理 SPA、Better Auth Session 和安全管理端点保持同源，不向其他 Origin 开放 credentialed CORS。
 - preflight 处理必须位于认证 middleware 之前。
 - Better Auth trusted origins 与 CORS allowlist 是两个独立安全边界，必须分别配置和测试。
@@ -690,7 +691,7 @@ OAuth form 中语义为 singleton 的已知参数必须在交给 Better Auth 前
 3. CORS。先处理合法 preflight。
 4. CSRF。只用于 Cookie 或其他 ambient credential 的浏览器 unsafe 请求。
 5. Body limit。普通 JSON 默认上限 1 MiB，上传另设专用策略；自有 API 超限使用 413 Problem Details，token endpoint 使用第 11.3 节的 400 `invalid_request`。
-6. 请求与下游调用 timeout。应用级 timeout 只包裹无副作用的自有 API `GET`/`HEAD`，以及固定不刷新有效凭证的精确 `GET /api/auth/get-session`；后者是 `/api/auth/*` 的唯一例外并复用 15 秒边界。mutation 和其他 `/api/auth/*` handler 不使用不会取消实际工作的 timeout race。对支持取消的下游 `fetch` 传播 AbortSignal，不得假设 D1 支持取消已发出的 statement。安全只读请求超时使用 504 Problem Details；Better Auth Session 读取保持其原生 JSON 错误契约；token endpoint 仅在第 11.3 节的可取消边界返回非协议 503 transport response。
+6. 请求与下游调用 timeout。应用级 timeout 只包裹无副作用的自有 API `GET`/`HEAD`，以及固定不刷新有效凭证的精确 `GET /api/auth/get-session`；后者是 `/api/auth/*` 的唯一例外并复用 15 秒边界。Session 形式的 `GET /api/status` 保持该 15 秒边界；携带 `x-api-key` 的精确 operation 会同步更新凭证计数，因此不得进入无法取消实际 D1 工作的 timeout race。mutation 和其他 `/api/auth/*` handler 同样不得进入该 race。对支持取消的下游 `fetch` 传播 AbortSignal，不得假设 D1 支持取消已发出的 statement。安全只读请求超时使用 504 Problem Details；Better Auth Session 读取保持其原生 JSON 错误契约；token endpoint 仅在第 11.3 节的可取消边界返回非协议 503 transport response。
 7. Authentication。
 8. OpenAPI request validation。
 9. 粗粒度 permission/scope 检查和领域资源授权。
@@ -699,8 +700,8 @@ OAuth form 中语义为 singleton 的已知参数必须在交给 Better Auth 前
 
 - 只使用 Cloudflare 清洗后的 `CF-Connecting-IP` 做限流或 IP 指纹，不信任客户端任意提供的 `X-Forwarded-For`。
 - 生产日志必须清除 Authorization、Cookie、API Key、token、请求正文和 PII。
-- 登录、refresh、Passkey、敏感 API Key 与 owner OAuth 授权撤销入口在任何 Session/D1 验证和审计写入前经过 Workers Rate Limiting binding。生产按精确认证 path 与 Cloudflare 清洗后的连接 IP 使用每 60 秒 10 次的粗粒度上限；动态撤销路径统一使用 `/api/oauth/authorizations/:clientId` 作为 limiter key，不允许通过更换任意 client ID 分裂限流桶。缺失 IP 统一归入 `unknown`，binding 拒绝时返回 429、`Retry-After: 60` 与 `Cache-Control: no-store`，binding 故障时 fail closed 为 503。默认本地 binding 为避免自动化测试互相污染放宽到每 60 秒 1000 次，生产 preflight 必须验证生成配置仍精确为 10/60。
-- Better Auth 和 API Key 自身的 D1 限流仍负责其协议或凭证级规则；外层平台限流负责在 D1 之前约束放大面。两者都不使用单进程内存状态。
+- 登录、refresh、Passkey、敏感 API Key、携带 `x-api-key` 的精确 `GET /api/status` 与 owner OAuth 授权撤销入口在任何 Session/D1 验证和审计写入前经过 Workers Rate Limiting binding。生产认证类入口按 canonical operation key 与 Cloudflare 清洗后的连接 IP 使用 10 次每 60 秒的粗粒度上限；API Key status 使用独立 binding 和 `/api/status:api-key` canonical key，保持 5 次每 60 秒；动态撤销路径统一使用 `/api/oauth/authorizations/:clientId`，不允许通过更换任意 client ID 分裂限流桶。缺失 IP 统一归入 `unknown`，binding 拒绝时返回 429、`Retry-After: 60` 与 `Cache-Control: no-store`，binding 抛错或超过 5 秒独立 deadline 时 fail closed 为 503，迟到结果不得继续进入认证、D1 或审计。Session 形式的 `GET /api/status` 不进入 API Key ingress 桶；携带该 header 的精确 operation 也不进入应用级 15 秒 timeout，避免 504 后继续发生凭证计数或审计写入。默认本地两个 binding 均为避免自动化测试互相污染放宽到每 60 秒 1000 次，生产 preflight 必须分别验证认证入口 10/60 与 API Key status 5/60。
+- Better Auth 和 API Key 自身的 D1 限流仍负责其协议或凭证级规则；外层平台限流负责在 D1 之前约束放大面。Better Auth 的 `/get-session` 路径必须通过路径级 custom rule 跳过数据库限流，避免无 Cookie 或正常 Session 轮询产生 D1 计数写入；只有精确 `GET` 是受支持的 Session 探测，其他方法仍由 handler 或路由拒绝。其他 Better Auth 路由继续使用数据库限流。两层限流都不使用单进程内存状态。
 - 不在 HTTP handler 内执行 fire-and-forget 的可靠任务。
 - OpenAPI 中声明为 protected 的每个 operation 都必须通过无凭证请求返回 401 的自动化测试。
 
@@ -944,9 +945,9 @@ HTTP 和契约：
 - 三个根级 OAuth/OIDC metadata endpoint 的显式 GET/HEAD、空 HEAD body、HEAD preflight 和 CORS method allowlist。
 - OAuth authorization endpoint 不返回 CORS header。
 - 自有 API 隐式 HEAD 的 404、CSRF 的 `permission-denied` 403、撤销 operation 的 413 契约，以及 token endpoint 超限 400 与超时 503 的协议/transport 分界。
-- 高风险认证与 owner OAuth 授权撤销端点的外层 10/60 平台限流、动态 client ID 归一化、429/503 fail-closed、限流拒绝不产生审计写，以及 mutation 不进入应用级 timeout race。
+- 高风险认证与 owner OAuth 授权撤销端点的外层 10/60 平台限流、API Key status 独立的 5/60 平台限流、API Key/动态 client ID 的 canonical key、Session status 绕过、429/503 fail-closed、平台 binding 超过 5 秒 deadline 后迟到成功也不进入下游、平台限流在 D1/API Key 验证前拒绝且不产生审计写，以及任何同步 mutation 不进入应用级 timeout race；另需验证匿名与已认证 `GET /api/auth/get-session` 都不创建或更新 Better Auth D1 限流记录。
 - 精确 `GET /api/auth/get-session` 进入 15 秒服务端 timeout，其他 Better Auth 路由保持排除；真实 Vue Session 读取即使自带 AbortSignal 也必须在 30 秒客户端 deadline 后退出 pending，Session 未确认前不得发起备份状态请求。
-- `/api/status` 的 owner Session/API Key 二选一认证、200、400、401、403、503、no-store 和 CORS 限制。
+- `/api/status` 的 owner Session/API Key 二选一认证、200、400、401、403、429、503、no-store 和 CORS 限制。
 - `/api/security/backup-status` 的 owner-only 认证、严格响应契约、较旧 Workflow 终态不能覆盖较新状态，以及 success 自动恢复 failed 状态；租约冲突不得改变 `never-run` 或既有健康状态，首个 execution-start step 失败时也不得生成伪健康记录。调度测试必须证明两个顶层 Worker Cron 不互相代跑、备份 Cron 以确定性 ID 幂等创建 Workflow、重复投递被安全跳过、启动失败被传播、Workflow 无 direct schedule，并把 start/poll/upload retry 配置与最多 15 次 poll 的最坏外部请求上限固定为 33，低于 Free 的 50 次限制。
 
 部署编排：
@@ -1026,7 +1027,7 @@ HTTP 和契约：
 - D1、R2、Workflow、Static Assets 和 Secrets 通过 Wrangler/Cloudflare bindings 配置。
 - production D1 和 R2 必须先显式创建并绑定稳定 ID；当前 D1 为 `eruoo-server`，私有 R2 bucket 为 `eruoo-server-backups`。Cloudflare account 的部署权威 ID 位于 `wrangler.jsonc#env.production.account_id`，`vars.CF_ACCOUNT_ID` 是传给 Worker 的精确 mirror；D1 权威 ID 位于同一 production environment。发布门禁禁止 Wrangler 自动 provisioning，并要求 production migration 成功后才允许上传依赖该 schema 的 Worker。
 - Cloudflare account ID、D1 database ID 和 R2 bucket name 是部署标识而非凭证；当前 production 配置提交稳定值，使 Vite 生成物与 source config 可审计地一致。访问这些资源的 API token 仍只存 Cloudflare Secret。缺少或不一致的稳定 ID 时 `release:preflight` 必须失败，且不得启用 Workers Builds production trigger。
-- `release:preflight` 必须同时校验 source config 与 Vite 生成配置中的顶层 `account_id`、runtime `CF_ACCOUNT_ID`、D1 binding `database_id`、`D1_DATABASE_ID`、生产 `AUTH_RATE_LIMITER` 的 10/60 配置、精确字符串 `ALLOWED_CORS_ORIGINS="[]"`、完整 required-secret manifest、显式空的 `streaming_tail_consumers`，以及 production `DB` binding 钉死的 `migrations_dir=./migrations`、`migrations_pattern=./migrations/*.sql`、`migrations_table=d1_migrations`。生成配置必须保留相对于其配置文件的等价 migration 路径。文件名必须为 `<四位序号>_<名称>.sql`，名称首字符为小写字母或数字，其余仅允许小写字母、数字、`_` 与 `-`，发布门禁与恢复规划必须复用同一个 validator。受保护 `production` 精确 commit 到候选 `HEAD` 的连续 first-parent 路径必须可读；可信状态只在候选快照保持旧 migration 逐字节不变且新增唯一序号大于此前最大值时推进，最终候选必须相对最近合法快照继续追加。进入 production ledger 的 migration 只能追加，修正必须新增文件。构建产物、Git 历史或 migration 契约遗漏、重复、改写、删除、重命名或回填任一项都阻止 migration 与 deploy。
+- `release:preflight` 必须同时校验 source config 与 Vite 生成配置中的顶层 `account_id`、runtime `CF_ACCOUNT_ID`、D1 binding `database_id`、`D1_DATABASE_ID`、生产 `AUTH_RATE_LIMITER` 的 10/60 配置、生产 `API_KEY_RATE_LIMITER` 的 5/60 配置、精确字符串 `ALLOWED_CORS_ORIGINS="[]"`、完整 required-secret manifest、显式空的 `streaming_tail_consumers`，以及 production `DB` binding 钉死的 `migrations_dir=./migrations`、`migrations_pattern=./migrations/*.sql`、`migrations_table=d1_migrations`。生成配置必须保留相对于其配置文件的等价 migration 路径。文件名必须为 `<四位序号>_<名称>.sql`，名称首字符为小写字母或数字，其余仅允许小写字母、数字、`_` 与 `-`，发布门禁与恢复规划必须复用同一个 validator。受保护 `production` 精确 commit 到候选 `HEAD` 的连续 first-parent 路径必须可读；可信状态只在候选快照保持旧 migration 逐字节不变且新增唯一序号大于此前最大值时推进，最终候选必须相对最近合法快照继续追加。进入 production ledger 的 migration 只能追加，修正必须新增文件。构建产物、Git 历史或 migration 契约遗漏、重复、改写、删除、重命名或回填任一项都阻止 migration 与 deploy。
 - GitHub OAuth secret、版本化 `BETTER_AUTH_SECRETS`、D1 REST API token、`AUDIT_IP_HASH_SECRET` 等不得提交到 Git。
 - schema 演进采用向后兼容的 expand、migrate、deploy、contract 顺序。先增加兼容结构和迁移数据，再发布使用新结构的 Worker，最后在后续发布删除旧结构。
 - 自动 deploy 只允许向后兼容的 expand 与 migrate。contract 必须位于后续独立 PR，在备份恢复验证和 owner 对数据删除或不可逆变更的明确授权后执行。
@@ -1041,11 +1042,13 @@ HTTP 和契约：
 | 产品 | Free 基线 | 主要风险 |
 | --- | --- | --- |
 | Workers | 100,000 requests/day、每请求 10 ms CPU、每账号 5 个 Cron Trigger、每次调用 50 个 external 与 1,000 个 Cloudflare-service subrequest | Better Auth、Passkey、复杂验证或无界外部轮询可能单次超限 |
-| D1 | 5,000,000 rows read/day、100,000 rows written/day、5 GB/account | API Key 每次验证同步计数可能放大写入 |
+| D1 | 5,000,000 rows read/day、100,000 rows written/day、5 GB/account | 合法 API Key 每次验证仍会同步计数；未知来源先受独立平台入口限流约束 |
 | R2 Standard | 10 GB-month、每月 1,000,000 Class A 和 10,000,000 Class B | 约 26 份周快照的累计体积可能超过免费存储 |
 | Workers Logs | 200,000 events/day、保留 3 天 | 只适合短期诊断 |
 | Workflows | 3,000 steps/day、1 GB workflow state | 每周备份预计远低于额度 |
 | D1 Time Travel | Free 下当前 7 天 | 只能原地恢复，不符合标准隔离恢复原则 |
+
+无效 API Key 的每次放行验证会写一条安全审计，而当前审计表包含四个显式索引和一个主键隐式索引。生产 `5/60` 入口限制为单个连接 IP、单个 Cloudflare location 下的 indexed writes 保留 Free 余量；Workers Rate Limiting 的计数按 location 分布且允许短暂超限，因此它只是成本放大缓解，不是跨 IP、跨 location 的全局免费保证。生产验收必须通过 D1 Metrics 的真实 `rows_written` 继续校准。
 
 这些数字会变化，不得写入业务逻辑。每次正式上线和依赖平台能力的重要升级前，应以 Cloudflare 官方文档重新核对。
 

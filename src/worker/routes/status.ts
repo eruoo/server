@@ -2,6 +2,7 @@ import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi"
 
 import { API_KEY_EXPIRATION_HEADER } from "../../shared/api-key"
 import { requireOwnerSessionOrStatusApiKey } from "../auth/api-key"
+import { apiKeyStatusRateLimit } from "../auth/rate-limit"
 import { problemSchema } from "../http/problem"
 import type { AppBindings } from "../http/types"
 
@@ -13,6 +14,10 @@ const statusSchema = z
 
 const statusRoute = createRoute({
   method: "get",
+  middleware: [
+    apiKeyStatusRateLimit,
+    requireOwnerSessionOrStatusApiKey,
+  ] as const,
   operationId: "getStatus",
   path: "/api/status",
   security: [{ ownerSession: [] }, { apiKey: [] }],
@@ -66,7 +71,17 @@ const statusRoute = createRoute({
           schema: problemSchema,
         },
       },
-      description: "The API key request limit was exceeded.",
+      description:
+        "The platform ingress or credential-level API key request limit was exceeded.",
+      headers: {
+        "Retry-After": {
+          description: "Seconds until this API key request may be retried.",
+          schema: {
+            pattern: "^[1-9][0-9]*$",
+            type: "string",
+          },
+        },
+      },
     },
     503: {
       content: {
@@ -74,7 +89,8 @@ const statusRoute = createRoute({
           schema: problemSchema,
         },
       },
-      description: "The credential dependency could not be checked.",
+      description:
+        "The platform rate limiter or credential dependency could not be checked.",
     },
     500: {
       content: {
@@ -98,7 +114,6 @@ const statusRoute = createRoute({
 
 export const statusRouter = new OpenAPIHono<AppBindings>({ strict: true })
 
-statusRouter.use("/api/status", requireOwnerSessionOrStatusApiKey)
 statusRouter.openapi(statusRoute, (context) =>
   context.json(statusSchema.parse({ status: "ok" }), 200, {
     "Cache-Control": "no-store",

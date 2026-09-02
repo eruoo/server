@@ -6,7 +6,11 @@ import {
 import { Hono } from "hono"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import { API_KEY_EXPIRATION_HEADER } from "../../src/shared/api-key"
+import {
+  API_KEY_CREDENTIAL_RATE_LIMIT_MAX_REQUESTS,
+  API_KEY_CREDENTIAL_RATE_LIMIT_WINDOW_SECONDS,
+  API_KEY_EXPIRATION_HEADER,
+} from "../../src/shared/api-key"
 import { createAuth } from "../../src/worker/auth"
 import { createRequireApiKeyPrincipal } from "../../src/worker/auth/api-key"
 import { requestId } from "../../src/worker/http/request-id"
@@ -105,10 +109,17 @@ describe("API key principal middleware", () => {
     const response = await fetchFixture({ "x-api-key": created.key })
     const principal = await response.json()
     const stored = await env.DB.prepare(
-      "SELECT key, requestCount FROM apikey WHERE id = ?",
+      `SELECT key, rateLimitMax, rateLimitTimeWindow, requestCount
+       FROM apikey
+       WHERE id = ?`,
     )
       .bind(created.id)
-      .first<{ key: string; requestCount: number }>()
+      .first<{
+        key: string
+        rateLimitMax: number
+        rateLimitTimeWindow: number
+        requestCount: number
+      }>()
 
     expect(response.status).toBe(200)
     expect(principal).toEqual({
@@ -119,6 +130,12 @@ describe("API key principal middleware", () => {
       subject: created.referenceId,
     })
     expect(stored?.key).not.toBe(created.key)
+    expect(stored?.rateLimitMax).toBe(
+      API_KEY_CREDENTIAL_RATE_LIMIT_MAX_REQUESTS,
+    )
+    expect(stored?.rateLimitTimeWindow).toBe(
+      API_KEY_CREDENTIAL_RATE_LIMIT_WINDOW_SECONDS * 1_000,
+    )
     expect(stored?.requestCount).toBe(1)
     expect(JSON.stringify(principal)).not.toContain(created.key)
     expect(JSON.stringify(principal)).not.toContain(stored?.key ?? "missing")
@@ -300,6 +317,7 @@ describe("API key principal middleware", () => {
 
   it("returns 429 when the verified key exceeds its own rate limit", async () => {
     const created = await createTestKey()
+    await env.DB.prepare("DELETE FROM security_audit_events").run()
     await env.DB.prepare(
       `UPDATE apikey
        SET rateLimitMax = 1, rateLimitTimeWindow = 60000,
@@ -311,9 +329,18 @@ describe("API key principal middleware", () => {
 
     const first = await fetchFixture({ "x-api-key": created.key })
     const second = await fetchFixture({ "x-api-key": created.key })
+    const rateLimitAudit = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+       FROM security_audit_events
+       WHERE type = 'api_key_rejected'`,
+    ).first<{ count: number }>()
 
     expect(first.status).toBe(200)
     expect(second.status).toBe(429)
+    expect(second.headers.get("retry-after")).toBe(
+      String(API_KEY_CREDENTIAL_RATE_LIMIT_WINDOW_SECONDS),
+    )
+    expect(rateLimitAudit?.count).toBe(0)
   })
 
   it("fails closed when stored permission data has an invalid shape", async () => {

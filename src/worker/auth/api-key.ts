@@ -2,6 +2,7 @@ import type { MiddlewareHandler } from "hono"
 import { z } from "zod"
 
 import {
+  API_KEY_CREDENTIAL_RATE_LIMIT_WINDOW_SECONDS,
   API_KEY_EXPIRATION_HEADER,
   API_KEY_EXPIRATION_WARNING_WINDOW_MS,
   API_KEY_STATUS_PERMISSION,
@@ -159,11 +160,15 @@ export function createRequireApiKeyPrincipal(
       const errorCode = verification.error?.code ?? "UNKNOWN"
 
       if (rateLimitErrorCodes.has(errorCode)) {
-        scheduleRejection(context, "rate_limited")
-        return problem(context, {
+        const response = problem(context, {
           detail: "The API key request limit has been exceeded.",
           slug: "rate-limit-exceeded",
         })
+        response.headers.set(
+          "Retry-After",
+          String(API_KEY_CREDENTIAL_RATE_LIMIT_WINDOW_SECONDS),
+        )
+        return response
       }
 
       if (authenticationErrorCodes.has(errorCode)) {

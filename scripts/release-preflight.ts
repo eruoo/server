@@ -3,6 +3,10 @@ import { readFile } from "node:fs/promises"
 import { unstable_readConfig } from "wrangler"
 import { z } from "zod"
 
+import {
+  API_KEY_STATUS_INGRESS_RATE_LIMIT_MAX_REQUESTS,
+  API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS,
+} from "../src/shared/api-key"
 import { OWNER_GITHUB_ID } from "../src/shared/security"
 import {
   DAILY_CLEANUP_SCHEDULE,
@@ -246,6 +250,12 @@ const sourceAuthRateLimiter = sourceConfig.ratelimits?.find(
 const generatedAuthRateLimiter = generatedConfig.ratelimits.find(
   ({ name }) => name === "AUTH_RATE_LIMITER",
 )
+const sourceApiKeyRateLimiter = sourceConfig.ratelimits?.find(
+  (rateLimit: { name: string }) => rateLimit.name === "API_KEY_RATE_LIMITER",
+)
+const generatedApiKeyRateLimiter = generatedConfig.ratelimits.find(
+  ({ name }) => name === "API_KEY_RATE_LIMITER",
+)
 const sourceVars = sourceConfig.vars
 const configuredSecrets = (sourceConfig.secrets?.required ?? []).filter(
   (secret: unknown): secret is string => typeof secret === "string",
@@ -369,15 +379,25 @@ check(
   "Source and generated production configs must declare CF_VERSION_METADATA.",
 )
 check(
-  sourceConfig.ratelimits?.length === 1 &&
-    generatedConfig.ratelimits.length === 1 &&
+  sourceConfig.ratelimits?.length === 2 &&
+    generatedConfig.ratelimits.length === 2 &&
     sourceAuthRateLimiter?.namespace_id === "1002" &&
     generatedAuthRateLimiter?.namespace_id === "1002" &&
     sourceAuthRateLimiter.simple?.limit === 10 &&
     generatedAuthRateLimiter?.simple.limit === 10 &&
     sourceAuthRateLimiter.simple?.period === 60 &&
-    generatedAuthRateLimiter?.simple.period === 60,
-  "Production must preserve the 10 requests per 60 seconds AUTH_RATE_LIMITER binding.",
+    generatedAuthRateLimiter?.simple.period === 60 &&
+    sourceApiKeyRateLimiter?.namespace_id === "1004" &&
+    generatedApiKeyRateLimiter?.namespace_id === "1004" &&
+    sourceApiKeyRateLimiter.simple?.limit ===
+      API_KEY_STATUS_INGRESS_RATE_LIMIT_MAX_REQUESTS &&
+    generatedApiKeyRateLimiter?.simple.limit ===
+      API_KEY_STATUS_INGRESS_RATE_LIMIT_MAX_REQUESTS &&
+    sourceApiKeyRateLimiter.simple?.period ===
+      API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS &&
+    generatedApiKeyRateLimiter?.simple.period ===
+      API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS,
+  `Production must preserve the AUTH_RATE_LIMITER 10/60 and API_KEY_RATE_LIMITER ${API_KEY_STATUS_INGRESS_RATE_LIMIT_MAX_REQUESTS}/${API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS} bindings.`,
 )
 check(
   hasExactEntries(defaultEnvironmentConfig.triggers?.crons, []),

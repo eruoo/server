@@ -44,6 +44,11 @@ function generatedConfig(): Record<string, unknown> {
         namespace_id: "1002",
         simple: { limit: 10, period: 60 },
       },
+      {
+        name: "API_KEY_RATE_LIMITER",
+        namespace_id: "1004",
+        simple: { limit: 5, period: 60 },
+      },
     ],
     routes: [{ custom_domain: true, pattern: "auth.eruoo.me" }],
     secrets: { required: [...requiredProductionSecrets] },
@@ -122,6 +127,12 @@ function bindings(): Record<string, unknown>[] {
       name: "AUTH_RATE_LIMITER",
       namespace_id: "1002",
       simple: { limit: 10, period: 60 },
+      type: "ratelimit",
+    },
+    {
+      name: "API_KEY_RATE_LIMITER",
+      namespace_id: "1004",
+      simple: { limit: 5, period: 60 },
       type: "ratelimit",
     },
     { name: "CF_VERSION_METADATA", type: "version_metadata" },
@@ -469,6 +480,31 @@ describe("production Worker bootstrap precondition", () => {
     }
   })
 
+  it("rejects a missing or drifted API key rate limiter", async () => {
+    const missingLimiter = generatedConfig()
+    missingLimiter["ratelimits"] = (
+      missingLimiter["ratelimits"] as Record<string, unknown>[]
+    ).filter(({ name }) => name !== "API_KEY_RATE_LIMITER")
+    const driftedLimiter = generatedConfig()
+    driftedLimiter["ratelimits"] = (
+      driftedLimiter["ratelimits"] as Record<string, unknown>[]
+    ).map((rateLimiter) =>
+      rateLimiter["name"] === "API_KEY_RATE_LIMITER"
+        ? { ...rateLimiter, simple: { limit: 10, period: 60 } }
+        : rateLimiter,
+    )
+
+    for (const config of [missingLimiter, driftedLimiter]) {
+      const harness = createHarness("pre", { config })
+      await expect(
+        assertProductionWorkerBootstrapPrecondition(
+          templateVersionId,
+          harness.inspector,
+        ),
+      ).rejects.toThrow("approved core identity")
+    }
+  })
+
   it("does not expose Wrangler stderr or an API exception", async () => {
     const wranglerFailure = createHarness("pre", {
       commandFailure: "deployment",
@@ -532,6 +568,28 @@ describe("production Worker bootstrap postcondition", () => {
     await expect(
       assertProductionWorkerBootstrapPostcondition(identity, harness.inspector),
     ).resolves.toBeUndefined()
+  })
+
+  it("rejects a drifted deployed API key rate limiter", async () => {
+    const driftedBindings = bindings().map((binding) =>
+      binding["name"] === "API_KEY_RATE_LIMITER"
+        ? { ...binding, simple: { limit: 10, period: 60 } }
+        : binding,
+    )
+    const version = activeVersion()
+    const harness = createHarness("post", {
+      version: {
+        ...version,
+        resources: {
+          ...(version["resources"] as Record<string, unknown>),
+          bindings: driftedBindings,
+        },
+      },
+    })
+
+    await expect(
+      assertProductionWorkerBootstrapPostcondition(identity, harness.inspector),
+    ).rejects.toThrow("core binding contract")
   })
 
   it.each([

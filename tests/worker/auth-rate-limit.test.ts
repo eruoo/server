@@ -6,18 +6,23 @@ import {
 import { Hono } from "hono"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS } from "../../src/shared/api-key"
 import { createApp } from "../../src/worker/app"
 import {
+  API_KEY_STATUS_RATE_LIMIT_PATH,
   AUTH_RATE_LIMIT_WINDOW_SECONDS,
+  apiKeyStatusRateLimit,
   authRateLimit,
   HIGH_RISK_AUTH_PATHS,
   isHighRiskAuthPath,
   OAUTH_AUTHORIZATION_REVOCATION_RATE_LIMIT_PATH,
+  RATE_LIMIT_DEPENDENCY_TIMEOUT_MS,
   resolveAuthRateLimitPath,
   resolveAuthRateLimitRequestPath,
 } from "../../src/worker/auth/rate-limit"
 import { requestId } from "../../src/worker/http/request-id"
 import type { AppBindings } from "../../src/worker/http/types"
+import { createOwnerSession } from "./fixtures/owner-session"
 
 const requiredHighRiskPaths = [
   "/api/auth/api-key/create",
@@ -39,12 +44,20 @@ const requiredHighRiskPaths = [
   OAUTH_AUTHORIZATION_REVOCATION_RATE_LIMIT_PATH,
 ] as const
 
-function environmentWithRateLimiter(limit: RateLimit["limit"]): Env {
+function environmentWithRateLimiter(
+  limit: RateLimit["limit"],
+  binding: "API_KEY_RATE_LIMITER" | "AUTH_RATE_LIMITER" = "AUTH_RATE_LIMITER",
+  options?: { rejectDatabaseAccess?: boolean },
+): Env {
   const rateLimiter = { limit } satisfies RateLimit
 
   return new Proxy(env, {
     get(target, property, receiver) {
-      if (property === "AUTH_RATE_LIMITER") {
+      if (property === "DB" && options?.rejectDatabaseAccess === true) {
+        throw new Error("D1 must not be accessed before the ingress limiter.")
+      }
+
+      if (property === binding) {
         return rateLimiter
       }
 
@@ -57,6 +70,17 @@ function createFixture(downstream: () => void) {
   const fixture = new Hono<AppBindings>({ strict: true })
   fixture.use("*", requestId)
   fixture.use("*", authRateLimit)
+  fixture.all("*", (context) => {
+    downstream()
+    return context.json({ status: "ok" })
+  })
+  return fixture
+}
+
+function createApiKeyStatusFixture(downstream: () => void) {
+  const fixture = new Hono<AppBindings>({ strict: true })
+  fixture.use("*", requestId)
+  fixture.use("*", apiKeyStatusRateLimit)
   fixture.all("*", (context) => {
     downstream()
     return context.json({ status: "ok" })
@@ -83,7 +107,29 @@ async function fetchFixture(options: {
   )
 }
 
+async function fetchApiKeyStatusFixture(options: {
+  downstream?: () => void
+  headers?: HeadersInit
+  limit: RateLimit["limit"]
+  method?: string
+  path?: string
+}): Promise<Response> {
+  const fixture = createApiKeyStatusFixture(
+    options.downstream ?? vi.fn<() => void>(),
+  )
+  const headers = new Headers(options.headers)
+  headers.set("x-request-id", "api-key-status-rate-limit-test")
+  return fixture.fetch(
+    new Request(`http://local.test${options.path ?? "/api/status"}`, {
+      headers,
+      ...(options.method === undefined ? {} : { method: options.method }),
+    }),
+    environmentWithRateLimiter(options.limit, "API_KEY_RATE_LIMITER"),
+  )
+}
+
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -266,6 +312,215 @@ describe("authentication rate-limit middleware", () => {
       requestId: "auth-rate-limit-test",
     })
     expect(downstream).not.toHaveBeenCalled()
+  })
+})
+
+describe("API key status rate-limit middleware", () => {
+  it.each([
+    { method: "GET", path: "/api/status" },
+    {
+      headers: { "x-api-key": "eruoo_synthetic" },
+      method: "OPTIONS",
+      path: "/api/status",
+    },
+    {
+      headers: { "x-api-key": "eruoo_synthetic" },
+      method: "GET",
+      path: "/api/status/",
+    },
+  ])(
+    "skips $method $path without an exact API key operation",
+    async (options) => {
+      const downstream = vi.fn<() => void>()
+      const limit = vi.fn<RateLimit["limit"]>()
+
+      const response = await fetchApiKeyStatusFixture({
+        downstream,
+        limit,
+        ...options,
+      })
+
+      expect(response.status).toBe(200)
+      expect(limit).not.toHaveBeenCalled()
+      expect(downstream).toHaveBeenCalledOnce()
+    },
+  )
+
+  it("does not consume the API key ingress limiter for an owner Session", async () => {
+    const cookie = await createOwnerSession()
+    const limit = vi
+      .fn<RateLimit["limit"]>()
+      .mockResolvedValue({ success: false })
+    const executionContext = createExecutionContext()
+
+    const response = await createApp().fetch(
+      new Request("http://local.test/api/status", {
+        headers: { cookie: `eruoo.session_token=${cookie}` },
+      }),
+      environmentWithRateLimiter(limit, "API_KEY_RATE_LIMITER"),
+      executionContext,
+    )
+    await waitOnExecutionContext(executionContext)
+
+    expect(response.status).toBe(200)
+    expect(limit).not.toHaveBeenCalled()
+  })
+
+  it("uses a dedicated canonical key before API key validation", async () => {
+    const downstream = vi.fn<() => void>()
+    const limit = vi
+      .fn<RateLimit["limit"]>()
+      .mockResolvedValue({ success: true })
+
+    const response = await fetchApiKeyStatusFixture({
+      downstream,
+      headers: {
+        "CF-Connecting-IP": "203.0.113.10",
+        "x-api-key": "eruoo_synthetic",
+      },
+      limit,
+    })
+
+    expect(response.status).toBe(200)
+    expect(limit).toHaveBeenCalledOnce()
+    expect(limit).toHaveBeenCalledWith({
+      key: `${API_KEY_STATUS_RATE_LIMIT_PATH}:203.0.113.10`,
+    })
+    expect(downstream).toHaveBeenCalledOnce()
+  })
+
+  it("rejects before API key validation and audit work", async () => {
+    await env.DB.prepare("DELETE FROM security_audit_events").run()
+    const limit = vi
+      .fn<RateLimit["limit"]>()
+      .mockResolvedValue({ success: false })
+    const executionContext = createExecutionContext()
+
+    const response = await createApp().fetch(
+      new Request("http://local.test/api/status", {
+        headers: {
+          "CF-Connecting-IP": "203.0.113.10",
+          "x-api-key": "eruoo_unknown",
+        },
+      }),
+      environmentWithRateLimiter(limit, "API_KEY_RATE_LIMITER", {
+        rejectDatabaseAccess: true,
+      }),
+      executionContext,
+    )
+    await waitOnExecutionContext(executionContext)
+
+    expect(response.status).toBe(429)
+    expect(response.headers.get("cache-control")).toBe("no-store")
+    expect(response.headers.get("retry-after")).toBe(
+      String(API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS),
+    )
+    expect(limit).toHaveBeenCalledWith({
+      key: `${API_KEY_STATUS_RATE_LIMIT_PATH}:203.0.113.10`,
+    })
+    const auditCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+       FROM security_audit_events
+       WHERE type = 'api_key_rejected'`,
+    ).first<{ count: number }>()
+    expect(auditCount?.count).toBe(0)
+  })
+
+  it("fails closed before API key validation when the binding throws", async () => {
+    const downstream = vi.fn<() => void>()
+    const limit = vi
+      .fn<RateLimit["limit"]>()
+      .mockRejectedValue(new Error("binding unavailable"))
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined)
+
+    const response = await fetchApiKeyStatusFixture({
+      downstream,
+      headers: { "x-api-key": "eruoo_synthetic" },
+      limit,
+    })
+
+    expect(response.status).toBe(503)
+    await expect(response.json()).resolves.toMatchObject({
+      requestId: "api-key-status-rate-limit-test",
+      status: 503,
+      type: "https://auth.eruoo.me/problems/service-unavailable",
+    })
+    expect(consoleError).toHaveBeenCalledWith({
+      error: "Error",
+      event: "api_key_status_rate_limit_dependency_failed",
+      path: "/api/status",
+      requestId: "api-key-status-rate-limit-test",
+    })
+    expect(downstream).not.toHaveBeenCalled()
+  })
+
+  it("does not resume downstream work after the limiter deadline", async () => {
+    vi.useFakeTimers()
+    const downstream = vi.fn<() => void>()
+    let resolveLimit:
+      | ((outcome: Awaited<ReturnType<RateLimit["limit"]>>) => void)
+      | undefined
+    const limit = vi.fn<RateLimit["limit"]>(
+      () =>
+        new Promise((resolve) => {
+          resolveLimit = resolve
+        }),
+    )
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined)
+
+    const responsePromise = fetchApiKeyStatusFixture({
+      downstream,
+      headers: { "x-api-key": "eruoo_synthetic" },
+      limit,
+    })
+    await vi.advanceTimersByTimeAsync(RATE_LIMIT_DEPENDENCY_TIMEOUT_MS)
+    const response = await responsePromise
+
+    expect(response.status).toBe(503)
+    expect(consoleError).toHaveBeenCalledWith({
+      error: "TimeoutError",
+      event: "api_key_status_rate_limit_dependency_failed",
+      path: "/api/status",
+      requestId: "api-key-status-rate-limit-test",
+    })
+    expect(downstream).not.toHaveBeenCalled()
+
+    if (!resolveLimit) throw new Error("The rate limiter was not called.")
+    resolveLimit({ success: true })
+    await Promise.resolve()
+
+    expect(downstream).not.toHaveBeenCalled()
+  })
+
+  it("does not limit, authenticate, or audit an unsupported status method", async () => {
+    await env.DB.prepare("DELETE FROM security_audit_events").run()
+    const limit = vi
+      .fn<RateLimit["limit"]>()
+      .mockResolvedValue({ success: true })
+    const executionContext = createExecutionContext()
+
+    const response = await createApp().fetch(
+      new Request("http://local.test/api/status", {
+        headers: { "x-api-key": "eruoo_unknown" },
+        method: "POST",
+      }),
+      environmentWithRateLimiter(limit, "API_KEY_RATE_LIMITER"),
+      executionContext,
+    )
+    await waitOnExecutionContext(executionContext)
+
+    expect(response.status).toBe(404)
+    expect(limit).not.toHaveBeenCalled()
+    const auditCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+       FROM security_audit_events
+       WHERE type = 'api_key_rejected'`,
+    ).first<{ count: number }>()
+    expect(auditCount?.count).toBe(0)
   })
 })
 
