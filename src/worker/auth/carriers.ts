@@ -1,8 +1,23 @@
 const bearerPattern = /^Bearer +[A-Za-z0-9\-._~+/]+={0,}$/i
 const apiKeyPattern = /^[A-Za-z0-9_-]+$/
-const sessionCookieNames = new Set([
+/**
+ * Session token cookie 名。凭据载体检测只统计 token cookie：
+ * session_data 是缓存副本，不计入载体集合，否则一次请求携带
+ * token + data 会被误判为多载体 400。
+ */
+export const sessionTokenCookieNames = new Set([
   "eruoo.session_token",
   "__Secure-eruoo.session_token",
+])
+/** Session cookieCache data cookie 名。 */
+export const sessionDataCookieNames = new Set([
+  "eruoo.session_data",
+  "__Secure-eruoo.session_data",
+])
+/** 全部 Session 相关 cookie 名（token + data），供 OAuth 权威预检使用。 */
+export const sessionCookieNames = new Set([
+  ...sessionTokenCookieNames,
+  ...sessionDataCookieNames,
 ])
 
 export type CredentialCarrier = "apiKey" | "bearer" | "session"
@@ -67,7 +82,7 @@ function inspectSessionCookies(cookieHeader: string | undefined): {
   for (const pair of cookieHeader.split(";")) {
     const separator = pair.indexOf("=")
     if (separator < 1) {
-      if (sessionCookieNames.has(pair.trim())) {
+      if (sessionTokenCookieNames.has(pair.trim())) {
         count += 1
         invalid = true
       }
@@ -75,7 +90,7 @@ function inspectSessionCookies(cookieHeader: string | undefined): {
     }
 
     const name = pair.slice(0, separator).trim()
-    if (!sessionCookieNames.has(name)) {
+    if (!sessionTokenCookieNames.has(name)) {
       continue
     }
 

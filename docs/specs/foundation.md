@@ -267,7 +267,7 @@ eruoo-server/
 
 - Session 固定有效期 30 天。
 - 不采用滑动续期。
-- Better Auth Session cookie cache 保持关闭，以便撤销持久化 Session 后立即生效。
+- Better Auth Session cookie cache 开启 30 秒短期缓存（JWE 对称加密存储，内容不可解码）：原生 `get-session` 在缓存窗口内由加密 cookie 直接承担 Session 行查找，不查询 D1；owner 受限读路径（管理数据读取、Passkey/API Key 列表）的 Session 行查找同样由缓存承担，但 owner 账户校验仍每次查询 D1。撤销持久化 Session 后读路径最长 30 秒内仍可能看到旧状态。敏感操作（本节约定的 15 分钟重新认证门禁、OAuth 授权码签发路径）通过 `disableCookieCache`（或 OAuth 路径的 Hono 层权威预检）强制实时读取 D1，撤销立即生效。cookie 缓存刷新（`refreshCache`）保持关闭，缓存窗口是有界上限而不是滑动续期。
 - Cookie 使用 Secure、HttpOnly、SameSite=Lax 和 host-only 属性。
 - `crossSubDomainCookies` 保持关闭。
 - 固定 production base URL，不依赖请求头推断。
@@ -691,7 +691,7 @@ OAuth form 中语义为 singleton 的已知参数必须在交给 Better Auth 前
 3. CORS。先处理合法 preflight。
 4. CSRF。只用于 Cookie 或其他 ambient credential 的浏览器 unsafe 请求。
 5. Body limit。普通 JSON 默认上限 1 MiB，上传另设专用策略；自有 API 超限使用 413 Problem Details，token endpoint 使用第 11.3 节的 400 `invalid_request`。
-6. 请求与下游调用 timeout。应用级 timeout 只包裹无副作用的自有 API `GET`/`HEAD`，以及固定不刷新有效凭证的精确 `GET /api/auth/get-session`；后者是 `/api/auth/*` 的唯一例外并复用 15 秒边界。Session 形式的 `GET /api/status` 保持该 15 秒边界；携带 `x-api-key` 的精确 operation 会同步更新凭证计数，因此不得进入无法取消实际 D1 工作的 timeout race。mutation 和其他 `/api/auth/*` handler 同样不得进入该 race。对支持取消的下游 `fetch` 传播 AbortSignal，不得假设 D1 支持取消已发出的 statement。安全只读请求超时使用 504 Problem Details；Better Auth Session 读取保持其原生 JSON 错误契约；token endpoint 仅在第 11.3 节的可取消边界返回非协议 503 transport response。
+6. 请求与下游调用 timeout。应用级 timeout 只包裹无副作用的自有 API `GET`/`HEAD`，以及固定不刷新有效凭证的精确 `GET /api/auth/get-session`；后者是 `/api/auth/*` 的唯一例外并复用 5 秒边界。Session 形式的 `GET /api/status` 保持该 5 秒边界；携带 `x-api-key` 的精确 operation 会同步更新凭证计数，因此不得进入无法取消实际 D1 工作的 timeout race。mutation 和其他 `/api/auth/*` handler 同样不得进入该 race。对支持取消的下游 `fetch` 传播 AbortSignal，不得假设 D1 支持取消已发出的 statement。安全只读请求超时使用 504 Problem Details；Better Auth Session 读取保持其原生 JSON 错误契约；token endpoint 仅在第 11.3 节的可取消边界返回非协议 503 transport response。
 7. Authentication。
 8. OpenAPI request validation。
 9. 粗粒度 permission/scope 检查和领域资源授权。
@@ -700,7 +700,7 @@ OAuth form 中语义为 singleton 的已知参数必须在交给 Better Auth 前
 
 - 只使用 Cloudflare 清洗后的 `CF-Connecting-IP` 做限流或 IP 指纹，不信任客户端任意提供的 `X-Forwarded-For`。
 - 生产日志必须清除 Authorization、Cookie、API Key、token、请求正文和 PII。
-- 登录、refresh、Passkey、敏感 API Key、携带 `x-api-key` 的精确 `GET /api/status` 与 owner OAuth 授权撤销入口在任何 Session/D1 验证和审计写入前经过 Workers Rate Limiting binding。生产认证类入口按 canonical operation key 与 Cloudflare 清洗后的连接 IP 使用 10 次每 60 秒的粗粒度上限；API Key status 使用独立 binding 和 `/api/status:api-key` canonical key，保持 5 次每 60 秒；动态撤销路径统一使用 `/api/oauth/authorizations/:clientId`，不允许通过更换任意 client ID 分裂限流桶。缺失 IP 统一归入 `unknown`，binding 拒绝时返回 429、`Retry-After: 60` 与 `Cache-Control: no-store`，binding 抛错或超过 5 秒独立 deadline 时 fail closed 为 503，迟到结果不得继续进入认证、D1 或审计。Session 形式的 `GET /api/status` 不进入 API Key ingress 桶；携带该 header 的精确 operation 也不进入应用级 15 秒 timeout，避免 504 后继续发生凭证计数或审计写入。默认本地两个 binding 均为避免自动化测试互相污染放宽到每 60 秒 1000 次，生产 preflight 必须分别验证认证入口 10/60 与 API Key status 5/60。
+- 登录、refresh、Passkey、敏感 API Key、携带 `x-api-key` 的精确 `GET /api/status` 与 owner OAuth 授权撤销入口在任何 Session/D1 验证和审计写入前经过 Workers Rate Limiting binding。生产认证类入口按 canonical operation key 与 Cloudflare 清洗后的连接 IP 使用 10 次每 60 秒的粗粒度上限；API Key status 使用独立 binding 和 `/api/status:api-key` canonical key，保持 5 次每 60 秒；动态撤销路径统一使用 `/api/oauth/authorizations/:clientId`，不允许通过更换任意 client ID 分裂限流桶。缺失 IP 统一归入 `unknown`，binding 拒绝时返回 429、`Retry-After: 60` 与 `Cache-Control: no-store`，binding 抛错或超过 5 秒独立 deadline 时 fail closed 为 503，迟到结果不得继续进入认证、D1 或审计。Session 形式的 `GET /api/status` 不进入 API Key ingress 桶；携带该 header 的精确 operation 也不进入应用级 5 秒 timeout，避免 504 后继续发生凭证计数或审计写入。默认本地两个 binding 均为避免自动化测试互相污染放宽到每 60 秒 1000 次，生产 preflight 必须分别验证认证入口 10/60 与 API Key status 5/60。
 - Better Auth 和 API Key 自身的 D1 限流仍负责其协议或凭证级规则；外层平台限流负责在 D1 之前约束放大面。Better Auth 的 `/get-session` 路径必须通过路径级 custom rule 跳过数据库限流，避免无 Cookie 或正常 Session 轮询产生 D1 计数写入；只有精确 `GET` 是受支持的 Session 探测，其他方法仍由 handler 或路由拒绝。其他 Better Auth 路由继续使用数据库限流。两层限流都不使用单进程内存状态。
 - 不在 HTTP handler 内执行 fire-and-forget 的可靠任务。
 - OpenAPI 中声明为 protected 的每个 operation 都必须通过无凭证请求返回 401 的自动化测试。
@@ -946,7 +946,7 @@ HTTP 和契约：
 - OAuth authorization endpoint 不返回 CORS header。
 - 自有 API 隐式 HEAD 的 404、CSRF 的 `permission-denied` 403、撤销 operation 的 413 契约，以及 token endpoint 超限 400 与超时 503 的协议/transport 分界。
 - 高风险认证与 owner OAuth 授权撤销端点的外层 10/60 平台限流、API Key status 独立的 5/60 平台限流、API Key/动态 client ID 的 canonical key、Session status 绕过、429/503 fail-closed、平台 binding 超过 5 秒 deadline 后迟到成功也不进入下游、平台限流在 D1/API Key 验证前拒绝且不产生审计写，以及任何同步 mutation 不进入应用级 timeout race；另需验证匿名与已认证 `GET /api/auth/get-session` 都不创建或更新 Better Auth D1 限流记录。
-- 精确 `GET /api/auth/get-session` 进入 15 秒服务端 timeout，其他 Better Auth 路由保持排除；真实 Vue Session 读取即使自带 AbortSignal 也必须在 30 秒客户端 deadline 后退出 pending，Session 未确认前不得发起备份状态请求。
+- 精确 `GET /api/auth/get-session` 进入 5 秒服务端 timeout，其他 Better Auth 路由保持排除；真实 Vue Session 读取即使自带 AbortSignal 也必须在 30 秒客户端 deadline 后退出 pending，Session 未确认前不得发起备份状态请求。
 - `/api/status` 的 owner Session/API Key 二选一认证、200、400、401、403、429、503、no-store 和 CORS 限制。
 - `/api/security/backup-status` 的 owner-only 认证、严格响应契约、较旧 Workflow 终态不能覆盖较新状态，以及 success 自动恢复 failed 状态；租约冲突不得改变 `never-run` 或既有健康状态，首个 execution-start step 失败时也不得生成伪健康记录。调度测试必须证明两个顶层 Worker Cron 不互相代跑、备份 Cron 以确定性 ID 幂等创建 Workflow、重复投递被安全跳过、启动失败被传播、Workflow 无 direct schedule，并把 start/poll/upload retry 配置与最多 15 次 poll 的最坏外部请求上限固定为 33，低于 Free 的 50 次限制。
 

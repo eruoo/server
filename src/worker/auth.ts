@@ -227,7 +227,11 @@ export function createAuthOptions(
     },
     session: {
       cookieCache: {
-        enabled: false,
+        enabled: true,
+        maxAge: 30,
+        // JWE 对称加密存储 Session 快照：内容不可解码，仅凭 secret 可读。
+        // 默认 compact 只是 HMAC 防篡改，与规格文档“加密 cookie”不符。
+        strategy: "jwe",
       },
       disableSessionRefresh: true,
       expiresIn: days(30),

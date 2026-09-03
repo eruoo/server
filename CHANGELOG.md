@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Session 读路径开启 30 秒短期缓存（JWE 加密 cookie），`get-session` 的 Session 行查找不再每次穿透 D1；敏感操作（API Key/Passkey 变更、OAuth 授权码签发）绕过缓存强制实时验证，撤销立即生效。OAuth 授权码签发路径在 Hono 层做权威 Session 预检，对表单 POST 同样生效；预检对 cookie 名的 OWS 空白处理与框架解析一致，并在权威失效时把清理 cookie 随响应回传浏览器，避免 SPA 误判已登录。
+- 依赖 D1 的应用超时从 15 秒收紧到 5 秒，依赖故障更快以 504/503 呈现，前端可立即重试。
+
 ## [0.0.1]
 
 首个生产发布候选。只有对应 commit 成功部署并完成 `docs/releasing.md` 中的验收后，才创建 `v0.0.1` tag 与 GitHub Release。

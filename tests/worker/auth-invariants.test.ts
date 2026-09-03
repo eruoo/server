@@ -128,13 +128,13 @@ async function updateOnlySessionReauthentication(
 }
 
 async function requestPasskeyRegistrationOptions(
-  cookie: string,
+  cookieValue: string,
 ): Promise<Response> {
   return SELF.fetch(
     "http://local.test/api/auth/passkey/generate-register-options",
     {
       headers: {
-        cookie: `eruoo.session_token=${cookie}`,
+        cookie: cookieValue,
         origin: "http://localhost:5173",
       },
     },
@@ -239,7 +239,7 @@ describe("Better Auth owner and session invariants", () => {
 
     expect(context.sessionConfig.expiresIn).toBe(thirtyDaysInSeconds)
     expect(context.options.session).toMatchObject({
-      cookieCache: { enabled: false },
+      cookieCache: { enabled: true, maxAge: 30, strategy: "jwe" },
       disableSessionRefresh: true,
       expiresIn: thirtyDaysInSeconds,
       freshAge: 0,
@@ -374,12 +374,16 @@ describe("Better Auth owner and session invariants", () => {
       reauthenticatedAt: new Date(Date.now() - 16 * 60 * 1000),
     })
 
-    const staleResponse = await requestPasskeyRegistrationOptions(cookie)
+    const staleResponse = await requestPasskeyRegistrationOptions(
+      `eruoo.session_token=${cookie}`,
+    )
     expect(staleResponse.status).toBe(403)
 
     await updateOnlySessionReauthentication(new Date())
 
-    const recentResponse = await requestPasskeyRegistrationOptions(cookie)
+    const recentResponse = await requestPasskeyRegistrationOptions(
+      `eruoo.session_token=${cookie}`,
+    )
     expect(recentResponse.status).toBe(200)
     expect(await recentResponse.json()).toMatchObject({
       authenticatorSelection: { userVerification: "required" },
@@ -396,6 +400,57 @@ describe("Better Auth owner and session invariants", () => {
     })
 
     expect(response.status).toBe(401)
+  })
+
+  it("serves Session reads from the cookie cache after the D1 Session is revoked", async () => {
+    const tokenCookie = await createOwnerSession()
+
+    const initial = await SELF.fetch("http://local.test/api/auth/get-session", {
+      headers: { cookie: `eruoo.session_token=${tokenCookie}` },
+    })
+    expect(initial.status).toBe(200)
+    const sessionDataCookie = initial.headers
+      .getSetCookie()
+      .map((value) => value.split(";", 1)[0] ?? "")
+      .find((value) => value.startsWith("eruoo.session_data="))
+
+    expect(sessionDataCookie).toBeDefined()
+
+    await env.DB.prepare("DELETE FROM session").run()
+
+    const cached = await SELF.fetch("http://local.test/api/auth/get-session", {
+      headers: {
+        cookie: `eruoo.session_token=${tokenCookie}; ${sessionDataCookie}`,
+      },
+    })
+
+    expect(cached.status).toBe(200)
+    await expect(cached.json()).resolves.toMatchObject({
+      session: expect.objectContaining({ userId: expect.any(String) }),
+      user: expect.objectContaining({ id: expect.any(String) }),
+    })
+  })
+
+  it("bypasses the cookie cache for sensitive operations after revocation", async () => {
+    const tokenCookie = await createOwnerSession()
+
+    const initial = await SELF.fetch("http://local.test/api/auth/get-session", {
+      headers: { cookie: `eruoo.session_token=${tokenCookie}` },
+    })
+    const sessionDataCookie = initial.headers
+      .getSetCookie()
+      .map((value) => value.split(";", 1)[0] ?? "")
+      .find((value) => value.startsWith("eruoo.session_data="))
+
+    expect(sessionDataCookie).toBeDefined()
+
+    await env.DB.prepare("DELETE FROM session").run()
+
+    const sensitiveResponse = await requestPasskeyRegistrationOptions(
+      `eruoo.session_token=${tokenCookie}; ${sessionDataCookie}`,
+    )
+
+    expect(sensitiveResponse.status).toBe(401)
   })
 
   it("requires re-login when the primary Session cookie secret rotates", async () => {
