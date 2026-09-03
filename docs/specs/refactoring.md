@@ -1,8 +1,8 @@
-# eruoo-server 重构规格 (Refactoring Spec)
+# eruoo-server 重设计规格 (Redesign Spec)
 
-> 状态：草案，供 owner 决策
-> 依据：`docs/specs/foundation.md`（产品与技术规格，单一事实来源）、近 30 天代码 review、线上实测数据
-> 本文件只记录重构目标、现状基线、约束与决策点；不重复 foundation.md 已定义的协议细节。
+> 状态：设计讨论中，规范可演进
+> 起点：`docs/specs/foundation.md`（旧规范，作为讨论基线而非不可变约束）、近 30 天代码 review、线上实测数据
+> 本文件记录重设计目标、现状基线、约束分级与分步实施计划；每项规范在执行过程中重新探讨，确认后才定稿。
 
 ## 1. 重构背景与目标
 
@@ -17,14 +17,15 @@
 | 发布流程未收敛                         | 线上全部为手动 Wrangler 部署；production push 显示 `Bypassed rule violations`；Workers Builds 首次成功部署从未达成 |
 | Session 读路径穿透存储是架构性选择     | 曾每次请求查 D1；现用加密 cookie 化解读路径，但写路径/敏感路径仍受 D1 可用性约束                                   |
 
-### 1.2 重构目标
+### 1.2 重构目标（owner 已确认）
 
-1. 消除「D1 挂起 → 全站 5-30s 阻塞」的单点故障模式（至少把故障面从「所有请求」缩小到「低频管理操作」）。
-2. 降低认证链路的固定 CPU 开销与依赖黑盒；在保留安全契约的前提下减少对 Better Auth 内部行为的依赖。
-3. 收敛受控发布流程：production 分支 → CI 门禁 → Workers Builds → strict deploy，消除手动部署与 bypass。
-4. 保持全部外部契约不变（OAuth/OIDC 协议面、OpenAPI、域名、owner-only 模型），重构不改变客户端可见行为。
+1. **技术栈与现状完全一致**：Cloudflare Workers + Hono + Better Auth 1.7 + D1 + R2 + Workflows + Vue 3。
+2. **代码从零重新设计搭建**，不复用旧实现；以 foundation.md、OpenAPI 契约和既有测试作为新实现的验收基准。
+3. **分步门禁**：每一步完成契约测试与 owner 验证后，才进入下一步，直到发布。
+4. **保留全部外部契约**：OAuth/OIDC 协议面、OpenAPI、域名、owner-only 模型、错误语义不变。
+5. 消除「D1 挂起 → 全站 5-30s 阻塞」的单点故障模式，并把认证链路 CPU 压到 Workers Free 10ms 限制内有安全余量。
 
-## 2. 现状架构基线
+## 2. 现状架构基线（作为从零搭建的参考面，不复用实现）
 
 ```
 浏览器 (Vue SPA, auth.eruoo.me)
@@ -43,7 +44,7 @@ Cloudflare Worker (eruoo-server, 单 worker 单体)
 部署 : main → GitHub Actions check → production 分支 → Workers Builds → deploy:production (preflight→migration→strict deploy)
 ```
 
-### 2.1 关键运行时事实（2026-09 实测）
+### 2.1 关键运行时事实（2026-09 实测，作为性能验收基线）
 
 | 项                      | 值                                                                    |
 | ----------------------- | --------------------------------------------------------------------- |
@@ -53,14 +54,14 @@ Cloudflare Worker (eruoo-server, 单 worker 单体)
 | 边缘地区                | 东京 NRT（AS55900）                                                   |
 | Cookie 名               | `__Secure-eruoo.session_token` / `__Secure-eruoo.session_data`（JWE） |
 
-## 3. 功能点清单（重构必须保留的能力）
+## 3. 功能点清单（从零搭建必须覆盖的能力）
 
 ### 3.1 身份与会话
 
 - GitHub OAuth 唯一 owner 准入（numeric ID `50254496` allowlist，provider 校验 + `validateUserInfo` 双门禁）。
 - Passkey：首选登录与敏感操作重认证；RP ID `auth.eruoo.me`；userVerification required。
 - Session：30 天固定、不滑动、HttpOnly/Secure/SameSite=Lax host-only；`reauthenticatedAt` 15 分钟敏感操作门禁（服务端持久化）。
-- Session 读路径 30s JWE cookie 缓存（撤销延迟 ≤30s）；敏感路径强制实时（`disableCookieCache` + OAuth 权威预检）。
+- Session 读路径 30s JWE cookie 缓存（撤销延迟 ≤30s，窗口可配置）；敏感路径强制实时（`disableCookieCache` + OAuth 权威预检）。
 
 ### 3.2 凭证
 
@@ -86,36 +87,47 @@ Cloudflare Worker (eruoo-server, 单 worker 单体)
 - 受控发布：`release:preflight` → D1 migration → `--strict` deploy；`WORKERS_CI_*` 三重校验；`production` 分支门禁。
 - OpenAPI 3.1 唯一契约；生成式客户端类型。
 
-## 4. 重构约束（不可变契约）
+## 4. 约束分级（旧规范不是不可变,按外部依赖分级探讨）
 
-1. **外部协议面不变**：OAuth/OIDC 端点路径、错误结构、JWT 格式、metadata、PKCE、redirect URI 规则与 foundation.md §10 完全一致。
-2. **域名与安全模型不变**：`auth.eruoo.me`、owner 唯一、CORS 默认 `[]`、`workers.dev` 禁用。
-3. **数据可迁移**：D1 schema 如需调整，必须提供 expand/migrate/contract 路径，现有生产数据（owner 身份、凭证、审计、授权）不可丢失。
-4. **免费额度目标不变**：个人低流量下保持零平台固定费用（§23 快照）；R2 8/9GB 保护逻辑保留。
-5. **错误语义不变**：Problem Details、401/403/429/503/504 分类、`request-timeout`/`service-unavailable` 等 registry 保持兼容。
+设计过程中,旧规范(foundation.md)的每一项都可以重新探讨。探讨时的判据是"**改动会波及谁**"——按此分为三级:
 
-## 5. 主要重构决策点（待 owner 拍板）
+| 级别       | 含义                                             | 典型条目                                                                                                   | 探讨方式                                        |
+| ---------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| **硬约束** | 改动会破坏已上线/已分发的客户端或数据,成本极高   | 域名 `auth.eruoo.me`、Tauri Desktop 已启用的 OAuth 协议面、D1 生产数据、owner-only 安全模型、Passkey RP ID | 默认保留,改动需单独论证 + 客户端同步升级        |
+| **可探讨** | 改动影响内部实现或未启用客户端,但需同步文档/契约 | OAuth 错误细节、scope 命名、API Key 规则、审计保留期、问题类型 registry、限流阈值、缓存窗口                | 每项在对应里程碑开始时逐一确认,确认后写入新规范 |
+| **自由**   | 纯内部实现选择                                   | 代码结构、模块划分、中间件组织、测试策略、工具链细节                                                       | 直接按新设计决定,仅在变更记录中说明             |
 
-| #    | 决策       | 选项 A                                         | 选项 B                                                | 影响                       |
-| ---- | ---------- | ---------------------------------------------- | ----------------------------------------------------- | -------------------------- |
-| D1   | 存储策略   | 保留 D1：增加保活查询/接受抖动、写路径快速失败 | 换自托管存储（如 Turso/LibSQL、Postgres+Hyperdrive）  | 故障面、成本、运维复杂度   |
-| Auth | 认证框架   | 保留 Better Auth（收敛 patch、锁定版本）       | 自建轻量认证层（GitHub OAuth + 自管 session/passkey） | CPU 开销、开发量、升级风险 |
-| 缓存 | 读路径     | 保留 JWE cookie 缓存                           | 无状态 JWT session（撤销延迟变全局，敏感路径仍查库）  | 撤销语义、D1 解耦程度      |
-| 发布 | 部署通道   | 修好 Workers Builds + ruleset（消除 bypass）   | 放弃 Builds，回到受控脚本 + 手动授权的严格流程        | 流程复杂度、发布频率       |
-| SPA  | 前端技术栈 | 保留 Vue 3 + Vite + reka-ui                    | 简化（SSR？无框架？）                                 | 维护成本、首屏             |
+**流程约定**:每个里程碑开工前,先列「本里程碑涉及的旧规范条目清单」,逐条标注 硬约束/可探讨/自由,与你确认后再实现。确认后的条目成为新规范的定稿内容,后续变更走同一流程。
 
-## 6. 建议实施顺序（里程碑）
+## 5. 决策初稿（探讨中,非定稿）
 
-- **M0 现状固化**：补线上验收记录、固定依赖、收敛发布 bypass（先止血，保留回滚能力）。
-- **M1 认证链路重构**：目标 `get-session` CPU <10ms；将敏感路径权威化机制收敛为单一实现；消除 3 个 patch 或验证其必要性。
-- **M2 存储解耦**：把「读写路径对 D1 的依赖」与「协议处理」解耦（接口抽象 + 可替换实现），实施决策 D1。
-- **M3 备份与管理面重构**：备份链路与 D1 export 解耦；审计写入改队列/批处理（如 Workflow 或 Durable Objects）。
-- **M4 发布流程收敛**：ruleset 无 bypass、Workers Builds 首次成功部署、per-release 验收清单。
-- **M5 前端现代化**：按决策 D5 执行。
+以下结论基于现状分析得出,作为讨论起点;执行中可按第 4 节流程重新探讨。
+
+| #   | 决策       | 初稿结论                                           | 说明                                                                                                              |
+| --- | ---------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| D1  | 存储策略   | 倾向**保留 D1**                                    | 换存储迁移成本大于收益;重做后查询次数下降,抖动影响面自然缩小;写路径保留快速失败                                   |
+| D2  | 认证框架   | 倾向**保留 Better Auth 1.7**                       | 协议面全、已验证;重做时把 3 个 patch 逐一验证必要性,能移除的移除                                                  |
+| D3  | 读路径缓存 | 倾向**保留 cookieCache(JWE 30s),窗口参数可配置**   | 双 cookie 模型与 Better Auth session 模型冲突、无状态 JWT 撤销语义退化,均排除;30s 为已验证语义,参数化后按实测调整 |
+| D4  | 发布通道   | 倾向**修好 Workers Builds + ruleset(消除 bypass)** | 受控脚本手动授权为兜底;目标是无 bypass 的 production 门禁                                                         |
+| D5  | 前端技术栈 | 倾向**保留 Vue 3 + Vite + reka-ui**                | 与现状一致;重做时重构组件结构                                                                                     |
+
+## 6. 重设计分步实施计划（分步门禁）
+
+每步完成标准：本步涉及的规范条目已按第 4 节探讨确认 + 契约测试全绿 + 该步功能在 workerd/D1 真实环境黑盒验证 + owner 确认可执行后才进入下一步。旧实现只作参考,不复用。
+
+- **M0 契约盘点与探讨**：把 foundation.md 逐节过一遍,产出「旧规范条目 → 硬约束/可探讨/自由」分级清单;导出 OpenAPI 契约;建立「既有测试 → 新实现验收基准」清单;固定依赖版本与 patch 清单。
+- **M1 工程骨架**：同栈脚手架（wrangler.jsonc、vite、hono、vue、drizzle、CI），空 worker 可部署；迁移 ledger 与 preflight 门禁就位。
+- **M2 身份认证层**：探讨并定稿身份规范（GitHub OAuth 准入、Passkey、Session 模型、缓存窗口、敏感路径权威化），再实现。
+- **M3 OAuth 2.1/OIDC Provider**：探讨并定稿协议面（静态客户端、PKCE、authorize/consent/token/refresh/revocation/JWKS/discovery/userinfo/end-session、RFC 9068 token、tombstone），再实现。
+- **M4 业务 API 与凭证**：探讨并定稿 API Key 规则、Problem Details registry、错误语义，再实现。
+- **M5 管理与审计面**：探讨并定稿审计事件模型、保留期、授权管理，再实现。
+- **M6 备份与运维面**：探讨并定稿备份策略、R2 界限、健康状态模型，再实现。
+- **M7 管理 SPA 重做**：探讨并定稿前端交互与设计系统，再实现。
+- **M8 发布收敛与上线**：ruleset 无 bypass、Workers Builds 首次成功部署、per-release 验收清单、切换生产流量并保留旧版本回滚。
 
 ## 7. 验收标准（重构完成后必须满足）
 
-- `pnpm run check` 全绿；迁移后的黑盒测试覆盖：登录、Passkey、API Key、OAuth code flow、refresh 轮换/撤销、审计、备份。
+- `pnpm run check` 全绿；黑盒测试覆盖：登录、Passkey、API Key、OAuth code flow、refresh 轮换/撤销、审计、备份。
 - 线上 `get-session` 中位 TTFB < 500ms、CPU < 10ms、无 30s 级 I/O 挂起（或挂起时可快速降级）。
 - 发布流程：production push 不再出现 `Bypassed rule violations`；Workers Builds 自动部署成功并可回滚。
 - 全部客户端（Tauri Web/Desktop/Mobile 契约）无需改动即通过既有 OpenAPI 契约测试。
