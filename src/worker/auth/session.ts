@@ -29,6 +29,7 @@ export function authDateToEpochMilliseconds(
 
 async function resolveOwnerSession(
   context: Parameters<MiddlewareHandler<AppBindings>>[0],
+  options: { authoritative?: boolean } = {},
 ): Promise<Principal | Response> {
   const inspection = inspectCredentialCarriers(context.req.raw)
   const bodyAccessToken = await hasUnsupportedBodyAccessToken(context.req.raw)
@@ -55,6 +56,10 @@ async function resolveOwnerSession(
     const auth = await getInitializedAuth(context.env)
     const result = await auth.api.getSession({
       headers: context.req.raw.headers,
+      // Sensitive operations must bypass the session cookie cache so that a
+      // revoked or rotated session cannot keep authorizing credential
+      // mutations within the bounded cache window.
+      ...(options.authoritative ? { query: { disableCookieCache: true } } : {}),
     })
 
     if (!result) {
@@ -127,7 +132,9 @@ export const requireRecentOwnerSession: MiddlewareHandler<AppBindings> = async (
   context,
   next,
 ) => {
-  const principal = await resolveOwnerSession(context)
+  const principal = await resolveOwnerSession(context, {
+    authoritative: true,
+  })
 
   if (principal instanceof Response) {
     scheduleAuditEvent(context, {

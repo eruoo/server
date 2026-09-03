@@ -1196,4 +1196,183 @@ describe("Better Auth OAuth provider flow", () => {
       error: "invalid_grant",
     })
   })
+
+  it("does not issue an authorization code via form POST from a revoked session", async () => {
+    const { cookie, userId } = await issueTokens()
+
+    // 建立 30s cookie 缓存：先让 get-session 写入 session_data cookie。
+    const sessionRead = await SELF.fetch(
+      "http://local.test/api/auth/get-session",
+      {
+        headers: { cookie: `eruoo.session_token=${cookie}` },
+      },
+    )
+    expect(sessionRead.status).toBe(200)
+    const sessionDataCookie = sessionRead.headers
+      .getSetCookie()
+      .map((value) => value.split(";", 1)[0] ?? "")
+      .find((value) => value.startsWith("eruoo.session_data="))
+    expect(sessionDataCookie).toBeTruthy()
+
+    // 撤销持久化 Session；cookie 缓存仍在 30s 窗口内。
+    await env.DB.prepare("DELETE FROM session").run()
+
+    const verifier = base64Url(crypto.getRandomValues(new Uint8Array(48)))
+    const nonce = base64Url(crypto.getRandomValues(new Uint8Array(32)))
+    const state = base64Url(crypto.getRandomValues(new Uint8Array(32)))
+    const body = new URLSearchParams({
+      client_id: clientId,
+      code_challenge: await pkceChallenge(verifier),
+      code_challenge_method: "S256",
+      nonce,
+      redirect_uri: redirectUri,
+      resource: OAUTH_RESOURCE,
+      response_type: "code",
+      scope,
+      state,
+    })
+
+    const authorization = await SELF.fetch(
+      "http://local.test/api/auth/oauth2/authorize",
+      {
+        body,
+        headers: {
+          "cf-connecting-ip": "192.0.2.20",
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: `eruoo.session_token=${cookie}; ${sessionDataCookie}`,
+          origin: "http://localhost:5173",
+        },
+        method: "POST",
+        redirect: "manual",
+      },
+    )
+
+    expect(authorization.status).toBe(302)
+    const location = new URL(
+      authorization.headers.get("location") ?? "",
+      "http://local.test",
+    )
+    expect(location.origin + location.pathname).toMatch(/\/login$/)
+    expect(location.searchParams.get("code")).toBeNull()
+
+    const auditRows = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+       FROM security_audit_events
+       WHERE subjectId = ?1`,
+    )
+      .bind(userId)
+      .first<{ count: number }>()
+    expect(auditRows?.count).toBe(0)
+  })
+
+  it("does not issue an authorization code when the cookie name carries OWS around '='", async () => {
+    const { cookie } = await issueTokens()
+
+    // 建立 30s cookie 缓存：先让 get-session 写入 session_data cookie。
+    const sessionRead = await SELF.fetch(
+      "http://local.test/api/auth/get-session",
+      {
+        headers: { cookie: `eruoo.session_token=${cookie}` },
+      },
+    )
+    const sessionDataCookie = sessionRead.headers
+      .getSetCookie()
+      .map((value) => value.split(";", 1)[0] ?? "")
+      .find((value) => value.startsWith("eruoo.session_data="))
+    expect(sessionDataCookie).toBeTruthy()
+
+    await env.DB.prepare("DELETE FROM session").run()
+
+    const verifier = base64Url(crypto.getRandomValues(new Uint8Array(48)))
+    const nonce = base64Url(crypto.getRandomValues(new Uint8Array(32)))
+    const state = base64Url(crypto.getRandomValues(new Uint8Array(32)))
+    const body = new URLSearchParams({
+      client_id: clientId,
+      code_challenge: await pkceChallenge(verifier),
+      code_challenge_method: "S256",
+      nonce,
+      redirect_uri: redirectUri,
+      resource: OAUTH_RESOURCE,
+      response_type: "code",
+      scope,
+      state,
+    })
+
+    // RFC 6265 允许 `=` 两侧空白；Better Auth 的 parseCookies 对名字执行
+    // trimOWS。权威预检的 cookie 名提取必须同样 trim，否则
+    // `eruoo.session_token = <value>` 会被当作未知 cookie 而绕过预检。
+    const authorization = await SELF.fetch(
+      "http://local.test/api/auth/oauth2/authorize",
+      {
+        body,
+        headers: {
+          "cf-connecting-ip": "192.0.2.20",
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: `eruoo.session_token = ${cookie}; ${sessionDataCookie}`,
+          origin: "http://localhost:5173",
+        },
+        method: "POST",
+        redirect: "manual",
+      },
+    )
+
+    expect(authorization.status).toBe(302)
+    const location = new URL(
+      authorization.headers.get("location") ?? "",
+      "http://local.test",
+    )
+    expect(location.origin + location.pathname).toMatch(/\/login$/)
+    expect(location.searchParams.get("code")).toBeNull()
+    expect(authorization.headers.getSetCookie().length).toBeGreaterThan(0)
+  })
+
+  it("clears the cached session cookies in the browser when the authoritative read rejects them", async () => {
+    const { cookie } = await issueTokens()
+
+    const sessionRead = await SELF.fetch(
+      "http://local.test/api/auth/get-session",
+      {
+        headers: { cookie: `eruoo.session_token=${cookie}` },
+      },
+    )
+    const sessionDataCookie = sessionRead.headers
+      .getSetCookie()
+      .map((value) => value.split(";", 1)[0] ?? "")
+      .find((value) => value.startsWith("eruoo.session_data="))
+    expect(sessionDataCookie).toBeTruthy()
+
+    await env.DB.prepare("DELETE FROM session").run()
+
+    const body = new URLSearchParams({
+      client_id: clientId,
+      code_challenge: await pkceChallenge(
+        base64Url(crypto.getRandomValues(new Uint8Array(48))),
+      ),
+      code_challenge_method: "S256",
+      nonce: base64Url(crypto.getRandomValues(new Uint8Array(32))),
+      redirect_uri: redirectUri,
+      resource: OAUTH_RESOURCE,
+      response_type: "code",
+      scope,
+      state: base64Url(crypto.getRandomValues(new Uint8Array(32))),
+    })
+
+    const authorization = await SELF.fetch(
+      "http://local.test/api/auth/oauth2/authorize",
+      {
+        body,
+        headers: {
+          "cf-connecting-ip": "192.0.2.20",
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: `eruoo.session_token=${cookie}; ${sessionDataCookie}`,
+          origin: "http://localhost:5173",
+        },
+        method: "POST",
+        redirect: "manual",
+      },
+    )
+
+    expect(authorization.status).toBe(302)
+    expect(authorization.headers.getSetCookie().length).toBeGreaterThan(0)
+  })
 })

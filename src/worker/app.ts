@@ -7,7 +7,8 @@ import { timeout } from "hono/timeout"
 
 import type { AuditEventType, AuditOutcome } from "./audit"
 import { assertAuditSecret, scheduleAuditEvent } from "./audit"
-import { getInitializedAuth } from "./auth"
+import { getInitializedAuth, type Auth } from "./auth"
+import { sessionCookieNames } from "./auth/carriers"
 import {
   captureOAuthProtocolAudit,
   scheduleOAuthProtocolAudit,
@@ -49,6 +50,75 @@ const sensitiveAuthPaths = [
   "/api/auth/passkey/verify-registration",
 ] as const
 
+const oauthAuthoritativeSessionPaths = new Set([
+  "/api/auth/oauth2/authorize",
+  "/api/auth/oauth2/consent",
+  "/api/auth/oauth2/continue",
+])
+
+/**
+ * 提取 Cookie pair 的名字并去除首尾空白，语义与 Better Auth 内部
+ * `parseCookies` 的 `trimOWS` 一致——RFC 6265 允许 `=` 两侧空白，若实现
+ * 不一致会导致 `eruoo.session_token = <value>` 绕过本层检测。
+ */
+function sessionCookieName(pair: string): string | undefined {
+  const separator = pair.indexOf("=")
+  if (separator < 1) return undefined
+  const name = pair.slice(0, separator).trim()
+  return name.length === 0 ? undefined : name
+}
+
+/**
+ * OAuth 授权码签发路径由 oauth-provider 插件内部完成 Session 校验。插件对
+ * GET 从 URL query、对 POST 从表单 body 重建参数并整体覆盖 `ctx.query`，
+ * 因此不能依赖 URL 注入 `disableCookieCache`。改为在 Hono 层先做权威
+ * `getSession`（绕过 30s cookie 缓存）：权威有效才放行；权威无效则剥掉
+ * Session cookie 再交给插件，让插件走未登录流程（authorize 跳登录页，
+ * consent/continue 拒绝），从而保证已撤销 Session 在缓存窗口内无法签发
+ * 新授权码。权威读取返回的 Set-Cookie 清理头（失效 Session 的删除指令）
+ * 必须随最终响应回传，否则浏览器保留旧缓存，SPA 会误判已登录。
+ */
+async function enforceAuthoritativeOAuthSession(
+  request: Request,
+  auth: Auth,
+): Promise<{
+  authoritativeClearingCookies?: string[]
+  request: Request
+}> {
+  const cookieHeader = request.headers.get("cookie")
+  if (!cookieHeader) return { request }
+
+  const hasSessionCookie = cookieHeader.split(";").some((pair) => {
+    const name = sessionCookieName(pair)
+    return name !== undefined && sessionCookieNames.has(name)
+  })
+
+  if (!hasSessionCookie) return { request }
+
+  const result = await auth.api.getSession({
+    headers: request.headers,
+    query: { disableCookieCache: true },
+    returnHeaders: true,
+  })
+  if (result.response) return { request }
+
+  const headers = new Headers(request.headers)
+  headers.set(
+    "cookie",
+    cookieHeader
+      .split(";")
+      .filter((pair) => {
+        const name = sessionCookieName(pair)
+        return name === undefined || !sessionCookieNames.has(name)
+      })
+      .join("; "),
+  )
+  return {
+    authoritativeClearingCookies: result.headers.getSetCookie(),
+    request: new Request(request, { headers }),
+  }
+}
+
 const ownerOnlyAuthPaths = [
   "/api/auth/api-key/get",
   "/api/auth/api-key/list",
@@ -67,7 +137,7 @@ const auditedAuthPaths = new Map<string, AuditEventType>([
 ])
 
 const safeReadTimeout = timeout(
-  15_000,
+  5_000,
   new HTTPException(504, { message: "The request timed out." }),
 )
 
@@ -381,7 +451,26 @@ export function createApp() {
   app.all("/api/auth/*", async (context) => {
     const oauthAudit = await captureOAuthProtocolAudit(context)
     const auth = await getInitializedAuth(context.env)
-    const response = await auth.handler(context.req.raw)
+
+    // OAuth 授权码签发路径必须绕过 30s cookie 缓存做权威读取：GET/POST
+    // 统一在 Hono 层预检，权威失效的 Session cookie 在交给插件前剥离。
+    const authoritative = oauthAuthoritativeSessionPaths.has(context.req.path)
+      ? await enforceAuthoritativeOAuthSession(context.req.raw, auth)
+      : undefined
+
+    const response = await auth.handler(
+      authoritative?.request ?? context.req.raw,
+    )
+
+    // 权威预检发现 Session 失效时，Better Auth 生成了对应的
+    // Set-Cookie 清理指令；如果丢弃，浏览器会保留旧缓存 cookie，
+    // SPA 下一次 get-session 仍命中缓存并误判为已登录。
+    if (authoritative?.authoritativeClearingCookies) {
+      for (const setCookie of authoritative.authoritativeClearingCookies) {
+        response.headers.append("set-cookie", setCookie)
+      }
+    }
+
     scheduleOAuthProtocolAudit(context, oauthAudit, response)
     const eventType = auditedAuthPaths.get(context.req.path)
 
