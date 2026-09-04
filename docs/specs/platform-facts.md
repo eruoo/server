@@ -47,6 +47,7 @@
 
 - 生产 D1（`eruoo-server`）**已确认为 APAC 区域**（wrangler d1 info 实测，2026-09-04）——与新建 staging D1 同区域，区域不是上一轮延迟问题的差异因素。
 - **生产 504 的 D1 挂起（wall 30s+/cpu 1-6ms）在新 D1 上未复现**：部署后首日全部 D1 invocation wall ≤485ms。但生产挂起为间歇性（多端点同挂同恢复、持续数小时），新库观察样本仍少（约 15 次调用）——cron 持续采集积累证据，不下「新库免疫」结论。
+- **生产 Worker（`eruoo-server-production`）最近 24h 复核（09-03 20:00 → 09-04 14:40 UTC）**：18 次调用全部 success，零挂起（wall 最大 1397ms）；wallP50 分布 1.7ms（cookieCache 命中）至 1397ms（重操作）；cpu 1–108ms。生产流量约 **18 次/天**（个人项目量级，Free 额度无压力）。504 时段的挂起未再现，但间歇性结论不变——修复部署（`832dc0d8`）后的观察窗口仍短。
 - **数据读取通道已打通**：Cloudflare GraphQL Analytics API（wrangler OAuth token 可用）`workersInvocationsAdaptive` 数据集，按 `dimensions{datetime,status}` 分组取 `quantiles{wallTimeP50,wallTimeP99,cpuTimeP50}`。**单位为 μs**（以 exceededCpu 行 wall=2423253μs=2423ms 与 tail 实测交叉验证锁定——初读误判为 29s 挂起，系单位误读，已纠正）。
 - **采集中**：闲置后首次查询（冷）分布。cron 已于 2026-09-04 14:2x UTC 切换为每小时（`0 * * * *`，版本 `a70e23da`），改进版探针（`adbcfd53`）在 scheduled 内计时并 `console.log`，15:00 UTC 起每小时输出纯 D1 查询耗时。
   - 阶段 3（后续）：暂停 cron，人工间隔 6–24 小时后 curl 一次，采长闲置数据。
