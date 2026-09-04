@@ -68,6 +68,7 @@ jobs:
 ### D4 Migration Ledger
 
 - 新 `migrations/0001_foundation.sql`：内容沿用旧 0001 的最终 schema（表定义逐字或语义等价重组），保证 M8 生产数据兼容
+- **等价性已预验证（2026-09-04）**：旧 0001 的 54 个 DDL 对象（19 表 + 35 索引）与生产 schema 基线逐一对应，生产仅多 `d1_migrations`（wrangler migrations 自动建，两边都会有）——零缺失零多余。新 0001 = 旧 0001 的 DDL 原样沿用，M1 落地是机械操作；门禁 diff 仍按流程执行作最终确认。
 - **生产 ledger 已核（2026-09-04 实测）**：生产 D1 的 `d1_migrations` 仅 1 条 `0001_foundation.sql`（applied 2026-08-29 15:13:14 UTC）——新工程 0001 同名同义时，M8 切换 `wrangler d1 migrations apply` 将跳过重放，生产 schema 无需任何迁移动作；D4 的 diff 验证是「同名即等价」的前提证明
 - M1 门禁含 schema 等价性验证：在新验证 D1 应用 0001 后 `wrangler d1 export`（或 PRAGMA table_list + 每表 schema diff）与生产 schema 结构比对
 - 验证 D1：`eruoo-server-staging`（已创建，APAC，id `a43a01e6-e011-4cbf-9a9c-50642f79b61d`）；当前仅含探针的 `probe_session` 表、无 `d1_migrations`（2026-09-04 实测）——M1 应用 0001 时自动建 ledger 表；schema diff 时排除 `probe_session`（探针自有表，M1 实施时可一并 DROP 或保留至阶段 3 结束）
