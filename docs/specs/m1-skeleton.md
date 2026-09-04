@@ -103,11 +103,11 @@ jobs:
 
 ## 4. M1 完成定义（门禁）
 
-- [ ] 旧实现工作树文件已删除（D1），git 历史保留
-- [ ] CI 绿（refactor/v2 push 触发，Actions 全绿）
-- [ ] 0001 应用到验证 D1，schema 与生产结构一致（diff 证据）
-- [ ] `/health` 在验证域名可访问（返回版本/构建信息）
-- [ ] 探针退场记录在 platform-facts.md（阶段 2 数据封存说明）
+- [x] 旧实现工作树文件已删除（D1，195 文件，`50dc4c5`），git 历史保留（`59bbd32`）
+- [x] CI 绿（2 次推送全绿：`33891849926` 35s / `33892192805` 30s）
+- [x] 0001 应用到验证 D1，schema diff 零差异（56 对象，仅多探针表；58 commands，5.39ms）
+- [x] `/health` 在验证域名可访问（staging 版本 `21130d07`，返回 ok/service/milestone/version/time）
+- [x] 探针退场记录在 platform-facts.md §8（阶段 2 数据封存 + 阶段 3 降级为可选）
 
 ## 5. 技术预验（2026-09-04，dry-run 证据）
 
@@ -120,3 +120,17 @@ jobs:
 - **D2 staging Worker 复用**：✅ 骨架直接替换探针 Worker
 - **D3 CI 最小集**：✅ 四项（format:check + lint + typecheck + test）
 - **D4 Migration Ledger**：✅ **分里程碑演进路线**——0001 沿用旧 DDL（M8 零迁移），15 张 Better Auth/插件表无重设空间；4 张应用表在各自里程碑重设计（security_audit_events + rateLimit → M5，database_backup_health + maintenance_lease → M7，经 0002+ migration 平滑演进，旧数据迁移）。
+
+## 7. M1 实施记录（2026-09-04 15:2x–15:55 UTC）
+
+| 项         | 结果                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 删除旧实现 | 195 文件（`50dc4c5`），历史 `59bbd32` 永久可查                                                                                                                                                                                                                                                                                                                                                       |
+| 骨架       | Hono `/health` + staging env wrangler + vitest-pool-workers（`cloudflareTest` + `environment: "staging"`）+ `wrangler types` 生成 Env 类型 + CI 四项                                                                                                                                                                                                                                                 |
+| 本地 check | 全绿（3/3 测试：health 响应 / 404 / D1 binding）                                                                                                                                                                                                                                                                                                                                                     |
+| migration  | 0001 应用成功（58 commands）；schema diff：**零缺失、零 DDL 差异**（56 对象，仅多探针 `probe_session`）                                                                                                                                                                                                                                                                                              |
+| CI         | 2 次推送全绿（35s / 30s）                                                                                                                                                                                                                                                                                                                                                                            |
+| 部署       | staging 版本 `21130d07`，`/health` 200；误建 `eruoo-server-v2`（vite 部署配置劫持 env 语义）已删除，deploy 脚本已修正并固化规避                                                                                                                                                                                                                                                                      |
+| 踩坑记录   | ① `wrangler deploy --env staging` 被 vite 插件 `.wrangler/deploy/config.json` 劫持（旧工程 sanitize-build.ts 的存在根因）；② `wrangler types --env` 只读该 env 原始字段（bindings 必须在 env 内或顶层二选一统一视角）；③ 旧 `.dev.vars` 会污染 `wrangler types` 输出（已移入 `.v2-archive/`）；④ `@cloudflare/vitest-pool-workers` 0.22 API 为 `cloudflareTest(options)`（非 `defineWorkersConfig`） |
+
+**M1 门禁状态：全部达成，待 owner 确认后进入 M2。**
