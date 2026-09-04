@@ -6,13 +6,14 @@
     "build": "vite build",
     "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test",
     "db:migrate:staging": "wrangler d1 migrations apply DB --env staging --remote",
-    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:staging": "wrangler deploy --config wrangler.jsonc --env staging",
     "dev": "vite dev",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint --deny-warnings .",
     "test": "vitest run --config vitest.config.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "types:generate": "wrangler types --env staging"
   },
   "dependencies": {
     "hono": "4.13.3"

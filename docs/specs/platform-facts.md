@@ -90,3 +90,14 @@
 | 09-04 14:43 | 00b89d1c          | `probe_session` 表查询（每小时） | 表为模拟 Better Auth session 行形态（`wrangler d1 execute` 直接创建，1 行固定数据），比 SELECT 1 多含表页缓存开销；15:00 起生效 |
 
 > `probe_session` 建表语句：`CREATE TABLE probe_session (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL, data TEXT)` + 1 行固定数据（id=`probe-fixed-row`）。
+
+## 8. 探针退场记录（M1 接管 staging，2026-09-04 15:53 UTC）
+
+- v2 骨架（版本 `21130d07`）按 D2 决策替换 `eruoo-server-staging`，探针 cron 随之移除。
+- 阶段 2 数据封存：cron 采样共 4 点（`*/5` ×3：450–485ms；每小时 ×1：468.7ms），全部录入 §3 表格；**冷路径平坦性结论（5min↔1h 一致）已有足够样本支撑**。16:00 及之后的 cron 点不再产生（可接受——结论不依赖更多点）。
+- 阶段 3（6–24h 长闲置）**降级为可选项**：若 M2 期间需要，将探针以独立 Worker 临时部署补采（probes/m0 代码保留）；现有数据已支撑全部设计决策（冷启动地板 ~470ms、TTFB 冷热分流目标）。
+- console.log 纯 D1 计时未能采到（16:00 点被替换抢占）——wallTime 数据（§3）已足够，无信息缺口。
+
+### 部署工程事实（M1 实施踩坑记录）
+
+- `@cloudflare/vite-plugin` 构建后，`wrangler deploy --env staging` 会被 `.wrangler/deploy/config.json` 劫持，**丢失 env 语义**（部署到顶层 name，误建 `eruoo-server-v2` 后已删除）。规避：`wrangler deploy --config wrangler.jsonc --env staging`（已固化到 package.json scripts）。此为旧工程 sanitize-build.ts 存在的根因（L2 之谜的一部分）。
