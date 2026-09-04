@@ -68,4 +68,6 @@
 | R2 `eruoo-server-backups`        | APAC，**object_count = 0**  | **生产备份从未成功执行过**（与 L2「发布流程从未工作」同款问题）——M7 备份设计必须把「真实产出过备份」作为验收条件 |
 | Workflow `eruoo-database-backup` | 已绑定（BACKUPS + D1）      | 从未写入任何对象                                                                                                 |
 
+**备份零执行的根因线索（2026-09-04 GraphQL 查证）**：生产 cron 配置为 `0 20 * * *`（每日清理）+ `0 19 * * SAT`（每周备份）。8-29（周六）19:00 UTC 窗口**零 invocation 记录**（备份 cron 从未触发过），而 9-03 20:01 每日清理正常执行（wall 863ms/cpu 8.8ms）。推测 8-29 时生产尚未部署含备份 cron 的版本，或该 cron 从未生效。**9-05（周六）19:00 UTC 是旧代码备份 cron 的首次自然验证窗口**——届时观察 invocation 与 R2 对象是否出现，结果作为 M7 设计输入（无论成败）。
+
 **应急措施（2026-09-04 14:55 UTC）**：已手动 `wrangler d1 export` 生产 D1 至本地 `output/backups/prod-emergency-2026-09-04.sql`（gitignored，含 20 表 schema + 19 行数据，完整性已核）。M7 之前此文件是生产数据的唯一备份——owner 可自行复制到第二位置保管。
