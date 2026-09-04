@@ -16,13 +16,21 @@
 
 结论：
 
-- **实际 CPU 限制约在 1–2 秒量级，不是旧规格假设的 10ms**。同负载三次采样（1243/899/2020ms）波动大，限制可能是动态的或按隔离状态浮动。
-- 上一轮 `get-session` cpu=46–57ms 从未触发限制，与本实测一致——旧规格「CPU 接近 Free 10ms 上限」的风险判断不成立。
-- **待确认**：账号当前是 Workers Free 还是 Paid？若是 Free，说明平台限制已大幅变化；若是 Paid，§23「零平台固定费用」目标需要重新确认（Paid $5/月）。
+- 实测通过的 899/1243ms 与被终止的 2020ms 划出弹性边界；同负载三次采样（1243/899/2020ms）波动大，边界并非固定值。
+- 上一轮 `get-session` cpu=46–57ms 从未触发限制，与本实测一致——旧规格「CPU 接近 Free 10ms 上限、随时可能被杀」的紧迫判断不成立，但见下方弹性机制修正。
+- **待确认**：账号当前是 Workers Free 还是 Paid？whoami 不显示计划；owner 确认即可（影响结论解释与 §23 目标）。
 
-对 v2 的设计影响：
+官方文档机制（2026-09-03 版 Limits，M0 已复核）：
 
-- `get-session` CPU 不再是硬约束；M2 性能门禁保留 TTFB 目标（缓存命中 <100ms），CPU 预算放宽为「持续监控、异常时优化」而非 10ms 硬线。
+- Free 名义限制仍为 **10ms/请求**；Paid 默认 30s（可调至 5min）。
+- 关键条款：_"Each isolate has some built-in flexibility to allow for cases where your Worker infrequently runs over the configured limit. If your Worker starts hitting the limit consistently, its execution will be terminated."_
+- 即：**实测通过的 899/1243ms 是 isolate 弹性放行，并非限制提升**；2020ms 触发终止为弹性边界。生产 get-session 46–57ms 长期存活同样是弹性放行。
+
+对 v2 的设计影响（已按弹性机制修正）：
+
+- **不能把弹性当预算**：若账号为 Free，流量增长或平台策略变化都可能让「持续超限」成立而触发终止。CPU 优化保留为设计目标，但不设 10ms 硬线门禁。
+- `get-session` 全链路 46–57ms 在 Free 下依赖弹性存活——v2 若保持 cookieCache（命中 ~1-6ms），绝大多数请求远离红线；未命中路径在 Free 下有弹性边界风险，**这是升级 Paid（$5/月）的主要论据，owner 决策**。
+- M2 性能门禁：TTFB 缓存命中 <100ms（网络层）；cpuTime 分布纳入持续监控（Workers Logs），异常告警而非硬门禁。
 
 ## 2. workerd 计时语义（工程事实）
 
@@ -36,11 +44,10 @@
 | 热查询 `SELECT 1`（连续 5 次）     | 21–28ms                | 无表、无数据   |
 | 单次外部观测 wall（含网络/冷启动） | ~397ms                 | 样本 1，待扩样 |
 
-- 新建 D1 位于 **APAC 区域**（创建时 wrangler 显示），与东京边缘同区域——上一轮生产 D1 的区域未知（若非 APAC，这本身就是延迟差异来源之一）。
+- 生产 D1（`eruoo-server`）**已确认为 APAC 区域**（wrangler d1 info 实测，2026-09-04）——与新建 staging D1 同区域，区域不是上一轮延迟问题的差异因素。
 - **待采集**：闲置后首次查询（冷）分布。当前探针 cron 为 `*/5`（保温状态），需按阶段调整 cron 间隔采集：
   - 阶段 2：改为每小时（`0 * * * *`），采 1 小时间隔冷查询。
   - 阶段 3：暂停 cron，人工间隔 6–24 小时后 curl 一次，采长闲置数据。
-- **待确认**：上一轮生产 D1（`eruoo-server`，id `652f931e-...`）的区域，用于对比（需要 Dashboard 查看）。
 
 ## 4. 请求额度与 cron 预算
 
@@ -49,10 +56,10 @@
 
 ## 5. 待办（M0 剩余项）
 
-- [ ] 确认账号计划（Free/Paid）——owner 确认或 Dashboard 截图。
-- [ ] 确认生产 D1 区域——Dashboard → D1 → eruoo-server 详情。
+- [ ] 确认账号计划（Free/Paid）——owner 确认（whoami 无计划信息）。
+- [x] 生产 D1 区域——已确认 APAC（2026-09-04，wrangler d1 info）。
 - [ ] 阶段 2/3 冷查询采集（调整探针 cron 后等待数据）。
-- [ ] Workers Free 当前官方限制复核（WebSearch Cloudflare 官方文档,验证 10ms→实际值的变化）。
+- [x] Workers Free 官方限制复核——已确认名义 10ms + isolate 弹性条款（2026-09-03 版 Limits 文档）。
 
 ## 6. 采样环境说明
 
