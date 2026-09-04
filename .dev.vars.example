@@ -1,7 +1,0 @@
-# Copy to .dev.vars and replace each placeholder value. Keep the documented local-only values unchanged. Never commit .dev.vars.
-APP_ORIGIN="http://localhost:5173"
-BETTER_AUTH_SECRETS="1:replace-with-a-long-random-local-secret"
-GITHUB_CLIENT_ID="replace-with-local-github-oauth-client-id"
-GITHUB_CLIENT_SECRET="replace-with-local-github-oauth-client-secret"
-AUDIT_IP_HASH_SECRET="replace-with-a-long-random-local-secret"
-D1_EXPORT_API_TOKEN="synthetic-local-token-not-used-for-remote-export"
