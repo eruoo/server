@@ -53,3 +53,9 @@
 | D1 挂起形态                 | wall 30s+ / cpu 1-6ms（I/O 等待，多端点同挂同恢复） |
 | 网络 TTFB 基线（东京边缘）  | ~300ms                                              |
 | Free CPU 限制名义值         | 10ms（文档快照；M0 实测校准）                       |
+
+### 版本情报（2026-09-04 复核，M2 决策依据）
+
+- **上游 v1.7.2（2026-08-26）`@better-auth/core` 已修复 "async context loss in Cloudflare Workers bundles with multiple runtime conditions"（[#10855](https://github.com/better-auth/better-auth/pull/10855)）**——与旧 core patch 针对的 ALS 问题同源。M2 首选 1.7.2 无 patch 验证 workerd 行为，通过则 core patch 退役。
+- v1.7.2 其他相关修复：cookieCache 无效签名数据增加警告（关联 v2 的 JWE cookieCache 设计）；Cloudflare D1 程序化迁移修复（关联 M1/M2 schema 生成）；oauth-provider 的 MCP scope 403 语义。
+- `@better-auth/api-key` 与 `@better-auth/oauth-provider` 的旧 patch 问题在 1.7.2 changelog 中未见对应修复——**这两个 patch 预计仍需保留，M4/M5 时逐项实测**。
