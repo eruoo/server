@@ -91,12 +91,27 @@ export default {
   },
 
   async scheduled(
-    _controller: ScheduledController,
+    controller: ScheduledController,
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
-    // wallTimeMs / cpuTimeMs 由 Workers Logs 记录(observability 已开启),
-    // 用于观察 D1 闲置唤醒(冷查询)与热查询的延迟分布。
-    await ctx.waitUntil(env.DB.prepare("SELECT 1 AS ok").first())
+    // 跨 I/O 边界的 Date.now() 计时有效(workerd 时间在 I/O 边界前进),
+    // 查询耗时直接写入日志,便于从 Workers Logs 读冷/热分布。
+    // 平台记录的 wallTimeMs/cpuTimeMs 作为第二数据源交叉验证。
+    const startedAt = Date.now()
+    const result = await env.DB.prepare("SELECT 1 AS ok").first()
+    const elapsedMs = Date.now() - startedAt
+    ctx.waitUntil(
+      Promise.resolve(
+        console.log(
+          JSON.stringify({
+            probe: "cron-d1",
+            scheduledAt: controller.scheduledTime,
+            elapsedMs,
+            ok: result?.ok === 1,
+          }),
+        ),
+      ),
+    )
   },
 } satisfies ExportedHandler<Env>
