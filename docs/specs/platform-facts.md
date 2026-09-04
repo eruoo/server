@@ -101,3 +101,11 @@
 ### 部署工程事实（M1 实施踩坑记录）
 
 - `@cloudflare/vite-plugin` 构建后，`wrangler deploy --env staging` 会被 `.wrangler/deploy/config.json` 劫持，**丢失 env 语义**（部署到顶层 name，误建 `eruoo-server-v2` 后已删除）。规避：`wrangler deploy --config wrangler.jsonc --env staging`（已固化到 package.json scripts）。此为旧工程 sanitize-build.ts 存在的根因（L2 之谜的一部分）。
+
+## 9. 生产 cron 被清空事故（2026-09-04 22:00 UTC 发现）
+
+- **现象**：9-04 20:00 UTC 每日清理 cron 未触发（当日 07:42 后生产零 cron invocation；worker 本身健康：root/get-session 均正常响应）。
+- **根因**：旧 `deploy-production.ts` 的部署命令 `wrangler deploy --config dist/eruoo_server/wrangler.json` **不带 `--env production`**——部署的是顶层配置，其 `triggers.crons = []`（真实 cron 只在 env.production）→ **每次该脚本部署都把生产 cron 清空**。832dc0d8（9-04 09:46，Workers Builds 首次成功部署或该脚本）是时间线上最后一个部署，此后第一个 cron 触发点（20:00）未跑，证据链吻合。
+- **影响**：生产每日清理（过期数据清理）与每周备份 cron 均已丢失。清理延迟对个人项目数据量无实质影响；备份 cron 本就从未成功执行过（§redesign-assets 基建现状）。
+- **v2 设计约束（M7/M8 强制）**：部署配置与 cron 声明必须在同一层级视角——v2 的 cron 必须在部署所用配置的直接层级生效（禁止「顶层空 + env 藏真值」结构，或部署命令必须显式带 --env）。M1 已踩过同款问题的 staging 变体（vite 部署配置丢 env 语义）。
+- **处置（owner 决策中）**：a) owner 在 Dashboard 手动加回 cron；b) 等 M8 v2 部署自然修复；c) 授权我用带 cron 的配置重新部署生产。
