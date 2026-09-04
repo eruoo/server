@@ -98,17 +98,23 @@ export default {
     // 跨 I/O 边界的 Date.now() 计时有效(workerd 时间在 I/O 边界前进),
     // 查询耗时直接写入日志,便于从 Workers Logs 读冷/热分布。
     // 平台记录的 wallTimeMs/cpuTimeMs 作为第二数据源交叉验证。
+    // 2026-09-04 14:4x 起改为查询 probe_session 表(模拟 Better Auth session
+    // 行形态,含表页缓存开销),比 SELECT 1 更贴近 get-session 实况。
     const startedAt = Date.now()
-    const result = await env.DB.prepare("SELECT 1 AS ok").first()
+    const result = await env.DB.prepare(
+      "SELECT id, user_id, expires_at FROM probe_session WHERE id = ?",
+    )
+      .bind("probe-fixed-row")
+      .first()
     const elapsedMs = Date.now() - startedAt
     ctx.waitUntil(
       Promise.resolve(
         console.log(
           JSON.stringify({
-            probe: "cron-d1",
+            probe: "cron-d1-session",
             scheduledAt: controller.scheduledTime,
             elapsedMs,
-            ok: result?.ok === 1,
+            found: result !== null,
           }),
         ),
       ),
