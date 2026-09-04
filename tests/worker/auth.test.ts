@@ -111,3 +111,10 @@ describe("M2 auth endpoints", () => {
     expect([404, 405]).toContain(response.status)
   })
 })
+
+describe("M2 read-timeout defense", () => {
+  it("still serves get-session under the 5s timeout middleware", async () => {
+    const response = await SELF.fetch("http://local.test/api/auth/get-session")
+    expect(response.status).toBe(200)
+  })
+})

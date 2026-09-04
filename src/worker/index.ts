@@ -2,6 +2,7 @@ import { Hono } from "hono"
 
 import { createAuth, type WorkerAuthConfig } from "./auth"
 import { createResolvedInstanceGetter } from "./auth/initialized-instance-cache"
+import { applyReadTimeout, usesApplicationTimeout } from "./timeout"
 
 /**
  * v2 工程入口(M2:认证核心)。
@@ -24,6 +25,14 @@ const getInitializedAuth = createResolvedInstanceGetter((env: Env) =>
 )
 
 const app = new Hono<{ Bindings: Env }>()
+
+// D1 挂起防御:读路径 5s 快速失败(先于路由匹配,覆盖所有 /api/* 读)。
+app.use(async (c, next) => {
+  if (usesApplicationTimeout(c.req.method, c.req.path)) {
+    return applyReadTimeout(c, next)
+  }
+  return next()
+})
 
 app.get("/health", (c) => {
   return c.json(
