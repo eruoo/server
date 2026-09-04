@@ -12,7 +12,9 @@ M1 开工时在 `refactor/v2` 上**删除旧实现的工作树文件**（2026-09
 
 - 删除：`src/`、`tests/`、`scripts/`、`.generated/`（untracked）、`migrations/`（旧 ledger）、`dist/`、`output/`（untracked）、`playwright.config.ts`、`index.html`、`vite.config.ts`、`wrangler.jsonc`、`worker-configuration.d.ts`、`tsconfig*.json`（6 个）、`vitest.*.config.ts`（3 个）、`vitest.config.ts`、`public/`（M6 SPA 时按需重建 `_headers`）、`CHANGELOG.md`、`CLAUDE.md`、`THIRD_PARTY_NOTICES.md`（依赖变更后重生成）、`.dev.vars.example`、`.github/CODEOWNERS`（单人项目无意义）
 - 替换（删旧建新）：`.github/workflows/check.yml`（D3）、`README.md`（内容重写为 v2）
-- 保留：`docs/`（specs + openapi 契约资产）、`patches/`（M2 逐项验证后按需引用）、`pnpm-workspace.yaml`（**澄清：非 workspace 分包**，是 pnpm 安全策略 minimumReleaseAge/trustPolicy/blockExoticSubdeps/strictDepBuilds + 3 个 better-auth patch 的挂载点——redesign-norms 待定项 3 的前提由此澄清：旧工程本就是单包）、`pnpm-lock.yaml`（M1 依赖变更后重锁）、`package.json`（重写）、`LICENSE`、`AGENTS.md`、`.gitattributes`、`.node-version`、`.gitignore`（微调）、`.oxlintrc`/`.oxfmtrc`/`.secretlintrc`（按需沿用）、`probes/m0/`、`spikes/m1/`
+- 保留但更新：`docs/specs/`（v2 事实来源）+ `docs/openapi.json`（契约资产）；`AGENTS.md`——保留但**必须更新引用**（其「实施授权边界」仍指向已降级的 foundation.md §27 → 改指 refactoring.md §7/§27 对应的 v2 位置）
+- docs 内旧流程文档处置：`docs/development.md`、`docs/releasing.md`（旧发布流程，L2 已证不可用）删除；`docs/index.md` 重写为 v2 导航；`docs/specs/foundation.md` 保留但头部加「参考档（v2 起非权威）」标注
+- 保留：`patches/`（M2 逐项验证后按需引用）、`pnpm-workspace.yaml`（**澄清：非 workspace 分包**，是 pnpm 安全策略 minimumReleaseAge/trustPolicy/blockExoticSubdeps/strictDepBuilds + 3 个 better-auth patch 的挂载点——redesign-norms 待定项 3 的前提由此澄清：旧工程本就是单包）、`pnpm-lock.yaml`（M1 依赖变更后重锁）、`package.json`（重写）、`LICENSE`、`AGENTS.md`、`.gitattributes`、`.node-version`、`.gitignore`（微调）、`.oxlintrc`/`.oxfmtrc`/`.secretlintrc`（按需沿用）、`probes/m0/`、`spikes/m1/`
 - 旧代码在 git 历史（`59bbd32`）永久可查（`git show 59bbd32:src/worker/app.ts` 等），不损失任何内容；这是当初「不删库、开新分支从零重建」共识的落实
 
 > 这是不可逆性最低的方案：若 v2 失败，`main` 分支与生产 Worker 不受任何影响。
