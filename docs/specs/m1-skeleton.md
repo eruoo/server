@@ -113,3 +113,10 @@ jobs:
 
 - `wrangler deploy --config wrangler.jsonc --env staging --dry-run`（spike 见 `spikes/m1/`）：env.staging 的 name 覆盖、D1 binding（`env.DB → eruoo-server-staging`）、顶层 compatibility 继承全部正确解析。部署路径无未知风险。
 - vite + client assets 部分沿用旧工程已验证的 `@cloudflare/vite-plugin` 模式，M1 实施时按最简形态重建（不迁移旧 sanitize 脚本，M7 按需收敛）。
+
+## 6. 决策记录（owner 确认，2026-09-04 15:2x UTC）
+
+- **D1 旧代码处置**：✅ 按清单删除（三态清单见上）
+- **D2 staging Worker 复用**：✅ 骨架直接替换探针 Worker
+- **D3 CI 最小集**：✅ 四项（format:check + lint + typecheck + test）
+- **D4 Migration Ledger**：✅ **分里程碑演进路线**——0001 沿用旧 DDL（M8 零迁移），15 张 Better Auth/插件表无重设空间；4 张应用表在各自里程碑重设计（security_audit_events + rateLimit → M5，database_backup_health + maintenance_lease → M7，经 0002+ migration 平滑演进，旧数据迁移）。
