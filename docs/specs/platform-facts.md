@@ -108,4 +108,4 @@
 - **根因**：旧 `deploy-production.ts` 的部署命令 `wrangler deploy --config dist/eruoo_server/wrangler.json` **不带 `--env production`**——部署的是顶层配置，其 `triggers.crons = []`（真实 cron 只在 env.production）→ **每次该脚本部署都把生产 cron 清空**。832dc0d8（9-04 09:46，Workers Builds 首次成功部署或该脚本）是时间线上最后一个部署，此后第一个 cron 触发点（20:00）未跑，证据链吻合。
 - **影响**：生产每日清理（过期数据清理）与每周备份 cron 均已丢失。清理延迟对个人项目数据量无实质影响；备份 cron 本就从未成功执行过（§redesign-assets 基建现状）。
 - **v2 设计约束（M7/M8 强制）**：部署配置与 cron 声明必须在同一层级视角——v2 的 cron 必须在部署所用配置的直接层级生效（禁止「顶层空 + env 藏真值」结构，或部署命令必须显式带 --env）。M1 已踩过同款问题的 staging 变体（vite 部署配置丢 env 语义）。
-- **处置（owner 决策中）**：a) owner 在 Dashboard 手动加回 cron；b) 等 M8 v2 部署自然修复；c) 授权我用带 cron 的配置重新部署生产。
+- **处置（owner 已决策 2026-09-04 22:1x UTC）**：**等 M8 自然修复**——生产 cron 保持空置，v2 部署时以正确配置恢复（M8 检查清单加「cron 恢复验证」项）。明晚 19:00 UTC 的备份 cron 观察定时器保留，作为「cron 确实不触发」的二次确认。
