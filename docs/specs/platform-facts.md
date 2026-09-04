@@ -71,3 +71,13 @@
 - 时间：2026-09-04 14:16 UTC 之后（探针部署于 `e490b50a`）。
 - 采集方式：curl 触发 + `wrangler tail --format json`（cpuTime/wallTime/outcome 来自平台观测）；D1 服务端计时来自响应体。
 - 局限：CPU 样本少（n=3 for 200k），波动大；结论按量级判断，不追求精确阈值。
+
+## 7. 探针口径变更记录
+
+| 时间（UTC） | 版本              | cron 查询口径                    | 备注                                                                                                                            |
+| ----------- | ----------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 09-04 14:16 | e490b50a          | `SELECT 1`（*/5）                | 3 个数据点：wall 450–485ms / cpu ≈2.2ms                                                                                         |
+| 09-04 14:2x | a70e23da→adbcfd53 | `SELECT 1`（每小时）+ 计时日志   | 15:00 起每小时一点                                                                                                              |
+| 09-04 14:43 | 00b89d1c          | `probe_session` 表查询（每小时） | 表为模拟 Better Auth session 行形态（`wrangler d1 execute` 直接创建，1 行固定数据），比 SELECT 1 多含表页缓存开销；15:00 起生效 |
+
+> `probe_session` 建表语句：`CREATE TABLE probe_session (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL, data TEXT)` + 1 行固定数据（id=`probe-fixed-row`）。
