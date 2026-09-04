@@ -18,7 +18,7 @@ describe("M1 skeleton health", () => {
     }
     expect(body.ok).toBe(true)
     expect(body.service).toBe("eruoo-server")
-    expect(body.milestone).toBe("M1")
+    expect(body.milestone).toBe("M2")
     expect(response.headers.get("cache-control")).toBe("no-store")
   })
 
