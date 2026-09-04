@@ -64,3 +64,4 @@ exports/
 .idea/
 *.swp
 *.swo
+.v2-archive/

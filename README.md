@@ -1,50 +1,25 @@
 # eruoo-server
 
-Personal identity, authorization, and API foundation for eruoo applications.
-The service is designed for Cloudflare Workers and combines a Hono API,
-Better Auth, D1, and a Vue management SPA.
+个人身份与授权服务（Workers + Hono + Better Auth + D1 + R2 + Vue），v2 重设计进行中。
 
-The product and security contract lives in
-[`docs/specs/foundation.md`](./docs/specs/foundation.md). Its implementation
-boundary allows reversible local work to proceed while keeping production,
-credentials, domains, paid services, and destructive actions behind explicit
-owner authorization.
+## 当前状态
 
-## Local development
+`refactor/v2` 分支按 [docs/specs/refactoring.md](docs/specs/refactoring.md) 的 M0-M8 里程碑重建：
 
-Requirements: Node.js 24 and the pnpm version pinned by `packageManager`.
+- **M0 平台实测** ✅（[platform-facts.md](docs/specs/platform-facts.md)）
+- **M1 工程骨架** 🔨（当前）
+- M2-M8：认证核心 → Passkey → OAuth Provider → API Key → SPA → 审计备份发布 → 生产切换
 
-```sh
-pnpm install --frozen-lockfile
-cp .dev.vars.example .dev.vars
-pnpm run db:migrate:local
-pnpm run dev
+## 开发
+
+```bash
+pnpm install
+pnpm run check        # format + lint + typecheck + test
+pnpm run dev          # 本地开发
+pnpm run deploy:staging   # 部署验证环境（eruoo-server-staging）
 ```
 
-Replace every placeholder in `.dev.vars` with local-only values. The file is
-ignored by Git and must never be committed. See
-[`docs/development.md`](./docs/development.md) for the complete workflow.
+## 文档入口
 
-## Verification
-
-```sh
-pnpm run check
-```
-
-`check` is read-only with respect to remote Cloudflare resources. Database
-migrations and deployment use separate, explicit commands. The independent
-`release:preflight` command validates the committed production resource IDs and
-generated deployment configuration without reading remote Secrets, applying
-migrations, or deploying resources.
-
-## Releases
-
-Production releases use the protected `production` branch and Cloudflare
-Workers Builds. See [`docs/releasing.md`](./docs/releasing.md) for the complete
-release, acceptance, tag, and failure-handling workflow. User-visible changes
-are recorded in [`CHANGELOG.md`](./CHANGELOG.md).
-
-## License
-
-[MIT](./LICENSE). Bundled font notices are listed in
-[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md).
+- [docs/index.md](docs/index.md) — 导航
+- 旧实现保留在 git 历史（`59bbd32`），旧规格 [foundation.md](docs/specs/foundation.md) 为参考档

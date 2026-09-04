@@ -1,3 +1,5 @@
+> **参考档（v2 起非权威）**：本文档为 v1 规格的历史记录。当前权威见 [refactoring.md](./refactoring.md) 与 [platform-facts.md](./platform-facts.md)。
+
 # eruoo-server 产品与技术规格
 
 > 状态：实现中；设计决策已收口，外部状态变更保留人工关口
