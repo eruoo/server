@@ -57,6 +57,25 @@ export default {
       )
     }
 
+    if (url.pathname === "/probe/session") {
+      // 与 cron 相同口径的 session 表查询;阶段 3 长闲置测试时人工触发。
+      const startedAt = Date.now()
+      const result = await env.DB.prepare(
+        "SELECT id, user_id, expires_at FROM probe_session WHERE id = ?",
+      )
+        .bind("probe-fixed-row")
+        .first()
+      const elapsedMs = Date.now() - startedAt
+      return new Response(
+        JSON.stringify({
+          probe: "session",
+          elapsedMs,
+          found: result !== null,
+        }),
+        { headers: jsonHeaders },
+      )
+    }
+
     if (url.pathname === "/probe/cpu") {
       const iterations = Math.min(
         Math.max(Number(url.searchParams.get("n") ?? 1000), 1),
