@@ -36,6 +36,35 @@ GitHub Actions 单 workflow（`.github/workflows/check.yml` 重写）：
 - **不包含**（后续里程碑按需加回）：release-preflight、openapi:check、auth-schema:check、e2e、bundle:check
 - 本地 pre-push hook 不再依赖（「Bypassed rule violations」教训：门禁在 CI，不在本地）
 
+### D3 附：CI workflow 具体形态（实施时落地）
+
+```yaml
+name: Check
+on:
+  push:
+    branches: [refactor/v2]
+  pull_request:
+    branches: [refactor/v2]
+permissions:
+  contents: read
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check
+```
+
+与旧 workflow 的差异：无 production 分支 fetch（M8 才有生产基线校验）、无 Playwright 安装（M6 引入 E2E 时加回）、`check` 仅四项（format/lint/typecheck/test）。旧 workflow 在 M1 实施时整体替换。
+
 ### D4 Migration Ledger
 
 - 新 `migrations/0001_foundation.sql`：内容沿用旧 0001 的最终 schema（表定义逐字或语义等价重组），保证 M8 生产数据兼容
@@ -83,32 +112,3 @@ GitHub Actions 单 workflow（`.github/workflows/check.yml` 重写）：
 
 - `wrangler deploy --config wrangler.jsonc --env staging --dry-run`（spike 见 `spikes/m1/`）：env.staging 的 name 覆盖、D1 binding（`env.DB → eruoo-server-staging`）、顶层 compatibility 继承全部正确解析。部署路径无未知风险。
 - vite + client assets 部分沿用旧工程已验证的 `@cloudflare/vite-plugin` 模式，M1 实施时按最简形态重建（不迁移旧 sanitize 脚本，M7 按需收敛）。
-
-### D3 附：CI workflow 具体形态（实施时落地）
-
-```yaml
-name: Check
-on:
-  push:
-    branches: [refactor/v2]
-  pull_request:
-    branches: [refactor/v2]
-permissions:
-  contents: read
-concurrency:
-  group: check-${{ github.ref }}
-  cancel-in-progress: true
-jobs:
-  check:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/setup@v2
-        with:
-          runtime: node@24
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run check
-```
-
-与旧 workflow 的差异：无 production 分支 fetch（M8 才有生产基线校验）、无 Playwright 安装（M6 引入 E2E 时加回）、`check` 仅四项（format/lint/typecheck/test）。旧 workflow 在 M1 实施时整体替换。
