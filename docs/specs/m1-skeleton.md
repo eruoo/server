@@ -74,3 +74,8 @@ GitHub Actions 单 workflow（`.github/workflows/check.yml` 重写）：
 - [ ] 0001 应用到验证 D1，schema 与生产结构一致（diff 证据）
 - [ ] `/health` 在验证域名可访问（返回版本/构建信息）
 - [ ] 探针退场记录在 platform-facts.md（阶段 2 数据封存说明）
+
+## 5. 技术预验（2026-09-04，dry-run 证据）
+
+- `wrangler deploy --config wrangler.jsonc --env staging --dry-run`（spike 见 `spikes/m1/`）：env.staging 的 name 覆盖、D1 binding（`env.DB → eruoo-server-staging`）、顶层 compatibility 继承全部正确解析。部署路径无未知风险。
+- vite + client assets 部分沿用旧工程已验证的 `@cloudflare/vite-plugin` 模式，M1 实施时按最简形态重建（不迁移旧 sanitize 脚本，M7 按需收敛）。
