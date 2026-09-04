@@ -1,0 +1,76 @@
+# M1 工程骨架设计（owner 门禁材料）
+
+> 状态：设计稿，待 owner 确认后实施
+> 上游依据：refactoring.md §M1 + §7 执行配置 + redesign-assets.md + platform-facts.md
+> 原则：M1-M6 最简部署（L2 教训），发布门禁 M7 才收敛
+
+## 1. 决策点（需 owner 确认）
+
+### D1 旧实现代码处置
+
+M1 开工时在 `refactor/v2` 上**删除旧实现的工作树文件**：
+
+- 删除：`src/`、`tests/`、`scripts/`、`.generated/`、`migrations/`（旧 ledger）、`dist/`、`output/`、`playwright.config.ts`、`index.html`、`vite.config.ts`、`wrangler.jsonc`（旧配置）、`CHANGELOG.md`、`CLAUDE.md`、`.dev.vars*`
+- 保留：`docs/`（specs + openapi 契约资产）、`patches/`（M2 逐项验证后按需引用）、`LICENSE`、`README.md`、`AGENTS.md`、工具链配置（`.oxlintrc` / `.oxfmtrc` / `.secretlintrc` 按需沿用）
+- 旧代码在 git 历史（`59bbd32`）永久可查（`git show 59bbd32:src/worker/app.ts` 等），不损失任何内容；这是当初「不删库、开新分支从零重建」共识的落实
+
+> 这是不可逆性最低的方案：若 v2 失败，`main` 分支与生产 Worker 不受任何影响。
+
+### D2 staging Worker 复用
+
+M1 骨架的部署目标 = `eruoo-server-staging`（探针 Worker 直接被骨架替换）：
+
+- M0 阶段 2 数据（每小时 cron）在骨架部署前已积累于 Dashboard Workers Logs，不受影响
+- M0 阶段 3（6–24h 长闲置）需要时临时重新部署探针补采（probes/m0 代码保留在仓库）
+- 好处：验证环境始终单 Worker，M8 切换时目标明确
+
+### D3 CI 最小集
+
+GitHub Actions 单 workflow（`.github/workflows/check.yml` 重写）：
+
+- 触发：push / PR 到 `refactor/v2`
+- 步骤：pnpm install --frozen-lockfile → `format:check` + `lint` + `typecheck` + `test`（vitest 冒烟集）
+- **不包含**（后续里程碑按需加回）：release-preflight、openapi:check、auth-schema:check、e2e、bundle:check
+- 本地 pre-push hook 不再依赖（「Bypassed rule violations」教训：门禁在 CI，不在本地）
+
+### D4 Migration Ledger
+
+- 新 `migrations/0001_foundation.sql`：内容沿用旧 0001 的最终 schema（表定义逐字或语义等价重组），保证 M8 生产数据兼容
+- M1 门禁含 schema 等价性验证：在新验证 D1 应用 0001 后 `wrangler d1 export`（或 PRAGMA table_list + 每表 schema diff）与生产 schema 结构比对
+- 验证 D1：`eruoo-server-staging`（已创建，APAC，id `a43a01e6-e011-4cbf-9a9c-50642f79b61d`）
+
+## 2. 工程结构（M1 交付形态）
+
+```text
+├── src/
+│   └── worker/
+│       └── index.ts        # Hono 入口，M1 仅 /health 端点（含构建版本信息）
+├── tests/
+│   └── worker/
+│       └── health.test.ts  # @cloudflare/vitest-pool-workers 冒烟
+├── migrations/
+│   └── 0001_foundation.sql # 与生产 schema 兼容（D4）
+├── probes/m0/              # 保留（阶段 3 补采用）
+├── docs/                   # 保留
+├── wrangler.jsonc          # env.staging → eruoo-server-staging + 验证 D1
+├── vite.config.ts          # @cloudflare/vite-plugin + client 插件占位
+├── package.json            # scripts: dev / build / check / deploy:staging / db:migrate:staging
+└── （工具链沿用：oxfmt / oxlint / secretlint / vitest / wrangler，版本见 redesign-assets）
+```
+
+## 3. 关键命令（M1 门禁执行项）
+
+| 命令                                                              | 作用                                                |
+| ----------------------------------------------------------------- | --------------------------------------------------- |
+| `pnpm run check`                                                  | format:check + lint + typecheck + test（本地同 CI） |
+| `pnpm run db:migrate:staging`                                     | 新 0001 应用到验证 D1                               |
+| `pnpm run deploy:staging`                                         | `wrangler deploy --env staging`，单命令无门禁       |
+| `curl https://eruoo-server-staging.l709937065.workers.dev/health` | 门禁验收                                            |
+
+## 4. M1 完成定义（门禁）
+
+- [ ] 旧实现工作树文件已删除（D1），git 历史保留
+- [ ] CI 绿（refactor/v2 push 触发，Actions 全绿）
+- [ ] 0001 应用到验证 D1，schema 与生产结构一致（diff 证据）
+- [ ] `/health` 在验证域名可访问（返回版本/构建信息）
+- [ ] 探针退场记录在 platform-facts.md（阶段 2 数据封存说明）
