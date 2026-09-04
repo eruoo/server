@@ -55,7 +55,7 @@
 
 - 在验证 Worker 上实测：D1 查询延迟分布（含闲置后首次查询）、get-session 等价路径的 CPU 基线、Workers Free 当前 CPU 限制的真实值、subrequest/Workflow 约束。
 - 产出：`docs/specs/platform-facts.md`（实测数据表），作为后续所有性能/调度设计的依据。
-- **门禁**：owner 确认实测数据可信。
+- **门禁**：owner 确认实测数据可信。（**已通过 2026-09-04**）
 
 ### M1 工程骨架 + 最简部署
 
