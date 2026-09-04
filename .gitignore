@@ -57,6 +57,7 @@ exports/
 *.sql
 *.sql.*
 !migrations/**/*.sql
+!spikes/m1/*.sql
 
 # Editor and operating-system files
 .DS_Store
