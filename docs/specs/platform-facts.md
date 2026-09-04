@@ -55,9 +55,15 @@
   - 阶段 3（后续）：暂停 cron，人工间隔 6–24 小时后 curl 一次，采长闲置数据。
   - 阶段 1 的 `*/5` 保温对照数据（2026-09-04 14:20/14:25/14:30 UTC 三条 cron 记录）已入上述表格。
 
+### §3 对 M2 的设计影响（初步，M2 议程输入）
+
+- **isolate 冷启动地板 ≈ 400–485ms**：无法通过代码消除，任何「首次请求/低频端点」的 TTFB 预期都应以此为地板而非 100ms。M2 的 `get-session TTFB < 100ms` 目标因此只对**热路径**成立；冷启动场景的合理目标是 < 600ms。
+- cookieCache 的延迟价值被 M0 数据直接量化：命中路径（1–2ms cpu，免 D1）避开冷启动 + D1 两项开销；未命中路径在冷 isolate 上叠加 ~400ms 启动 + ~22ms 查询。
+- v2 是否需要「预热 cron」保持 isolate 热（类似 */5 探针对 D1 的保温）→ M2 议程探讨项。
+
 ## 4. 请求额度与 cron 预算
 
-- 探针 cron `*/5` = 288 次/天，对 Free 100k/天请求额度可忽略。
+- 探针 cron 当前为每小时（阶段 2）= 24 次/天（前期 `*/5` 阶段 288 次/天），对 Free 100k/天请求额度可忽略。
 - 账号 cron 总数：生产 2 个 + 探针 1 个 = 3/5（Free 上限 5）。M7 收敛发布前需复核。
 
 ## 5. 待办（M0 剩余项）
@@ -83,9 +89,3 @@
 | 09-04 14:43 | 00b89d1c          | `probe_session` 表查询（每小时） | 表为模拟 Better Auth session 行形态（`wrangler d1 execute` 直接创建，1 行固定数据），比 SELECT 1 多含表页缓存开销；15:00 起生效 |
 
 > `probe_session` 建表语句：`CREATE TABLE probe_session (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL, data TEXT)` + 1 行固定数据（id=`probe-fixed-row`）。
-
-### §3 对 M2 的设计影响（初步，M2 议程输入）
-
-- **isolate 冷启动地板 ≈ 400–485ms**：无法通过代码消除，任何「首次请求/低频端点」的 TTFB 预期都应以此为地板而非 100ms。M2 的 `get-session TTFB < 100ms` 目标因此只对**热路径**成立；冷启动场景的合理目标是 < 600ms。
-- cookieCache 的延迟价值被 M0 数据直接量化：命中路径（1–2ms cpu，免 D1）避开冷启动 + D1 两项开销；未命中路径在冷 isolate 上叠加 ~400ms 启动 + ~22ms 查询。
-- v2 是否需要「预热 cron」保持 isolate 热（类似 */5 探针对 D1 的保温）→ M2 议程探讨项。
