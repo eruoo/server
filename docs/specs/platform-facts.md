@@ -52,7 +52,7 @@
 - **生产 Worker（`eruoo-server-production`）最近 24h 复核（09-03 20:00 → 09-04 14:40 UTC）**：18 次调用全部 success，零挂起（wall 最大 1397ms）；wallP50 分布 1.7ms（cookieCache 命中）至 1397ms（重操作）；cpu 1–108ms。生产流量约 **18 次/天**（个人项目量级，Free 额度无压力）。504 时段的挂起未再现，但间歇性结论不变——修复部署（`832dc0d8`）后的观察窗口仍短。
 - **数据读取通道已打通**：Cloudflare GraphQL Analytics API（wrangler OAuth token 可用）`workersInvocationsAdaptive` 数据集，按 `dimensions{datetime,status}` 分组取 `quantiles{wallTimeP50,wallTimeP99,cpuTimeP50}`。**单位为 μs**（以 exceededCpu 行 wall=2423253μs=2423ms 与 tail 实测交叉验证锁定——初读误判为 29s 挂起，系单位误读，已纠正）。
 - **采集中**：闲置后首次查询（冷）分布。cron 已于 2026-09-04 14:2x UTC 切换为每小时（`0 * * * *`，版本 `a70e23da`），改进版探针（`adbcfd53`）在 scheduled 内计时并 `console.log`，15:00 UTC 起每小时输出纯 D1 查询耗时。
-  - 阶段 3（后续）：暂停 cron，人工间隔 6–24 小时后 curl 一次，采长闲置数据。
+  - 阶段 3（时间线已定）：今晚 22:00 UTC 暂停探针 cron（部署无 triggers 版本）→ 明天 ~14:00 UTC 人工 `curl /probe/session`（约 16 小时闲置）采长闲置数据点。**注意**：M1 骨架部署会接管 staging Worker（探针退场），若 owner 在今晚前确认 M1 开工，阶段 3 改为在 M1 Worker 上临时挂探针 cron 补采或接受 1 小时间隔数据作为结论基础（冷启动地板 400–485ms 已有 4+ 独立样本支撑）。
   - 阶段 1 的 `*/5` 保温对照数据（2026-09-04 14:20/14:25/14:30 UTC 三条 cron 记录）已入上述表格。
 
 ### §3 对 M2 的设计影响（初步，M2 议程输入）
