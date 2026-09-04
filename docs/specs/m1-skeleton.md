@@ -37,6 +37,7 @@ GitHub Actions 单 workflow（`.github/workflows/check.yml` 重写）：
 ### D4 Migration Ledger
 
 - 新 `migrations/0001_foundation.sql`：内容沿用旧 0001 的最终 schema（表定义逐字或语义等价重组），保证 M8 生产数据兼容
+- **生产 ledger 已核（2026-09-04 实测）**：生产 D1 的 `d1_migrations` 仅 1 条 `0001_foundation.sql`（applied 2026-08-29 15:13:14 UTC）——新工程 0001 同名同义时，M8 切换 `wrangler d1 migrations apply` 将跳过重放，生产 schema 无需任何迁移动作；D4 的 diff 验证是「同名即等价」的前提证明
 - M1 门禁含 schema 等价性验证：在新验证 D1 应用 0001 后 `wrangler d1 export`（或 PRAGMA table_list + 每表 schema diff）与生产 schema 结构比对
 - 验证 D1：`eruoo-server-staging`（已创建，APAC，id `a43a01e6-e011-4cbf-9a9c-50642f79b61d`）
 
