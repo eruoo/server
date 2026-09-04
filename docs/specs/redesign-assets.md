@@ -59,3 +59,13 @@
 - **上游 v1.7.2（2026-08-26）`@better-auth/core` 已修复 "async context loss in Cloudflare Workers bundles with multiple runtime conditions"（[#10855](https://github.com/better-auth/better-auth/pull/10855)）**——与旧 core patch 针对的 ALS 问题同源。M2 首选 1.7.2 无 patch 验证 workerd 行为，通过则 core patch 退役。
 - v1.7.2 其他相关修复：cookieCache 无效签名数据增加警告（关联 v2 的 JWE cookieCache 设计）；Cloudflare D1 程序化迁移修复（关联 M1/M2 schema 生成）；oauth-provider 的 MCP scope 403 语义。
 - `@better-auth/api-key` 与 `@better-auth/oauth-provider` 的旧 patch 问题在 1.7.2 changelog 中未见对应修复——**这两个 patch 预计仍需保留，M4/M5 时逐项实测**。
+
+## 7. 基础设施现状（2026-09-04 实测）
+
+| 资源                             | 现状                        | 说明                                                                                                             |
+| -------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 生产 D1 `eruoo-server`           | APAC，20 表，ledger 仅 0001 | 数据量极小（全库 export 18KB）                                                                                   |
+| R2 `eruoo-server-backups`        | APAC，**object_count = 0**  | **生产备份从未成功执行过**（与 L2「发布流程从未工作」同款问题）——M7 备份设计必须把「真实产出过备份」作为验收条件 |
+| Workflow `eruoo-database-backup` | 已绑定（BACKUPS + D1）      | 从未写入任何对象                                                                                                 |
+
+**应急措施（2026-09-04 14:55 UTC）**：已手动 `wrangler d1 export` 生产 D1 至本地 `output/backups/prod-emergency-2026-09-04.sql`（gitignored，含 20 表 schema + 19 行数据，完整性已核）。M7 之前此文件是生产数据的唯一备份——owner 可自行复制到第二位置保管。
