@@ -1,5 +1,7 @@
 # eruoo-server 重设计规格 (Redesign Spec v2)
 
+> 2026-09-09 补充：[完整架构规格](architecture.md) 按 owner 最新要求维护目标。本文的“不预写完整规格”、固定 Session、保留旧生产数据与完整功能替换、production 分支 + Workers Builds 发布要求，分别由完整规格、滚动续期、空库启用与 GitHub Actions 产物发布替代。owner 已允许 Desktop 同步改版，§3/§4 中旧客户端无需改动及旧 OpenAPI 兼容要求由当前契约与配套客户端验收替代。原文作为历史记录保留，§7 的 staging 预授权和生产执行边界继续适用；新要求不等于已经实施或本轮获准操作线上资源。
+
 > 状态：spec 定稿候选，等待 owner 确认后进入 M0
 > 前置决策（owner 已确认）：技术栈与现状完全一致（Workers + Hono + Better Auth 1.7 + D1 + R2 + Workflows + Vue 3）；代码从零搭建；分步门禁；规范随里程碑演进。
 > 配套文档：`docs/specs/redesign-norms.md`（旧规范 29 节分级清单，每里程碑开工前逐项确认）。
