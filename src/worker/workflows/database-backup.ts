@@ -65,8 +65,6 @@ export interface DatabaseBackupWorkflowResult {
   sourceRevision: string
 }
 
-const WORKFLOW_ERROR_NAME_PREFIX = "DatabaseBackup/"
-
 const DATABASE_STEP_CONFIG = {
   retries: {
     backoff: "linear",
@@ -76,12 +74,12 @@ const DATABASE_STEP_CONFIG = {
   timeout: "30 seconds",
 } as const
 
-/** Cloudflare defines retries.limit as the total number of step attempts. */
+/** The runtime adds the initial attempt to retries.limit. */
 export const START_EXPORT_STEP_CONFIG = {
   retries: {
     backoff: "constant",
     delay: "1 second",
-    limit: D1_EXPORT_START_STEP_MAX_ATTEMPTS,
+    limit: D1_EXPORT_START_STEP_MAX_ATTEMPTS - 1,
   },
   sensitive: "output",
   timeout: "30 seconds",
@@ -91,7 +89,7 @@ export const POLL_EXPORT_STEP_CONFIG = {
   retries: {
     backoff: "linear",
     delay: "1 second",
-    limit: D1_EXPORT_POLL_STEP_MAX_ATTEMPTS,
+    limit: D1_EXPORT_POLL_STEP_MAX_ATTEMPTS - 1,
   },
   sensitive: "output",
   timeout: "30 seconds",
@@ -101,26 +99,23 @@ export const UPLOAD_STEP_CONFIG = {
   retries: {
     backoff: "linear",
     delay: "10 seconds",
-    limit: D1_EXPORT_UPLOAD_STEP_MAX_ATTEMPTS,
+    limit: D1_EXPORT_UPLOAD_STEP_MAX_ATTEMPTS - 1,
   },
   timeout: "15 minutes",
 } as const
 
-function createWorkflowStepError(error: unknown): Error {
+function createWorkflowStepError(error: unknown, allowRetry = true): Error {
   const backupError = normalizeDatabaseBackupError(
     error,
     "backup_configuration_invalid",
     false,
   )
 
-  if (backupError.retryable) {
+  if (allowRetry && backupError.retryable) {
     return backupError
   }
 
-  return new NonRetryableError(
-    backupError.code,
-    `${WORKFLOW_ERROR_NAME_PREFIX}${backupError.code}`,
-  )
+  return new NonRetryableError(backupError.code)
 }
 
 function classifyWorkflowFailure(error: unknown): DatabaseBackupError {
@@ -128,24 +123,18 @@ function classifyWorkflowFailure(error: unknown): DatabaseBackupError {
     return error
   }
 
-  if (
-    error instanceof Error &&
-    error.name.startsWith(WORKFLOW_ERROR_NAME_PREFIX)
-  ) {
-    const code = error.name.slice(WORKFLOW_ERROR_NAME_PREFIX.length)
+  if (error instanceof Error) {
+    // Workflow RPC serializes custom errors as Error("Name: message").
+    const code = error.message.replace(
+      /^(?:DatabaseBackupError|NonRetryableError): /,
+      "",
+    )
     if (isDatabaseBackupErrorCode(code)) {
       return new DatabaseBackupError(code, {
         cause: error,
         retryable: false,
       })
     }
-  }
-
-  if (error instanceof Error && isDatabaseBackupErrorCode(error.message)) {
-    return new DatabaseBackupError(error.message, {
-      cause: error,
-      retryable: false,
-    })
   }
 
   return new DatabaseBackupError("backup_configuration_invalid", {
@@ -233,14 +222,19 @@ export function createDurableExportOperations(
       return step.do(
         "start full D1 export",
         START_EXPORT_STEP_CONFIG,
-        async () =>
-          observeBeforeDeadline(deadlineMs, () =>
-            startD1Export(fetcher, {
-              accountId: environment.CF_ACCOUNT_ID,
-              apiToken: environment.D1_EXPORT_API_TOKEN,
-              databaseId: environment.D1_DATABASE_ID,
-            }),
-          ),
+        async () => {
+          try {
+            return await observeBeforeDeadline(deadlineMs, () =>
+              startD1Export(fetcher, {
+                accountId: environment.CF_ACCOUNT_ID,
+                apiToken: environment.D1_EXPORT_API_TOKEN,
+                databaseId: environment.D1_DATABASE_ID,
+              }),
+            )
+          } catch (error) {
+            throw createWorkflowStepError(error, false)
+          }
+        },
       )
     },
     async sleep(pollIndex, durationMs) {
