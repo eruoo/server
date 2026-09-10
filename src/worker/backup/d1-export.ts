@@ -141,7 +141,10 @@ function parseD1ExportResponse(body: unknown): D1ExportProgress {
     return parseCompleteExport(result, result.at_bookmark)
   }
 
-  if (result.status !== undefined || result.error !== undefined) {
+  if (
+    (result.status !== undefined && result.status !== "active") ||
+    result.error !== undefined
+  ) {
     throw new DatabaseBackupError("backup_export_response_invalid", {
       retryable: false,
     })
@@ -253,6 +256,7 @@ export async function pollD1Export(
     apiToken: request.apiToken,
     body: {
       current_bookmark: request.bookmark,
+      output_format: "polling",
     },
     databaseId: request.databaseId,
   })

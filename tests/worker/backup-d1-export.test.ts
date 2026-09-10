@@ -30,10 +30,10 @@ function exportResponse(
 }
 
 describe("D1 REST export client", () => {
-  it("starts one complete export without dump filters", async () => {
+  it("accepts a 202 active response when starting a full export", async () => {
     const fetcher = vi.fn<BackupFetch>(async (input, init) => {
       expect(new Request(input, init).redirect).toBe("manual")
-      return exportResponse({})
+      return exportResponse({ status: "active" }, 202)
     })
 
     await expect(
@@ -85,6 +85,7 @@ describe("D1 REST export client", () => {
     })
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
       current_bookmark: "bookmark-1",
+      output_format: "polling",
     })
     expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe("manual")
   })

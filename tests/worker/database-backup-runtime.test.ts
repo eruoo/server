@@ -5,6 +5,21 @@ import { getDatabaseBackupStatus } from "../../src/worker/backup/health"
 
 const signedUrl = "https://signed.example/database.sql"
 
+function activeExport() {
+  return Response.json(
+    {
+      success: true,
+      result: {
+        at_bookmark: "bookmark-1",
+        status: "active",
+        success: true,
+        type: "export",
+      },
+    },
+    { status: 202 },
+  )
+}
+
 function exportedDatabase() {
   return Response.json({
     success: true,
@@ -69,12 +84,7 @@ it.each([
         scenario.phase === "poll" &&
         !String(init?.body).includes("current_bookmark")
       ) {
-        return Promise.resolve(
-          Response.json({
-            success: true,
-            result: { at_bookmark: "bookmark-1" },
-          }),
-        )
+        return Promise.resolve(activeExport())
       }
       if (scenario.phase === "download" && request.url !== signedUrl) {
         return Promise.resolve(exportedDatabase())
@@ -103,11 +113,17 @@ it.each([
   },
 )
 
-it("completes a real Workflow after one transient download failure", async () => {
+it("polls an active export to completion and retries one transient download failure", async () => {
   let downloads = 0
+  const exportRequests: unknown[] = []
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init)
-    if (request.url !== signedUrl) return Promise.resolve(exportedDatabase())
+    if (request.url !== signedUrl) {
+      exportRequests.push(JSON.parse(String(init?.body)))
+      return Promise.resolve(
+        exportRequests.length < 3 ? activeExport() : exportedDatabase(),
+      )
+    }
     downloads += 1
     return Promise.resolve(
       downloads === 1
@@ -122,6 +138,7 @@ it("completes a real Workflow after one transient download failure", async () =>
   )
   await instance.modify(async (modifier) => {
     await modifier.disableRetryDelays()
+    await modifier.disableSleeps()
   })
   await env.DATABASE_BACKUP_WORKFLOW.create({ id })
   await instance.waitForStatus("complete")
@@ -130,6 +147,11 @@ it("completes a real Workflow after one transient download failure", async () =>
     rawBytes: number
   }
   try {
+    expect(exportRequests).toEqual([
+      { output_format: "polling" },
+      { output_format: "polling", current_bookmark: "bookmark-1" },
+      { output_format: "polling", current_bookmark: "bookmark-1" },
+    ])
     expect(downloads).toBe(2)
     expect(output.rawBytes).toBe(9)
     expect(await (await env.BACKUPS.get(output.key))?.text()).toBe("SELECT 1;")

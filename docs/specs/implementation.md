@@ -148,12 +148,26 @@ owner 要求继续完成可自动处理的上线准备，以下配置均已执�
 
 隔离恢复目标 `eruoo-server-restore-20260910-1f4612b` 已创建并验证为空，尚未导入快照、生成新信任或记录恢复完成。正式存储绑定未切换；production 应用仍未发布。脱敏执行证据继续保存在 `.output/staging-release-2026-09-10/`。
 
+### 4.6 2026-09-10 实际导出凭证与轮询契约修正
+
+[PR #17](https://github.com/eruoo/server/pull/17) 合入 `8c10c5422be2bdd73d9df51d1ca8911898b44b58`；[main CI](https://github.com/eruoo/server/actions/runs/34470704808) 和 [staging 发布](https://github.com/eruoo/server/actions/runs/34471096668) 均成功，发布耗时 49 秒，无新 migration，五个冒烟通过。owner 随后完成真实 Passkey 验证；远端注册和登录审计均已核对。GitHub 与 Passkey 的真实登录已通过，仍不代表全部专项验收完成。
+
+owner 更新导出 Secret 后，个人 Token verify 返回 Active，并确认该凭证为 staging 实际使用的 `eruoo-server-d1-export`。它不同于最初创建的账号 Token `eruoo-server-staging-d1-export`；先前针对后者的 Write 试验不能证明实际运行凭证的结果。两个身份的区别以 owner 提供的 verify 结果及其确认建立，Dashboard 名称本身不提供完整的 ID/Secret 对应证明。
+
+经 owner 对实际个人 Token 的账号范围明确授权，将 D1 Read 临时改为 Edit，保持 Secret 值和应用代码不变，启动唯一实例 `database-backup-v1-20260910-user-token-write-8c10c54`。实例于 14:49:41–14:49:47 UTC 失败：一次 export 请求从原认证错误进入 2xx 响应解析，报 `backup_export_response_invalid`，没有轮询、下载或上传。已按约定恢复 D1 Read 并读回保存后的权限摘要；先前的账号 Token 也保持 Read。此次没有更换为部署 Token，没有成功备份，未保留原始响应正文，因此不能断言该次实际响应的具体 status 字段。
+
+按[运维规格的导出契约](operations.md#42-六步流程)，官方 Wrangler 的 202/active fixture 在旧解析器上复现同一错误；另确认每次 poll 缺少必需的 `output_format`。两项回归在修改前均失败，修正后导出客户端与原生 Workflow 的 21 项测试通过。原生 Workflow 正向测试实际经过 active → active → complete → 下载暂时失败后重试 → R2 保存与健康状态更新，仅模拟外部 HTTP 并关闭等待时间；真实平台仍需用修正后的 staging 版本重新验收。
+
+完整 `pnpm run check` 通过：Worker 205 项、前端 30 项、脚本 54 项、Chromium 4 项，共 **293 项**；本轮增强既有案例，没有增加测试项数，也没有重跑完整消融矩阵。
+
+本轮脱敏执行回执及回归日志保存在本地忽略目录 `.output/staging-release-2026-09-10/`，不记录凭证、SQL 或签名下载地址。生产 v2 仍未部署；真实备份成功前不开展快照导入。
+
 ## 5. 尚未执行的外部验收
 
 Cloudflare 与 GitHub 接线、首次 staging migration/应用上传/Workflow 注册和 cron 已按 §4.1–§4.3 执行。以下结果仍需在实际授权环境取得，不能由本地测试替代：
 
-- Workflow 重试与错误分类修正后的 staging 发布、production 首次发布及其 token 实际有效性；独立 export runtime secret 的修复与真实流程验证。
-- 真实认证器登录；远端端到端 code→refresh→revoke；地区/冷启动/CPU/尾延迟与后续常规发布耗时样本。真实 owner GitHub 登录已在 §4.5 通过。
+- D1 export 轮询修正后的真实备份验证、production 首次发布及其 token 实际有效性；任何进一步导出权限调整仍按 §4.6 的实际凭证身份授权。
+- 远端端到端 code→refresh→revoke；地区/冷启动/CPU/尾延迟与后续常规发布耗时样本。真实 owner GitHub 与 Passkey 登录已通过。
 - 一次成功的真实备份导出/上传、停止/超时行为、向已建隔离 D1 导入恢复、凭证清理、新信任验证、代码回退演练。
 - Desktop App、Rust 安全存储、客户端打包与跨端联调：按 owner 最新决定延期，不属于本次 Web 交付。
 

@@ -34,6 +34,8 @@
 
 沿用既有 runtime 变量和 binding 名称，不为重设计新增兼容别名。实际生产 DB/BACKUPS 指向新建空 D1 和独立空 R2 bucket；Worker 域名、名称和无需变化的其他资源继续沿用，发布核对目标 ID。首次启用生成新的 BETTER_AUTH_SECRETS，旧 Cookie 不作为新系统登录状态。
 
+导出凭证验收必须区分账号 Token 与个人 Token，并核对实际写入 Worker 的凭证身份；不能用同名或另一枚 Token 的权限推断运行时权限。D1 元数据 GET 成功也不能证明 export POST 可用。staging 的 Read/Edit 对照及失败后的权限恢复见[实施记录](implementation.md#46-2026-09-10-实际导出凭证与轮询契约修正)；涉及权限变化时仍须针对实际凭证、账号覆盖范围和回退条件取得授权。
+
 配置按能力校验：身份配置错误阻止依赖它的动态功能；备份 token 错误只阻止备份。审计 HMAC 缺失阻止需要安全审计的身份/管理/业务操作，但 `/health`、静态错误页和 metadata 仍可达。有效配置下的单次审计写失败适用 §3 的规则。这个范围收敛替代旧“审计配置缺失导致所有动态响应失效”的做法。
 
 不增加 `AUTH_MODE`、`USE_CACHE`、`SKIP_CHECKS`、`BOOTSTRAP_PRODUCTION` 等运行开关。CORS 空集和 owner 值是安全策略，不提供浏览器输入的覆盖路径。`VITE_*` 只能放可公开值。
@@ -111,6 +113,8 @@ Time Travel 是平台短期原地恢复能力；当前 Free 文档为 7 天、Pa
 | 记终态     | 对象验证成功才写 `database_backup_health=ok`，其他终态记脱敏 failure                       | 健康写入失败输出日志；不能把上传前状态当成功                 |
 
 Cron 只做派发，长任务由 Workflow 完成。instance ID 命名保持稳定，相同 scheduledTime 的重复派发在同一 Workflow 资源内去重；v1 只是命名空间，不要求迁移旧实例。初始免费部署使用这条已定义的调用路径，不依赖付费 direct schedules；即使以后付费，也不自动更换调度架构。Free 完成实例当前保留 3 天，确定性 ID 只在平台保留期内去重，不建设永久时间槽台账。超过保留期的重新投递可能形成另一次备份。[Workflow limits](https://developers.cloudflare.com/workflows/reference/limits/)。
+
+启动与每次轮询均提交 `output_format: "polling"`；轮询另带已保存的 `current_bookmark`，不添加 `dump_options`。HTTP 202、内部 `status: "active"` 表示导出进行中，验证 bookmark 后继续既有有界轮询；保留省略内部 status 的兼容，未知状态仍拒绝。必需请求字段以 [D1 Export API](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/export/) 为准；API 类型表未列出的 active 响应由[官方 Wrangler 导出测试](https://github.com/cloudflare/workers-sdk/blob/main/packages/wrangler/src/__tests__/d1/export.test.ts)提供具体证据。
 
 ### 4.3 有限预算与并发
 
