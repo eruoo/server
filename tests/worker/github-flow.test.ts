@@ -11,8 +11,8 @@ beforeEach(async () => {
 afterEach(() => vi.restoreAllMocks())
 
 function githubProfile(id: number) {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-    const url = new URL(input instanceof Request ? input.url : String(input))
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = new URL(new Request(input, init).url)
     if (
       url.origin === "https://github.com" &&
       url.pathname === "/login/oauth/access_token"
@@ -41,13 +41,15 @@ function githubProfile(id: number) {
   })
 }
 
+let nextTestClient = 1
 async function login() {
+  const clientIp = `192.0.2.${nextTestClient++}`
   const start = await SELF.fetch("http://local.test/api/auth/sign-in/social", {
     method: "POST",
     headers: {
       origin: "http://local.test",
       "content-type": "application/json",
-      "cf-connecting-ip": `192.0.2.${Math.floor(Math.random() * 200) + 1}`,
+      "cf-connecting-ip": clientIp,
     },
     body: JSON.stringify({
       provider: "github",
@@ -66,7 +68,10 @@ async function login() {
     .join("; ")
   return SELF.fetch(
     `http://local.test/api/auth/callback/github?code=synthetic-code&state=${encodeURIComponent(state)}`,
-    { headers: { cookie: cookies }, redirect: "manual" },
+    {
+      headers: { cookie: cookies, "cf-connecting-ip": clientIp },
+      redirect: "manual",
+    },
   )
 }
 
@@ -170,6 +175,28 @@ it("records only HTTP status for a rejected GitHub token request", async () => {
     ],
   ])
 })
+
+it.each([301, 302, 303, 307, 308])(
+  "refuses a GitHub %s redirect without forwarding credentials",
+  async (status) => {
+    const logger = vi.spyOn(console, "error").mockImplementation(() => {})
+    const outbound = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, init) => {
+        expect(new Request(input, init).redirect).toBe("manual")
+        return new Response(null, {
+          status,
+          headers: { location: "https://redirect.invalid/credentials" },
+        })
+      })
+    const response = await login()
+    expect(response.headers.get("location")).toContain("invalid_code")
+    expect(outbound).toHaveBeenCalledTimes(1)
+    expect(logger.mock.calls).toEqual([
+      [{ event: "github_code_exchange_failed", reason: "http_error", status }],
+    ])
+  },
+)
 
 it("aborts a stalled GitHub response body and does not issue a Session", async () => {
   const timeout = AbortSignal.timeout.bind(AbortSignal)
