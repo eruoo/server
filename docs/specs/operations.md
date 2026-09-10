@@ -116,12 +116,14 @@ Cron 只做派发，长任务由 Workflow 完成。instance ID 命名保持稳�
 
 启动与每次轮询均提交 `output_format: "polling"`；轮询另带已保存的 `current_bookmark`，不添加 `dump_options`。HTTP 202、内部 `status: "active"` 表示导出进行中，验证 bookmark 后继续既有有界轮询；保留省略内部 status 的兼容，未知状态仍拒绝。必需请求字段以 [D1 Export API](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/export/) 为准；API 类型表未列出的 active 响应由[官方 Wrangler 导出测试](https://github.com/cloudflare/workers-sdk/blob/main/packages/wrangler/src/__tests__/d1/export.test.ts)提供具体证据。
 
+外层成功不代表导出成功：内部 `success: false` 或 `status: "error"` 先归类为 `backup_export_failed`，不要求失败响应携带 bookmark/type。任务状态消失时同样停止，不能重新启动 export；原始错误正文不进入健康状态或日志。
+
 ### 4.3 有限预算与并发
 
 | 边界                     | 值                                                                                      |
 | ------------------------ | --------------------------------------------------------------------------------------- |
 | export 启动              | 总尝试 1 次                                                                             |
-| poll                     | 间隔 55 秒，最多 15 次观察，每次最多 2 次 HTTP 尝试                                     |
+| poll                     | 间隔 5 秒，最多 15 次观察，每次最多 2 次 HTTP 尝试                                      |
 | export 截止              | 从 durable startedAt 起 15 分钟，先到次数/时间边界即停止                                |
 | 整体上传截止             | 从 startedAt 起 30 分钟；每个上传 step timeout 15 分钟                                  |
 | signed URL 获取/上传重试 | 总尝试 2 次，先检查同一 object key 是否已成功                                           |
@@ -129,6 +131,8 @@ Cron 只做派发，长任务由 Workflow 完成。instance ID 命名保持稳�
 | lease                    | startedAt 起 46 分钟，包含 16 分钟提交保护期；使用 ownerId 条件释放，不删除别人的 lease |
 | R2 项目预算              | 总量达 8,000,000,000 bytes 告警；新总量必须严格小于 9,000,000,000 bytes                 |
 | 单 SQL 对象              | 必须有规范正整数 Content-Length 且严格小于 5 GiB                                        |
+
+2026-09-11 对 staging 的完整导出对照中，55 秒后轮询返回内部失败“Not currently exporting anything.”，5 秒后轮询正常完成；仅 schema 的 55 秒对照也复现失败。固定间隔据此改为 5 秒，不假定 Cloudflare 会保存导出状态到本地 15 分钟截止。此观察不证明平台的精确保留时间。请求次数和重试预算不变，因此仅 sleep 的总预算由 825 秒降为 75 秒，另加实际 API 耗时，仍受 15 分钟硬截止约束；不保证大库持续轮询满 15 分钟。若实际数据增长后超出 15 次观察，按失败记录与套餐评估调整预算，不自动放大请求。
 
 `retries.limit` 配置额外重试次数：启动 export 为 0，poll 和上传为 1，分别对应总尝试 1 / 2 / 2 次。2026-09-10 staging 与锁定的原生 Workflow 引擎均确认 `limit: 1` 会执行两次；不能用把 limit 当总次数的测试替身证明预算。启动失败始终抛出默认名称的 `NonRetryableError`，禁止改写其 name，否则平台可能把它作为普通错误重试。其他永久错误同样不重试；可重试步骤最终失败后，健康记录从 Workflow RPC 的固定错误包装中仅恢复 allowlist 错误码。
 

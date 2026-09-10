@@ -120,6 +120,12 @@ function parseD1ExportResponse(body: unknown): D1ExportProgress {
   }
 
   const result: D1ExportResultEnvelope = unvalidatedResult
+  if (result.success === false || result.status === "error") {
+    throw new DatabaseBackupError("backup_export_failed", {
+      retryable: false,
+    })
+  }
+
   if (
     (result.success !== undefined && result.success !== true) ||
     (result.type !== undefined && result.type !== "export") ||
@@ -127,12 +133,6 @@ function parseD1ExportResponse(body: unknown): D1ExportProgress {
     result.at_bookmark.length === 0
   ) {
     throw new DatabaseBackupError("backup_export_response_invalid", {
-      retryable: false,
-    })
-  }
-
-  if (result.status === "error") {
-    throw new DatabaseBackupError("backup_export_failed", {
       retryable: false,
     })
   }
