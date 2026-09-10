@@ -10,8 +10,8 @@
       "vars": {
         "APP_ORIGIN": "https://eruoo-server-staging.l709937065.workers.dev",
         "OWNER_GITHUB_ID": "50254496",
-        "CF_ACCOUNT_ID": "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID",
-        "D1_DATABASE_ID": "REPLACE_WITH_NEW_STAGING_D1_ID",
+        "CF_ACCOUNT_ID": "1d204c847b5870d3438dc79534b91798",
+        "D1_DATABASE_ID": "f34c1033-7474-4af6-9e76-d7930eb63111",
       },
       "workers_dev": true,
       "version_metadata": {
@@ -32,8 +32,8 @@
       "d1_databases": [
         {
           "binding": "DB",
-          "database_name": "eruoo-server-staging-v2",
-          "database_id": "REPLACE_WITH_NEW_STAGING_D1_ID",
+          "database_name": "eruoo-server-staging",
+          "database_id": "f34c1033-7474-4af6-9e76-d7930eb63111",
         },
       ],
       "ratelimits": [
@@ -69,13 +69,13 @@
       "r2_buckets": [
         {
           "binding": "BACKUPS",
-          "bucket_name": "eruoo-server-backups-v2-staging",
+          "bucket_name": "eruoo-server-backups-staging",
         },
       ],
       "workflows": [
         {
           "binding": "DATABASE_BACKUP_WORKFLOW",
-          "name": "eruoo-server-backup-v2-staging",
+          "name": "eruoo-database-backup-staging",
           "class_name": "DatabaseBackupWorkflow",
         },
       ],
@@ -97,14 +97,14 @@
       "vars": {
         "APP_ORIGIN": "https://auth.eruoo.me",
         "OWNER_GITHUB_ID": "50254496",
-        "CF_ACCOUNT_ID": "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID",
-        "D1_DATABASE_ID": "REPLACE_WITH_NEW_PRODUCTION_D1_ID",
+        "CF_ACCOUNT_ID": "1d204c847b5870d3438dc79534b91798",
+        "D1_DATABASE_ID": "a4385433-9ddd-4a2b-a7ce-863884287e38",
       },
       "d1_databases": [
         {
           "binding": "DB",
-          "database_name": "eruoo-server-production-v2",
-          "database_id": "REPLACE_WITH_NEW_PRODUCTION_D1_ID",
+          "database_name": "eruoo-server",
+          "database_id": "a4385433-9ddd-4a2b-a7ce-863884287e38",
         },
       ],
       "version_metadata": {
@@ -155,13 +155,13 @@
       "r2_buckets": [
         {
           "binding": "BACKUPS",
-          "bucket_name": "eruoo-server-backups-v2-production",
+          "bucket_name": "eruoo-server-backups",
         },
       ],
       "workflows": [
         {
           "binding": "DATABASE_BACKUP_WORKFLOW",
-          "name": "eruoo-server-backup-v2-production",
+          "name": "eruoo-database-backup",
           "class_name": "DatabaseBackupWorkflow",
         },
       ],

@@ -1,6 +1,6 @@
 # 运维、数据保护与发布规格
 
-> 属于 [完整架构规格](architecture.md)，状态与其一致。2026-09-09 owner 已明确免费优先、备份交由 Agent 推荐，并确认生产尚未有效使用、可以从零开始。本文采用全新存储、每日备份保留 30 天，以及 GitHub Actions 单一发布平台。
+> 属于 [完整架构规格](architecture.md)，状态与其一致。2026-09-09 owner 已明确免费优先、备份交由 Agent 推荐，并确认生产尚未有效使用、可以从零开始。本文采用空存储、每日备份保留 30 天，以及 GitHub Actions 单一发布平台。2026-09-10 按架构 Q8 沿用稳定资源名；具体接线状态见实施记录。
 
 ## 1. 环境与配置
 
@@ -10,11 +10,11 @@
 | ---------- | ------------------------------------------------------------------------------ | -------------------------------------------------------- |
 | local      | `http://localhost:5173`，Vite strictPort                                       | 本地模拟 D1/R2/Workflow，本地独立 GitHub App，无定时任务 |
 | staging    | `https://eruoo-server-staging.l709937065.workers.dev` / `eruoo-server-staging` | 独立验证 D1、R2、GitHub App；不引用生产凭证或数据        |
-| production | `https://auth.eruoo.me` / `eruoo-server-production`                            | 全新生产 D1/R2，首次绑定核验 ID；workers.dev 禁用        |
+| production | `https://auth.eruoo.me` / `eruoo-server-production`                            | 新空 D1、专用私有 R2，首次绑定核验 ID；workers.dev 禁用  |
 
 `name` 是可继承配置，不能按 bindings/vars 的规则处理。必须显式设置 `env.production.name = "eruoo-server-production"`，并保留 staging 的显式名称。当前顶层名称是 `eruoo-server-v2`；生产环境若省略 name，会派生为 `eruoo-server-v2-production`。源配置和构建后 flattened config 均须核验精确生产名称，不一致时在 migration 和部署前停止。
 
-各环境资源 ID 只由实际 `wrangler.jsonc` 维护，不在此文复制第二份可能过时的 ID。重建初始 schema 基线时，staging 同样换用新空 D1，不能向当前已应用旧 ledger 的库重放新基线；生产资源在首次接线时创建并核验。API export 所需 database/account ID 必须与选定绑定对应，由同一环境配置产生并核对。
+各环境资源名称与 ID 只由实际 `wrangler.jsonc` 维护，不在此文复制第二份可能过时的清单。资源名不随应用版本变化，环境隔离仍以实际 ID、bucket 和 Workflow 归属核验。重建初始 schema 基线时，staging 同样换用新空 D1，不能向当前已应用旧 ledger 的库重放新基线；生产资源在首次接线时创建并核验。获得针对旧库的当次从零重建授权后，可以先导出留档、再删除并按原名重建；同名不代表沿用原 UUID 或 schema。数据库初始化前暂停旧 cron，并断开旧 Cloudflare Builds；旧版认证会暂时不可用，直到新版迁移和发布完成。API export 所需 database/account ID 必须与选定绑定对应，由同一环境配置产生并核对。
 
 ### 1.1 配置输入
 
@@ -32,7 +32,7 @@
 | `CF_ACCOUNT_ID`、`D1_DATABASE_ID`           | export         | 分别与选定环境的 account_id、DB database_id 精确一致；公开标识，不是 secret                          |
 | `D1_EXPORT_API_TOKEN`                       | export         | 最小所需 D1 export 权限，失败不可退回宽权限 token                                                    |
 
-沿用既有 runtime 变量和 binding 名称，不为重设计新增兼容别名。实际生产 DB/BACKUPS 指向新建空 D1 和独立新 R2 bucket；Worker 域名、名称和无需变化的其他资源继续沿用，发布核对目标 ID。首次启用生成新的 BETTER_AUTH_SECRETS，旧 Cookie 不作为新系统登录状态。
+沿用既有 runtime 变量和 binding 名称，不为重设计新增兼容别名。实际生产 DB/BACKUPS 指向新建空 D1 和独立空 R2 bucket；Worker 域名、名称和无需变化的其他资源继续沿用，发布核对目标 ID。首次启用生成新的 BETTER_AUTH_SECRETS，旧 Cookie 不作为新系统登录状态。
 
 配置按能力校验：身份配置错误阻止依赖它的动态功能；备份 token 错误只阻止备份。审计 HMAC 缺失阻止需要安全审计的身份/管理/业务操作，但 `/health`、静态错误页和 metadata 仍可达。有效配置下的单次审计写失败适用 §3 的规则。这个范围收敛替代旧“审计配置缺失导致所有动态响应失效”的做法。
 
@@ -87,11 +87,11 @@ SPA assets fallback 只处理页面导航；`/api/*`、`/.well-known/*`、`/prob
 
 推荐并采用：每天 03:00 Asia/Shanghai，Cron `0 19 * * *`；新快照保留 30 天，满期由 R2 lifecycle 删除。正常调度与导出成功时，恢复点间隔约 24 小时；任务延迟或失败时，实际可恢复点取最近有效快照，不能保证仍在 24 小时内。UI 在最近一次失败时立即提示，或在最近成功超过 26 小时时提示备份过旧。RTO 不作未经演练的小时数保证，以实际恢复记录为准。
 
-取舍：服务当前以身份、凭证和授权状态为主，优先缩短可能丢失的近期变更窗口；没有已确认的半年历史还原需求，因此不增加“每日 + 每周 + 每月”多层保留规则。正常稳态约 30 份快照，预留到期删除延迟与重试空间；例如每份 100 MB，按 33 份估算约 3.3 GB，此估算仅含新 bucket，不包含账号其他 R2 对象。R2 Standard 当前免费含 10 GB-month/月，但最终是否免费必须用实际 SQL 大小、操作量和账号总用量核对。[R2 pricing](https://developers.cloudflare.com/r2/pricing/)。
+取舍：服务当前以身份、凭证和授权状态为主，优先缩短可能丢失的近期变更窗口；没有已确认的半年历史还原需求，因此不增加“每日 + 每周 + 每月”多层保留规则。正常稳态约 30 份快照，预留到期删除延迟与重试空间；例如每份 100 MB，按 33 份估算约 3.3 GB，此估算仅含该环境的备份 bucket，不包含账号其他 R2 对象。R2 Standard 当前免费含 10 GB-month/月，但最终是否免费必须用实际 SQL 大小、操作量和账号总用量核对。[R2 pricing](https://developers.cloudflare.com/r2/pricing/)。
 
-首次启用使用独立新 bucket，唯一快照前缀为 `d1/daily/`，配置一条 30 天生命周期规则。不导入旧快照，不实现旧前缀读取、180 天保留过渡或新旧对象迁移。新快照到期删除可能有延迟，容量检查仍需统计实际对象。[Object lifecycles](https://developers.cloudflare.com/r2/buckets/object-lifecycles/)。
+首次启用使用独立空 bucket，可新建，也可在完整盘点确认无对象、无其他项目引用后沿用已有专用私有桶。唯一快照前缀为 `d1/daily/`，配置一条 30 天对象删除规则；保留平台默认的未完成 multipart 清理规则，不叠加全桶删除或存储类别迁移。不导入旧快照，不实现旧前缀读取、180 天保留过渡或新旧对象迁移。新快照到期删除可能有延迟，容量检查仍需统计实际对象。[Object lifecycles](https://developers.cloudflare.com/r2/buckets/object-lifecycles/)。
 
-首次接线集中完成：确认新 D1 为空、R2 bucket 未混入其他数据，核对 ID、该条 lifecycle 规则和当前 Worker cron；准备停用旧备份调度、启用新调度的精确差异，经当次授权执行并读回。无需读取旧数据库内容或比对历史 migration ledger。旧资源不进入新运行链；具体删除范围留给单独的资源清理，不作为新系统上线前置条件。
+首次接线集中完成：确认新 D1 为空、R2 bucket 无对象且没有其他项目引用，读取已有 lifecycle 和 Worker cron，准备精确差异，经当次授权执行并读回。沿用空桶时移除旧全桶 180 天删除规则，改为 `d1/daily/` 前缀 30 天规则。数据库重建前核实旧库内容和绑定关系并保留私有导出；不迁移旧 ledger 或数据。旧 cron 在准备期间保持停用，新 cron 随正式发布启用。除此之外的旧资源清理不作为上线前置条件。
 
 之后的常规代码发布不重做资源创建或 lifecycle 配置；只有这些配置发生变更时，才重新核对实际状态、准备差异并取得对应执行授权。未来有真实业务数据后，不得因本次从零授权缩短其既定保留期。
 
@@ -176,7 +176,7 @@ BETTER_AUTH_SECRETS 轮换先加入新主版本并保留仍被 D1 密文引用�
 1. **CI**：用 frozen lockfile 安装依赖并缓存 pnpm store，执行一次 `pnpm run check`。有发布能力的环境分别以 `CLOUDFLARE_ENV=staging|production` 构建，单次 CI 中每环境只构建一次；立即保存该环境的实际 flattened config、assets、Worker bundle、migration 和来源摘要，避免后一次构建覆盖前一份。CI 没有 Cloudflare 发布 token。
 2. **选择版本**：owner 手动运行 deploy workflow，输入环境和完整 commit SHA。workflow 必须从 main 上受保护的定义执行；生产只接受 owner 的触发及重新运行，不能凭仓库写权限冒充生产授权。GitHub 原生 workflow_dispatch 提供按钮/CLI/API，不增加自建发布后台或依赖额外付费审批功能。
 3. **核对产物**：确认 SHA 属于 main 历史、同仓库该 SHA 的指定 CI 成功、环境一致，验证下载产物的来源与摘要。产物保留 7 天；缺失或过期时重跑该 SHA 的 CI，不能换一个 SHA 或本地重建后声称使用原产物。发布阶段不重复全套测试或 Vite 构建。
-4. **写入**：使用锁定 Wrangler 和选定环境的部署 token。检查精确 Worker name、account/D1/R2 ID、Origin、assets、必要 binding/secret 名称及已启用功能的 cron。只在存在未应用 migration 时执行迁移，随后显式 `wrangler deploy --config <产物中的实际配置路径>`。不通过 deploy 时的 `--env` 改变已构建环境，不自动创建缺失资源。每个环境最多一个在执行的发布，不自动取消正在迁移/部署的任务。
+4. **写入**：使用锁定 Wrangler 和选定环境的部署 token。检查精确 Worker name、account/D1/R2 ID、Origin、assets、必要 binding/secret 名称及已启用功能的 cron。只在存在未应用 migration 时执行迁移，随后显式 `wrangler deploy --config <产物中的实际配置路径>`。不通过 deploy 时的 `--env` 改变已构建环境，不自动创建缺失的 D1/R2；Workflow 依赖 Worker 导出的类，首次发布随代码注册配置中的定义，之后按固定名称更新。每个环境最多一个在执行的发布，不自动取消正在迁移/部署的任务。
 5. **验收**：读回版本、binding 和启用的 cron；检查 health、无凭证 Session、受保护入口拒绝、API 404 非 HTML，及本次变更涉及的已启用流程。每个 HTTP 冒烟探针有 10 秒 deadline，整组预算 60 秒。失败明确标记发布未通过；发生远端写入后不自动重试或继续下一版本。
 
 迁移前，发布脚本在 D1 的 `deployment_migrations` 运维表保存唯一一行 `databaseId + migrations`（文件名到 SHA-256 的映射）。DDL 由发布模块单独维护，早于应用 migration，因此不写入 Wrangler migration ledger；备份恢复规划器从同一 DDL 校验它。首次只接受空库；没有记录且非空的库仍拒绝。既有发布补建记录只允许旧 Worker 的 DB binding ID 与目标库一致，并校验其 RELEASE_MIGRATIONS；更换 DB binding 不继承旧库凭据。记录写入或 migration/deploy 失败后不自动重试；下次人工发起必须再次验证目标 D1 ID、已有 ledger 的精确前缀，以及所有已记录 migration 的内容未变。记录涵盖可能已经执行的计划文件，不能通过修改未确认完成的文件绕过恢复检查。验证通过后仅补未应用 migration，再部署；不靠删除数据库恢复发布。
@@ -200,7 +200,7 @@ BETTER_AUTH_SECRETS 轮换先加入新主版本并保留仍被 D1 密文引用�
 | 真实 GitHub/Passkey、完整 Desktop OAuth、D1 挂起/并发、相关消融             | 首次启用对应能力及认证/协议/依赖/运行时改动；使用同 SHA staging 结果    |
 | 冷启动多轮采样、全量 export→隔离恢复                                        | 首次相关验收及影响性能、schema、备份/恢复的变更；普通文案/UI 发布不重复 |
 
-必要专项失败或缺失时阻止受影响能力发布，不能为达到 5 分钟目标跳过。记录最近五次常规流程的分阶段耗时，优先消除重复安装、检查和构建；不追加并行 CI 平台、长轮询或通用 preflight 框架。首次接线集中核对 GitHub environment 的部署 token、现有 GitHub App、新 D1/R2/Workflow 与所需 runtime secrets；这些是一次性工作。
+必要专项失败或缺失时阻止受影响能力发布，不能为达到 5 分钟目标跳过。记录最近五次常规流程的分阶段耗时，优先消除重复安装、检查和构建；不追加并行 CI 平台、长轮询或通用 preflight 框架。首次接线集中核对 GitHub environment 的部署 token、现有 GitHub App、空 D1/独立 R2、Workflow 定义与所需 runtime secrets；这些是一次性工作。
 
 5 分钟目标指服务端常规流水线。Desktop 构建、签名/打包和跨端联调属于首次 R5 或相关契约变更的专项准备；普通服务端文案修改不重复整套客户端交付。服务端发布只关联客户端结果，不隐式发布客户端安装包。
 

@@ -13,7 +13,7 @@
 | 数据保护     | 每日 full SQL export Workflow、租约与有限重试、R2 容量预算及对象校验、单调备份状态；有界清理保留 Session；离线恢复规划器和凭证清理计划                                       |
 | 交付         | 生成五个自有 API 的 OpenAPI；同 SHA 两环境独立构建与摘要清单；Actions 手动消费产物、迁移前检查、部署后读回与冒烟                                                             |
 
-沿用完整 `0001_foundation.sql`，安装版本的全部认证字段已经过实际 schema 检查；新库应用同一份基线。无需为了“从零”再次重写可用 schema。旧生产/验证资源保持原状，当前配置明确要求新数据库 ID。
+沿用完整 `0001_foundation.sql`，安装版本的全部认证字段已经过实际 schema 检查；新库应用同一份基线。无需为了“从零”再次重写可用 schema。首次实现阶段未修改远端资源；随后按 owner 当次授权完成了 §4.1 的空库准备，当前配置使用新的数据库 ID。
 
 ## 2. 验证与证据范围
 
@@ -82,21 +82,45 @@ staging / production 的 `build:release` 均通过，各 139 个清单文件的 
 
 `pnpm run dev` 先检查本地 `.dev.vars`，缺项只报告名称，再应用本地 migration 启动 Vite。真实 GitHub 登录需要本地独立应用凭证；测试不需要。不会为方便开发生成生产凭证或覆盖已有 `.dev.vars`。本次实际验证了缺项停止：原本地文件缺少 `AUDIT_IP_HASH_SECRET`，启动准确报告该名称。随后仅追加了独立随机本地审计密钥及未启用本地备份用的 export token 占位值，文件权限设为 0600，原有凭证未覆盖。再次执行 `pnpm run dev` 成功，本地 migration 应用后，首页/health 为 200、匿名 get-session 为 200/null、受保护 status 为 401。真实 GitHub 回调仍需实际第三方验收。Vite 忽略 `.wrangler`、测试和构建产物，避免本地数据库写入打断表单。
 
-第一次远端接线在获得当次授权后完成：
+首次接线与发布按以下顺序执行，已完成状态见本节末的记录：
 
-1. 为 staging/production 各创建新的空 D1 和私有 R2 Standard bucket，在 `wrangler.jsonc` 填入 account/database ID，确认 vars 与 binding 对应。原数据库不作为新基线执行目标。
-2. 在新 bucket 读取现有 lifecycle，再设置唯一 `d1/daily/` 前缀 Age 2592000 秒删除规则，确认没有重叠删除或存储类别迁移。部署脚本只读验证，不自动修改规则。字段依据 [Cloudflare Lifecycle API](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/lifecycle/methods/get/)。
+1. 为 staging/production 各准备新空 D1 和独立私有 R2 Standard bucket，在 `wrangler.jsonc` 填入 account/database ID，确认 vars 与 binding 对应。按运维规格可重建同名 D1、沿用已确认空的专用 R2；原数据库不作为新基线执行目标。
+2. 读取目标 bucket 的现有 lifecycle，再设置唯一 `d1/daily/` 前缀 Age 2592000 秒删除规则，确认没有重叠删除或存储类别迁移。部署脚本只读验证，不自动修改规则。字段依据 [Cloudflare Lifecycle API](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/lifecycle/methods/get/)。
 3. 为精确 Worker 名预置五项 required secrets（runtime 备份 token 与部署 token 独立）。首次 bootstrap Worker 与域名绑定是一次性平台接线，常规发布不隐式创建、猜测或修复缺项。
 4. GitHub 的受保护 main、两个 Environment、最小权限 `CLOUDFLARE_API_TOKEN` 与 `CLOUDFLARE_ACCOUNT_ID` 准备好。production 仅 owner 发起，并阻止其他账号重跑借用其授权。
 5. 通过 CI 后选择完整 SHA 手动发布；流水线检查同仓库/指定成功 CI/环境/7 天有效期/文件摘要，必要时迁移，再部署。之后读回绑定、cron、source SHA 和 version，并执行最多 60 秒的基础冒烟。
 
-默认本地构建也生成摘要，但来源记录为 local，不能冒充通过 GitHub CI 的正式发布产物。真实 CI/部署耗时尚未采样，约 5 分钟仍是目标；10 分钟 job 截止与 60 秒 smoke 是已配置的上限。
+默认本地构建也生成摘要，但来源记录为 local，不能冒充通过 GitHub CI 的正式发布产物。[PR #13 合并版本的 main CI](https://github.com/eruoo/server/actions/runs/34438914568) 已成功，耗时 217 秒；本次配置变更仍须重新通过 CI，正式发布耗时尚未采样，约 5 分钟仍是合计目标；10 分钟 job 截止与 60 秒 smoke 是已配置的上限。
+
+### 4.1 2026-09-10 Cloudflare 资源准备
+
+owner 当次要求检查并处理现有 Cloudflare 资源，再同步项目配置；本次按架构 Q8 执行。资源名称与实际 ID 由 `wrangler.jsonc` 维护。
+
+- 盘点账号全部六个 Worker，确认本项目的两个 D1 和生产备份桶没有其他项目引用。旧库只有少量测试数据，先分别导出到本机私有文件，验证可导入本地 SQLite 且完整性检查通过，再删除并按原名重建为新空 D1。远端检查确认无应用表、无旧 migration ledger；未执行新版 migration。
+- 生产 R2 桶完整盘点为空，继续沿用；新增独立 staging 桶。两桶均为私有 Standard，无自定义公开域名，`r2.dev` 关闭。读取旧 lifecycle 后，将生产原全桶 180 天规则替换为唯一 `d1/daily/` 前缀 30 天删除规则；两桶保留平台默认的 7 天未完成 multipart 清理规则，并读回验证。
+- 两个 Worker 名称及生产域名保持不变。已更新云端 DB/BACKUPS、公开 runtime vars 与四个独立限流 namespace，并读回验证；其余绑定和 Secret 被保留。两环境旧 cron 均已暂停，生产 Cloudflare Builds 已断开，staging 原本未关联 Builds。正式发布才启用配置中的新 cron。
+- 两环境分别生成并写入新的 `BETTER_AUTH_SECRETS`、`AUDIT_IP_HASH_SECRET`。staging 新增账号内独立的 D1 Read token 并写入 `D1_EXPORT_API_TOKEN`；生产保留已有 export token。两个 Worker 的五项 required Secret 名称均已读回确认；GitHub 凭证未改动。Secret 名称齐全不代表真实 GitHub 登录或备份导出已验收。
+- 生产沿用原 Workflow 定义，已确认无保留实例；staging Workflow 将随首次正式发布的 `DatabaseBackupWorkflow` 导出类注册，不另行发布临时 Worker。此次仅修改资源与运行配置，尚未发布新版应用；空库期间旧版认证暂时不可用。
+- 项目已填入真实 account/database ID，R2/Workflow 使用稳定名称；发布校验仍拒绝串用其他环境资源。新增八项发布行为测试，覆盖两环境正常发布及错误目标在任何远端请求前被拒绝。完整 `pnpm run check` 通过：Worker 185 项、前端 30 项、脚本 48 项、Chromium 4 项，共 **267 项**；Wrangler types 已重新生成且无漂移。两环境发布构建均通过，各 139 个文件的摘要、migration 与实际资源配置核对一致；产物来源为 local，仍须配置提交后重新取得 CI 产物。
+
+数据库导出、脱敏执行回执和本机密钥备份保存在忽略目录 `.output/cloudflare-setup-2026-09-10/`，含凭证的文件权限为 0600，不进入 Git。它们是本次操作留档，不是系统恢复流程或 CI 的长期依赖。GitHub 接线结果见 §4.2；配置变更取得新 SHA 的 CI 产物后，按当次授权发布 staging、验收后发布 production。
+
+### 4.2 2026-09-10 GitHub 发布接线
+
+owner 要求继续完成可自动处理的上线准备，以下配置均已执行并读回核验：
+
+- main 必须经 PR 合入，并通过 GitHub Actions 应用提供的 `check`；分支必须与基线同步，管理员同样受约束，禁止强推和删除。不额外要求人工审批数量。
+- 新建 `staging`、`production` 两个 Environment，只允许 `main` 分支，均已设置 `CLOUDFLARE_ACCOUNT_ID` 和加密的 `CLOUDFLARE_API_TOKEN`。没有给 PR 检查流程提供部署凭证，也没有配置重复等待或审批步骤。
+- 两环境各使用一枚独立的账号级部署 token：Workers Scripts Write、D1 Write、Workers R2 Storage Read、Account Settings Read；无到期时间。凭证与 runtime 的 D1 export token 分离。上述权限由平台按账号授予，环境目标另由发布脚本核对，不能把两枚 token 描述为只能访问各自 Worker 的权限隔离。
+- 组织中的两套 GitHub OAuth App 已存在，Homepage 与 callback 分别对应环境的 `APP_ORIGIN` 和 `/api/auth/callback/github`，无需修改；这只证明应用侧地址正确，runtime 中的 client ID/secret 仍须实际登录验证。
+
+本轮重新运行发布脚本测试，48 项通过；脱敏接线回执在本地忽略目录 `.output/staging-release-2026-09-10/`。尚未触发新版应用发布或远端 migration；正式发布以新配置提交后的 main CI 产物为准，现有本地构建不能代替它。
 
 ## 5. 尚未执行的外部验收
 
-没有创建、修改或删除真实 Cloudflare 资源，也没有触发 Actions 发布或迁移远端数据库。以下结果必须在实际授权环境取得，不能由本地测试替代：
+Cloudflare 与 GitHub 已完成 §4.1–§4.2 的资源和发布接线，尚未触发 Actions 发布或应用新版远端 migration。以下结果仍需在实际授权环境取得，不能由本地测试替代：
 
-- 新 D1/R2、secret 有效性、域名、cron、lifecycle、Workflows 平台接线及正式 CI 运行。
+- 发布 token 与 runtime secret 的实际有效性、新版 Workflow 注册、cron 启用和首次正式发布。
 - 真实 owner GitHub/真实认证器登录；远端端到端 code→refresh→revoke；地区/冷启动/CPU/尾延迟与常规发布耗时。
 - 一次真实备份导出/上传、停止/超时行为、恢复到隔离新 D1、凭证清理、代码回退演练。
 - Desktop App、Rust 安全存储、客户端打包与跨端联调：按 owner 最新决定延期，不属于本次 Web 交付。
