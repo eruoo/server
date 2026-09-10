@@ -16,12 +16,13 @@ function githubProfile(id: number) {
     if (
       url.origin === "https://github.com" &&
       url.pathname === "/login/oauth/access_token"
-    )
+    ) {
       return Response.json({
         access_token: "synthetic-token",
         token_type: "bearer",
         scope: "read:user user:email",
       })
+    }
     if (url.origin === "https://api.github.com" && url.pathname === "/user")
       return Response.json({
         id,
@@ -71,9 +72,24 @@ async function login() {
 
 describe("real GitHub callback owner admission", () => {
   it("creates and reauthenticates only the verified owner", async () => {
+    const logger = vi.spyOn(console, "error").mockImplementation(() => {})
     githubProfile(50254496)
     const first = await login()
     expect(first.status).toBe(302)
+    const codeRequest = vi
+      .mocked(fetch)
+      .mock.calls.find(
+        ([url]) =>
+          String(url) === "https://github.com/login/oauth/access_token",
+      )
+    const body = new URLSearchParams(String(codeRequest?.[1]?.body))
+    expect(body.get("client_id")).toBe(env.GITHUB_CLIENT_ID)
+    expect(body.get("client_secret")).toBe(env.GITHUB_CLIENT_SECRET)
+    expect(body.get("redirect_uri")).toBe(
+      "http://local.test/api/auth/callback/github",
+    )
+    expect(body.get("code")).toBe("synthetic-code")
+    expect(body.get("code_verifier")).toBeTruthy()
     expect(first.headers.get("set-cookie")).toContain("eruoo.session_token=")
     const second = await login()
     expect(second.headers.get("set-cookie")).toContain("eruoo.session_token=")
@@ -85,6 +101,7 @@ describe("real GitHub callback owner admission", () => {
         "count",
       ),
     ).toBe(2)
+    expect(logger).not.toHaveBeenCalled()
   })
 
   it("rejects a non-owner through the actual handler without creating a Session", async () => {
@@ -102,6 +119,56 @@ describe("real GitHub callback owner admission", () => {
       ),
     ).toBe(0)
   })
+})
+
+it.each([
+  ["incorrect_client_credentials", "incorrect_client_credentials"],
+  ["bad_verification_code", "bad_verification_code"],
+  ["redirect_uri_mismatch", "redirect_uri_mismatch"],
+  ["untrusted response containing a secret", "oauth_error"],
+])(
+  "records only an allowlisted reason for GitHub %s",
+  async (error, reason) => {
+    const logger = vi.spyOn(console, "error").mockImplementation(() => {})
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      Response.json({
+        error,
+        error_description: "private provider response",
+        access_token: "private-token",
+      }),
+    )
+    const response = await login()
+    expect(response.headers.get("location")).toContain("invalid_code")
+    expect(response.headers.get("set-cookie") ?? "").not.toContain(
+      "eruoo.session_token=",
+    )
+    expect(logger.mock.calls).toEqual([
+      [
+        {
+          event: "github_code_exchange_failed",
+          reason,
+        },
+      ],
+    ])
+  },
+)
+
+it("records only HTTP status for a rejected GitHub token request", async () => {
+  const logger = vi.spyOn(console, "error").mockImplementation(() => {})
+  vi.spyOn(globalThis, "fetch").mockImplementation(
+    async () => new Response("private response", { status: 403 }),
+  )
+  const response = await login()
+  expect(response.headers.get("location")).toContain("invalid_code")
+  expect(logger.mock.calls).toEqual([
+    [
+      {
+        event: "github_code_exchange_failed",
+        reason: "http_error",
+        status: 403,
+      },
+    ],
+  ])
 })
 
 it("aborts a stalled GitHub response body and does not issue a Session", async () => {

@@ -114,13 +114,23 @@ owner 要求继续完成可自动处理的上线准备，以下配置均已执�
 - 两环境各使用一枚独立的账号级部署 token：Workers Scripts Write、D1 Write、Workers R2 Storage Read、Account Settings Read；无到期时间。凭证与 runtime 的 D1 export token 分离。上述权限由平台按账号授予，环境目标另由发布脚本核对，不能把两枚 token 描述为只能访问各自 Worker 的权限隔离。
 - 组织中的两套 GitHub OAuth App 已存在，Homepage 与 callback 分别对应环境的 `APP_ORIGIN` 和 `/api/auth/callback/github`，无需修改；这只证明应用侧地址正确，runtime 中的 client ID/secret 仍须实际登录验证。
 
-本轮重新运行发布脚本测试，48 项通过；脱敏接线回执在本地忽略目录 `.output/staging-release-2026-09-10/`。尚未触发新版应用发布或远端 migration；正式发布以新配置提交后的 main CI 产物为准，现有本地构建不能代替它。
+本轮重新运行发布脚本测试，48 项通过；脱敏接线回执在本地忽略目录 `.output/staging-release-2026-09-10/`。本节记录接线完成时的状态；随后首次 staging 发布见 §4.3。
+
+### 4.3 2026-09-10 首次 staging 发布与验收修正
+
+[PR #14](https://github.com/eruoo/server/pull/14) 已合入 `fd64cf743862228bbcc53504347e372af39b386b`，[对应 main CI](https://github.com/eruoo/server/actions/runs/34463041355) 通过检查并生成两环境产物。[首次 staging 发布](https://github.com/eruoo/server/actions/runs/34463425284) 已应用 `0001_foundation.sql`，上传新版应用并注册 staging Workflow，读回绑定和两项 cron 通过。此次未部署 production。
+
+该 Actions run 因 health 版本比较失败而结束，不能标为验收通过。Cloudflare 日志确认：09:57:35 UTC 创建新部署，约 3 秒后的 CI health 返回 200，但仍由旧版本 `fe6bca4e-987b-4814-92a1-12d7fa73d284` 处理；期望的新版本为 `3282f7cd-18a8-4d6e-a4b4-68c79393e89a`。稍后五个匿名探针均通过。发布脚本现按 operations §6.1 在原预算内等待已知旧版本切换，并保留立即拒绝其他错误的边界；真实 Actions 重跑结果仍需补录。
+
+真实 GitHub 登录两次返回 `invalid_code`，远端 user/account/session 均为零，失败位于 token 兑换阶段，尚未到 owner 准入。当前改动补充 `github_code_exchange_failed` 脱敏事件，仅记录固定错误类别及 HTTP 状态；不记录 code、token、secret、响应正文或任意异常文本。GitHub 原因代码按[官方兑换错误文档](https://docs.github.com/en/apps/oauth-apps/maintaining-oauth-apps/troubleshooting-oauth-app-access-token-request-errors)限定为凭证、授权码或回调地址错误，其他内容只归为通用类别。保持通用登录错误响应；不以诊断改动宣称真实登录已修复，也不盲目轮换 GitHub 凭证。
+
+本地完整 `pnpm run check` 通过：Worker 190 项、前端 30 项、脚本 54 项、Chromium 4 项，共 **278 项**。六项发布回归与五项 GitHub 诊断回归均先在原实现上检出失败，再验证修正。检查同类入口后，版本比较和 GitHub token 兑换各只有这一处实现；GitHub 正常 owner 登录、拒绝非 owner、凭证/PKCE 参数及正文超时测试继续通过。
 
 ## 5. 尚未执行的外部验收
 
-Cloudflare 与 GitHub 已完成 §4.1–§4.2 的资源和发布接线，尚未触发 Actions 发布或应用新版远端 migration。以下结果仍需在实际授权环境取得，不能由本地测试替代：
+Cloudflare 与 GitHub 接线、首次 staging migration/应用上传/Workflow 注册和 cron 已按 §4.1–§4.3 执行。以下结果仍需在实际授权环境取得，不能由本地测试替代：
 
-- 发布 token 与 runtime secret 的实际有效性、新版 Workflow 注册、cron 启用和首次正式发布。
+- 修正后的完整 staging 发布验收、production 首次发布及其 token 实际有效性；GitHub 与 export runtime secret 的真实流程验证。
 - 真实 owner GitHub/真实认证器登录；远端端到端 code→refresh→revoke；地区/冷启动/CPU/尾延迟与常规发布耗时。
 - 一次真实备份导出/上传、停止/超时行为、恢复到隔离新 D1、凭证清理、代码回退演练。
 - Desktop App、Rust 安全存储、客户端打包与跨端联调：按 owner 最新决定延期，不属于本次 Web 交付。

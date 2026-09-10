@@ -183,6 +183,10 @@ beforeEach(() => {
               id: "release-1",
               versions: [{ version_id: "version-1", percentage: 100 }],
             },
+            {
+              id: "release-0",
+              versions: [{ version_id: "version-0", percentage: 100 }],
+            },
           ],
         }
       else if (url.endsWith("/domains/managed")) result = { enabled: false }
@@ -213,6 +217,7 @@ beforeEach(() => {
   )
 })
 afterEach(() => {
+  vi.useRealTimers()
   db.close()
   process.argv = argv
   vi.unstubAllGlobals()
@@ -221,6 +226,16 @@ afterEach(() => {
 async function deploy() {
   vi.resetModules()
   await import("./deploy-release")
+}
+function mockHealthResponse(response: () => Response) {
+  const original = vi.mocked(fetch).getMockImplementation()!
+  const health = vi.fn<() => Response>(response)
+  vi.mocked(fetch).mockImplementation(async (input, init) =>
+    String(input) === config.vars.APP_ORIGIN + "/health"
+      ? health()
+      : original(input, init),
+  )
+  return health
 }
 function selectEnvironment(environment: "staging" | "production") {
   process.argv[3] = environment
@@ -315,4 +330,92 @@ it("accepts the existing deployment only when its database binding matches", asy
   await expect(deploy()).resolves.toBeUndefined()
   expect(mocks.spawnSync).toHaveBeenCalledTimes(1)
   expect(mocks.spawnSync.mock.calls[0]?.[1]).toContain("deploy")
+})
+
+it("waits for a known previous Worker version before continuing smoke probes", async () => {
+  vi.useFakeTimers()
+  failDeploy = false
+  const health = mockHealthResponse(() =>
+    Response.json({
+      version: health.mock.calls.length === 1 ? "version-0" : "version-1",
+    }),
+  )
+  const outcome = deploy().then(
+    () => undefined,
+    (error: unknown) => error,
+  )
+  await vi.waitFor(() => expect(health).toHaveBeenCalledTimes(1))
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) =>
+        String(url).startsWith(config.vars.APP_ORIGIN),
+      ),
+  ).toHaveLength(1)
+  await vi.advanceTimersByTimeAsync(1_000)
+  expect(await outcome).toBeUndefined()
+  expect(health).toHaveBeenCalledTimes(2)
+  expect(mocks.spawnSync).toHaveBeenCalledTimes(2)
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) =>
+        String(url).startsWith(config.vars.APP_ORIGIN),
+      ),
+  ).toHaveLength(6)
+})
+
+it("fails within the total smoke budget if the previous Worker version persists", async () => {
+  vi.useFakeTimers()
+  failDeploy = false
+  let firstProbeAt: number | undefined
+  let failedAt = 0
+  const health = mockHealthResponse(() => {
+    firstProbeAt ??= Date.now()
+    return Response.json({ version: "version-0" })
+  })
+  const outcome = deploy().then(
+    () => undefined,
+    (error: unknown) => {
+      failedAt = Date.now()
+      return error
+    },
+  )
+  await vi.waitFor(() => expect(health).toHaveBeenCalledTimes(1))
+  await vi.advanceTimersByTimeAsync(60_000)
+  expect(await outcome).toEqual(
+    expect.objectContaining({
+      message: expect.stringMatching(/budget.*version-1.*version-0/),
+    }),
+  )
+  expect(failedAt - firstProbeAt!).toBeLessThanOrEqual(60_000)
+  expect(health.mock.calls.length).toBeGreaterThan(1)
+  expect(mocks.spawnSync).toHaveBeenCalledTimes(2)
+})
+
+it.each([
+  ["unexpected version", 200, { version: "unknown-version" }],
+  ["missing version", 200, {}],
+  ["dependency failure", 503, { version: "version-0" }],
+] as const)(
+  "fails immediately for health %s",
+  async (_reason, status, body) => {
+    failDeploy = false
+    const health = mockHealthResponse(() => Response.json(body, { status }))
+    await expect(deploy()).rejects.toThrow(
+      /Smoke test failed: \/health.*status=/,
+    )
+    expect(health).toHaveBeenCalledTimes(1)
+  },
+)
+
+it("reports an HTML health rejection by status without parsing or echoing its body", async () => {
+  failDeploy = false
+  const health = mockHealthResponse(
+    () => new Response("private provider rejection", { status: 403 }),
+  )
+  await expect(deploy()).rejects.toThrow(
+    "Smoke test failed: /health status=403",
+  )
+  expect(health).toHaveBeenCalledTimes(1)
 })

@@ -318,7 +318,28 @@ if (
   JSON.stringify(crons)
 )
   throw new Error("Deployed cron verification failed")
-const smokeStart = Date.now()
+const expectedVersion = deployments.deployments[0]?.versions.find(
+  (version) => version.percentage === 100,
+)?.version_id
+if (!expectedVersion) throw new Error("Missing fully deployed Worker version")
+const previousVersions = new Set(
+  deployments.deployments
+    .slice(1)
+    .flatMap((deployment) =>
+      deployment.versions.map((version) => version.version_id),
+    ),
+)
+const smokeDeadline = Date.now() + 60_000
+let observedHealthVersion = "unavailable"
+let propagationReported = false
+function checkSmokeBudget() {
+  const remaining = smokeDeadline - Date.now()
+  if (remaining <= 0)
+    throw new Error(
+      `Smoke test exceeded total budget: expected=${expectedVersion} observed=${observedHealthVersion}`,
+    )
+  return remaining
+}
 const probes = [
   ["/health", 200],
   ["/api/auth/get-session", 200],
@@ -327,27 +348,51 @@ const probes = [
   ["/api/unknown-release-probe", 404],
 ] as const
 for (const [route, expected] of probes) {
-  if (Date.now() - smokeStart > 50_000)
-    throw new Error("Smoke test exceeded total budget")
-  const response = await fetch(expectedOrigin + route, {
-    signal: AbortSignal.timeout(10_000),
-    redirect: "manual",
-    headers: { accept: "application/json" },
-  })
-  const body = await response.json()
-  if (
-    response.status !== expected ||
-    (route === "/api/auth/get-session" && body !== null) ||
-    (route === "/health" &&
-      (typeof body !== "object" ||
-        body === null ||
-        !("version" in body) ||
-        body.version !==
-          deployments.deployments[0]?.versions.find(
-            (version) => version.percentage === 100,
-          )?.version_id))
-  )
-    throw new Error(`Smoke test failed: ${route}`)
+  while (true) {
+    const response = await fetch(expectedOrigin + route, {
+      signal: AbortSignal.timeout(Math.min(10_000, checkSmokeBudget())),
+      redirect: "manual",
+      headers: { accept: "application/json" },
+    })
+    if (response.status !== expected)
+      throw new Error(`Smoke test failed: ${route} status=${response.status}`)
+    const body: unknown = await response.json().catch(() => {
+      throw new Error(
+        `Smoke test failed: ${route} status=${response.status} unreadable JSON`,
+      )
+    })
+    checkSmokeBudget()
+    if (route === "/health") {
+      const version =
+        typeof body === "object" && body !== null && "version" in body
+          ? body.version
+          : undefined
+      observedHealthVersion =
+        typeof version === "string" &&
+        (version === expectedVersion || previousVersions.has(version))
+          ? version
+          : "unknown"
+      if (version !== expectedVersion) {
+        if (typeof version !== "string" || !previousVersions.has(version))
+          throw new Error(
+            `Smoke test failed: ${route} status=${response.status} expected=${expectedVersion} observed=${observedHealthVersion}`,
+          )
+        if (!propagationReported) {
+          console.log(
+            `Waiting for Worker propagation: expected=${expectedVersion} observed=${observedHealthVersion}`,
+          )
+          propagationReported = true
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(1_000, checkSmokeBudget())),
+        )
+        continue
+      }
+    }
+    if (route === "/api/auth/get-session" && body !== null)
+      throw new Error(`Smoke test failed: ${route} status=${response.status}`)
+    break
+  }
 }
 const summary = `Deployed ${sha} to ${environment}.\nCI run: ${runId}\nDeployment: ${deployments.deployments[0]?.id}\nMigrations: ${migrations.length - ledger.length} applied\nSmoke: ${probes.length} passed\n`
 if (process.env.GITHUB_STEP_SUMMARY)
