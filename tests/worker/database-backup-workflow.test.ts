@@ -13,7 +13,6 @@ import {
   D1_EXPORT_POLL_INTERVAL_MS,
 } from "../../src/worker/backup/constants"
 import type { BackupFetch } from "../../src/worker/backup/d1-export"
-import { DatabaseBackupError } from "../../src/worker/backup/errors"
 import {
   getDatabaseBackupStatus,
   recordDatabaseBackupTerminalState,
@@ -150,13 +149,13 @@ describe("database backup Workflow durability", () => {
   })
 
   it("keeps the worst-case external request budget below Workers Free", () => {
-    expect(POLL_EXPORT_STEP_CONFIG.retries.limit).toBe(2)
-    expect(UPLOAD_STEP_CONFIG.retries.limit).toBe(2)
-
     const configuredMaximum =
       START_EXPORT_STEP_CONFIG.retries.limit +
-      D1_EXPORT_MAX_POLL_OBSERVATIONS * POLL_EXPORT_STEP_CONFIG.retries.limit +
-      UPLOAD_STEP_CONFIG.retries.limit
+      1 +
+      D1_EXPORT_MAX_POLL_OBSERVATIONS *
+        (POLL_EXPORT_STEP_CONFIG.retries.limit + 1) +
+      UPLOAD_STEP_CONFIG.retries.limit +
+      1
 
     expect(
       D1_EXPORT_MAX_POLL_DURATION_MS -
@@ -402,26 +401,14 @@ describe("database backup Workflow durability", () => {
     },
   )
 
-  it("uses limit one as the sole no-retry control for starting an export", async () => {
-    let callbackAttempts = 0
+  it("marks an uncertain export start as non-retryable", async () => {
     const doStep = vi.fn<StepDo>(
       async (
         _name: string,
-        config: WorkflowStepConfig,
+        _config: WorkflowStepConfig,
         callback: () => Promise<unknown>,
       ) => {
-        let lastError: unknown
-        const limit = config.retries?.limit ?? 1
-        for (let attempt = 0; attempt < limit; attempt += 1) {
-          callbackAttempts += 1
-          try {
-            return await callback()
-          } catch (error) {
-            lastError = error
-          }
-        }
-
-        throw lastError
+        return callback()
       },
     )
     const fetcher = vi.fn<BackupFetch>(async () => {
@@ -437,15 +424,13 @@ describe("database backup Workflow durability", () => {
       .observeStart(Date.now() + 60_000)
       .catch((failure: unknown) => failure)
 
-    expect(START_EXPORT_STEP_CONFIG.retries.limit).toBe(1)
+    expect(START_EXPORT_STEP_CONFIG.retries.limit).toBe(0)
     expect(doStep.mock.calls[0]?.[1]).toBe(START_EXPORT_STEP_CONFIG)
-    expect(callbackAttempts).toBe(1)
     expect(fetcher).toHaveBeenCalledTimes(1)
-    expect(error).toBeInstanceOf(DatabaseBackupError)
-    expect(error).not.toBeInstanceOf(NonRetryableError)
+    expect(error).toBeInstanceOf(NonRetryableError)
     expect(error).toMatchObject({
-      code: "backup_export_request_failed",
-      retryable: true,
+      message: "backup_export_request_failed",
+      name: "NonRetryableError",
     })
   })
 
@@ -474,7 +459,7 @@ describe("database backup Workflow durability", () => {
     expect(doStep.mock.calls[0]?.[1]).toBe(POLL_EXPORT_STEP_CONFIG)
     expect(error).toMatchObject({
       message: "backup_export_authentication_failed",
-      name: "DatabaseBackup/backup_export_authentication_failed",
+      name: "NonRetryableError",
     })
   })
 

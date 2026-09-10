@@ -136,13 +136,25 @@ owner 要求继续完成可自动处理的上线准备，以下配置均已执�
 
 旧实现运行这些回归时 13 项失败；修复后完整 `pnpm run check` 通过：Worker 198 项、前端 30 项、脚本 54 项、Chromium 4 项，共 **286 项**。测试为每次登录分配独立合成 IP，并在发起与回调中保持一致，避免新增案例互相消耗粗限流额度；未放宽实际限流策略。
 
+### 4.5 2026-09-10 真实登录与 Workflow 边界验收
+
+[PR #16](https://github.com/eruoo/server/pull/16) 合入 `1f4612ba51da696393c0a932cc2bf9f817eebaf7`；[main CI](https://github.com/eruoo/server/actions/runs/34468037883) 和 [staging 发布](https://github.com/eruoo/server/actions/runs/34468448251) 均成功，无新 migration，五个冒烟通过。Worker 版本 `8608ebf2-8aa5-4739-aab1-5e90745590c9`、deployment `a12a5d66-ab0a-4cad-b8fd-68f61df6559b` 与 RELEASE_SHA 已读回。真实 GitHub 登录进入管理台，远端确认 owner / account / Session 各一行；原有 GitHub client ID/secret 有效，无需轮换。
+
+最近两次成功 main CI + staging 发布的 Actions run 起止耗时分别约 175 + 43 = 218 秒、201 + 47 = 248 秒。这是两组样本，包含各 run 自身排队与收尾，不包含 CI 与手动发布之间的 owner 等待；尚未积累五次常规发布，也不是首次完整平台验收耗时。
+
+首次真实备份实例 `database-backup-v1-20260910-acceptance-1f4612b` 在 export 启动阶段被 Cloudflare 拒绝，未进入上传。实例记录显示 `limit: 1` 实际尝试两次；错误跨步骤后变为 `Error("DatabaseBackupError: backup_export_authentication_failed")`，导致健康状态误归类为配置错误。Dashboard 中独立 staging 导出 token 为账号范围 D1 Read、Active、无 IP 限制；这些元数据不能证明 Worker 中保存的值有效，凭证仍需修复并重验，不改用部署 token 或放宽权限。
+
+代码按 operations §4.3 修正重试计数、保留 `NonRetryableError` 默认名称并恢复 RPC 包装中的固定错误码。新增测试实际创建本地 Workflow 实例，仅替换外部 HTTP 响应、关闭等待时间，不替换步骤执行、重试或错误传输；覆盖 start/poll/download 的永久与暂时失败，以及重试后成功上传。修复前六项失败、一项成功对照通过，修复后七项通过。完整 `pnpm run check` 通过：Worker 205 项、前端 30 项、脚本 54 项、Chromium 4 项，共 **293 项**。
+
+隔离恢复目标 `eruoo-server-restore-20260910-1f4612b` 已创建并验证为空，尚未导入快照、生成新信任或记录恢复完成。正式存储绑定未切换；production 应用仍未发布。脱敏执行证据继续保存在 `.output/staging-release-2026-09-10/`。
+
 ## 5. 尚未执行的外部验收
 
 Cloudflare 与 GitHub 接线、首次 staging migration/应用上传/Workflow 注册和 cron 已按 §4.1–§4.3 执行。以下结果仍需在实际授权环境取得，不能由本地测试替代：
 
-- 修正后的完整 staging 发布验收、production 首次发布及其 token 实际有效性；GitHub 与 export runtime secret 的真实流程验证。
-- 真实 owner GitHub/真实认证器登录；远端端到端 code→refresh→revoke；地区/冷启动/CPU/尾延迟与常规发布耗时。
-- 一次真实备份导出/上传、停止/超时行为、恢复到隔离新 D1、凭证清理、代码回退演练。
+- Workflow 重试与错误分类修正后的 staging 发布、production 首次发布及其 token 实际有效性；独立 export runtime secret 的修复与真实流程验证。
+- 真实认证器登录；远端端到端 code→refresh→revoke；地区/冷启动/CPU/尾延迟与后续常规发布耗时样本。真实 owner GitHub 登录已在 §4.5 通过。
+- 一次成功的真实备份导出/上传、停止/超时行为、向已建隔离 D1 导入恢复、凭证清理、新信任验证、代码回退演练。
 - Desktop App、Rust 安全存储、客户端打包与跨端联调：按 owner 最新决定延期，不属于本次 Web 交付。
 
 恢复规划器只输出可审核计划；恢复、secret 轮换、资源删除及正式部署仍需当次具体授权。Git 提交和 PR 合并与这些平台操作分别记录，不代表远端发布或验收已经完成。
