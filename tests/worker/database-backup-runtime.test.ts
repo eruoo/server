@@ -113,6 +113,44 @@ it.each([
   },
 )
 
+it("records an expired export as failed without restarting it", async () => {
+  const requests: unknown[] = []
+  vi.stubGlobal("fetch", (_input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push(JSON.parse(String(init?.body)))
+    return Promise.resolve(
+      requests.length === 1
+        ? activeExport()
+        : Response.json({
+            success: true,
+            result: {
+              success: false,
+              error: "Not currently exporting anything.",
+            },
+          }),
+    )
+  })
+  const id = crypto.randomUUID()
+  await using instance = await introspectWorkflowInstance(
+    env.DATABASE_BACKUP_WORKFLOW,
+    id,
+  )
+  await instance.modify(async (modifier) => {
+    await modifier.disableRetryDelays()
+    await modifier.disableSleeps()
+  })
+  await env.DATABASE_BACKUP_WORKFLOW.create({ id })
+  await instance.waitForStatus("errored")
+
+  expect(requests).toEqual([
+    { output_format: "polling" },
+    { output_format: "polling", current_bookmark: "bookmark-1" },
+  ])
+  expect(await getDatabaseBackupStatus(env.DB)).toMatchObject({
+    status: "failed",
+    errorCode: "backup_export_failed",
+  })
+})
+
 it("polls an active export to completion and retries one transient download failure", async () => {
   let downloads = 0
   const exportRequests: unknown[] = []

@@ -162,6 +162,22 @@ owner 更新导出 Secret 后，个人 Token verify 返回 Active，并确认该
 
 本轮脱敏执行回执及回归日志保存在本地忽略目录 `.output/staging-release-2026-09-10/`，不记录凭证、SQL 或签名下载地址。生产 v2 仍未部署；真实备份成功前不开展快照导入。
 
+### 4.7 2026-09-11 导出状态保留与轮询间隔
+
+[PR #18](https://github.com/eruoo/server/pull/18) 合入 `201bb185cdf5a4b7f66708ad35c181842c4e1144`；[main CI](https://github.com/eruoo/server/actions/runs/34493760569) 与 [staging 发布](https://github.com/eruoo/server/actions/runs/34494225399) 成功。owner 保留导出 Token 名称、修改权限并 Roll 新值，随后在 staging Deploy；读回 Worker 版本 `bd9190b7-897c-4c43-adb7-55807ae36ada`，RELEASE_SHA 仍为该提交。该 owner 操作覆盖 §4.6 临时试验结束时的旧权限状态。
+
+真实实例 `database-backup-v1-20260911-rolled-token-201bb18` 于 17:04:54–17:05:54 UTC 失败：启动 full export 一次成功，55 秒后首次 poll 报 `backup_export_response_invalid`，未下载或写入 R2。当前线上源代码已核对包含 PR #18 的请求与 active 解析修复。
+
+随后使用独立的 Wrangler OAuth 凭证，在同一 staging D1 顺序执行有界对照；这些探针不验证 Worker Secret 本身，不下载 SQL、不写 R2。完整导出 55 秒后返回 HTTP 200、外层 success=true、内部 success=false；schema-only 55 秒对照取得相同失败，错误为“Not currently exporting anything.”。schema-only 3 秒与完整导出 5 秒对照均正常完成，完整导出 bookmark 保持一致，现有解析器直接通过。证据支持缩短轮询间隔，不能据此声称测得精确平台 TTL。
+
+按 [operations §4.3](operations.md#43-有限预算与并发) 将 sleep 改为 5 秒，保留 15 次观察与 33 次外部 HTTP 上限。解析器先识别内部导出失败，再校验成功响应的 bookmark/type，避免任务状态丢失被误报为格式错误。失败仍不重试启动，不接受异常成功响应，不延长 lease 或上传预算。
+
+新增两项无 bookmark 失败响应测试、一项短暂结果保留测试和一项原生 Workflow 失败终态测试；四项在旧实现上实跑均失败，26 项对照通过，修复后全部 30 项通过。保留测试的 30 秒窗口为合成模型，不是平台 TTL。原生 Workflow 确认这种失败只启动一次、轮询一次，并保留 `backup_export_failed`。真实完整备份仍需用修正后的 staging 版本重验。
+
+完整 `pnpm run check` 通过：Worker 209 项、前端 30 项、脚本 54 项、Chromium 4 项，共 **297 项**。仅导出客户端和调度间隔需要修正；编排中的 bookmark 一致性、下载与 R2 上传校验保持有效。本轮未重跑全量消融矩阵。
+
+脱敏对照与部署读回保存在本地忽略目录 `.output/staging-release-2026-09-11/`；未记录 Token、SQL 或签名下载地址。production v2 尚未发布，隔离恢复尚未导入。
+
 ## 5. 尚未执行的外部验收
 
 Cloudflare 与 GitHub 接线、首次 staging migration/应用上传/Workflow 注册和 cron 已按 §4.1–§4.3 执行。以下结果仍需在实际授权环境取得，不能由本地测试替代：

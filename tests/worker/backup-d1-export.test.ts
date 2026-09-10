@@ -110,6 +110,28 @@ describe("D1 REST export client", () => {
   })
 
   it.each([
+    { success: false, error: "Not currently exporting anything." },
+    { status: "error", error: "Export failed before a bookmark was returned." },
+  ])("preserves an export failure without a bookmark", async (result) => {
+    const fetcher = vi.fn<BackupFetch>(async () =>
+      Response.json({ success: true, result }),
+    )
+
+    await expect(
+      pollD1Export(fetcher, {
+        accountId,
+        apiToken,
+        bookmark: "bookmark-1",
+        databaseId,
+      }),
+    ).rejects.toMatchObject({
+      code: "backup_export_failed",
+      retryable: false,
+    })
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
     {
       response: () => new Response(null, { status: 401 }),
       expectedCode: "backup_export_authentication_failed",

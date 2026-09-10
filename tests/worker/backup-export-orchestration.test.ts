@@ -5,6 +5,7 @@ import {
   D1_EXPORT_MAX_POLL_OBSERVATIONS,
   D1_EXPORT_POLL_INTERVAL_MS,
 } from "../../src/worker/backup/constants"
+import { pollD1Export } from "../../src/worker/backup/d1-export"
 import {
   completeD1ExportWithinDeadline,
   type DurableD1ExportOperations,
@@ -13,6 +14,62 @@ import {
 const startedAtMs = 2_000_000_000_000
 
 describe("durable D1 export polling", () => {
+  it("retrieves a completed export before its transient result disappears", async () => {
+    let observedAtMs = startedAtMs
+    // A synthetic retention window, not a claimed Cloudflare platform TTL.
+    const availableUntilMs = startedAtMs + 30_000
+    const observePoll = vi.fn<DurableD1ExportOperations["observePoll"]>(
+      async (_pollIndex, bookmark) => ({
+        observedAtMs,
+        progress: await pollD1Export(
+          async () =>
+            Response.json({
+              success: true,
+              result:
+                observedAtMs < availableUntilMs
+                  ? {
+                      success: true,
+                      type: "export",
+                      at_bookmark: bookmark,
+                      status: "complete",
+                      result: {
+                        filename: "dump.sql",
+                        signed_url: "https://signed.example/dump.sql",
+                      },
+                    }
+                  : {
+                      success: false,
+                      error: "Not currently exporting anything.",
+                    },
+            }),
+          {
+            accountId: "a".repeat(32),
+            apiToken: "synthetic-test-token",
+            bookmark,
+            databaseId: "00000000-0000-4000-8000-000000000001",
+          },
+        ),
+      }),
+    )
+
+    await expect(
+      completeD1ExportWithinDeadline(
+        {
+          observeStart: async () => ({
+            observedAtMs,
+            progress: { bookmark: "bookmark", state: "pending" },
+          }),
+          observePoll,
+          sleep: async (_pollIndex, durationMs) => {
+            observedAtMs += durationMs
+          },
+        },
+        startedAtMs,
+      ),
+    ).resolves.toMatchObject({ bookmark: "bookmark", state: "complete" })
+    expect(observePoll).toHaveBeenCalledTimes(1)
+  })
+
   it("uses durable sleeps until a terminal export result", async () => {
     const observePoll = vi
       .fn<DurableD1ExportOperations["observePoll"]>()
