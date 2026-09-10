@@ -61,7 +61,7 @@ describe("R2 database backup storage", () => {
     const object = descriptor("workflow-instance")
 
     expect(object.key).toBe(
-      "d1/2026/08/23/20260823T030000000Z--revision-00000000-0000-4000-8000-000000000001--workflow-workflow-instance.sql",
+      "d1/daily/2026/08/23/20260823T030000000Z--revision-00000000-0000-4000-8000-000000000001--workflow-workflow-instance.sql",
     )
     expect(object.customMetadata).toEqual({
       auditEvents: "included",
@@ -327,4 +327,38 @@ describe("R2 database backup storage", () => {
       env.BACKUPS.get(object.key)?.then((body) => body?.text()),
     ).resolves.toBe("raced-object")
   })
+})
+
+it("rejects a still-truncated tenth inventory page without fetching an eleventh", async () => {
+  const emptyPage = await env.BACKUPS.list()
+  const list = vi.fn<R2Bucket["list"]>().mockImplementation(async () => ({
+    ...emptyPage,
+    objects: [],
+    truncated: true,
+    cursor: `page-${list.mock.calls.length}`,
+  }))
+  const bucket = new Proxy(env.BACKUPS, {
+    get(target, key) {
+      if (key === "list") return list
+      const value = Reflect.get(target, key)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+  await expect(listCurrentBackupBytes(bucket)).rejects.toMatchObject({
+    code: "backup_storage_inventory_invalid",
+  })
+  expect(list).toHaveBeenCalledTimes(10)
+  list.mockClear()
+  list.mockImplementation(async () =>
+    list.mock.calls.length === 10
+      ? { ...emptyPage, objects: [], truncated: false }
+      : {
+          ...emptyPage,
+          objects: [],
+          truncated: true,
+          cursor: `page-${list.mock.calls.length}`,
+        },
+  )
+  await expect(listCurrentBackupBytes(bucket)).resolves.toBe(0)
+  expect(list).toHaveBeenCalledTimes(10)
 })

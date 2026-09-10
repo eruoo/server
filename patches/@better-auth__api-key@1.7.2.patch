@@ -1,0 +1,20 @@
+diff --git a/dist/index.mjs b/dist/index.mjs
+index bdb7e36568fd6a68a95c6f62642807bab94e4083..361ca3e0cd7e0fb0f9e0983a63262d1dfeb3aa2d 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -1996,14 +1996,7 @@ function verifyApiKey({ configurations, schema, deleteAllExpiredApiKeys }) {
+ 				},
+ 				key: null
+ 			});
+-			return ctx.json({
+-				valid: false,
+-				error: {
+-					message: API_KEY_ERROR_CODES.INVALID_API_KEY,
+-					code: "INVALID_API_KEY"
+-				},
+-				key: null
+-			});
++			throw error;
+ 		}
+ 		const { key: _, ...returningApiKey } = apiKey ?? {
+ 			key: 1,

@@ -3,32 +3,46 @@ import {
   check,
   index,
   integer,
-  primaryKey,
   sqliteTable,
   text,
 } from "drizzle-orm/sqlite-core"
 
 import type { DatabaseBackupErrorCode } from "../backup/errors"
 
-export const oauthRefreshTokenFamilyRevocations = sqliteTable(
-  "oauthRefreshTokenFamilyRevocation",
+export const securityAuditEvents = sqliteTable(
+  "security_audit_events",
   {
-    authorizationCodeId: text().notNull(),
-    clientId: text().notNull(),
-    revokedAt: integer({ mode: "timestamp_ms" }).notNull(),
-    userId: text().notNull(),
+    id: text().primaryKey(),
+    type: text().notNull(),
+    outcome: text().notNull(),
+    occurredAt: integer().notNull(),
+    subjectId: text(),
+    credentialId: text(),
+    clientId: text(),
+    ipFingerprint: text(),
+    requestId: text().notNull(),
+    metadata: text(),
   },
   (table) => [
-    primaryKey({
-      columns: [table.authorizationCodeId, table.clientId, table.userId],
-      name: "oauthRefreshTokenFamilyRevocation_pk",
-    }),
-    index("oauthRefreshTokenFamilyRevocation_userId_clientId_idx").on(
-      table.userId,
-      table.clientId,
+    index("security_audit_events_occurredAt_id_idx").on(
+      desc(table.occurredAt),
+      desc(table.id),
     ),
-    index("oauthRefreshTokenFamilyRevocation_revokedAt_idx").on(
-      table.revokedAt,
+    index("security_audit_events_outcome_occurredAt_id_idx").on(
+      table.outcome,
+      desc(table.occurredAt),
+      desc(table.id),
+    ),
+    index("security_audit_events_type_occurredAt_id_idx").on(
+      table.type,
+      desc(table.occurredAt),
+      desc(table.id),
+    ),
+    index("security_audit_events_type_outcome_occurredAt_id_idx").on(
+      table.type,
+      table.outcome,
+      desc(table.occurredAt),
+      desc(table.id),
     ),
   ],
 )
@@ -66,44 +80,6 @@ export const databaseBackupHealth = sqliteTable(
     check(
       "database_backup_health_terminal_check",
       sql`(${table.status} = 'ok' AND ${table.failureCode} IS NULL AND ${table.lastSuccessAt} IS NOT NULL) OR (${table.status} = 'failed' AND ${table.failureCode} IS NOT NULL)`,
-    ),
-  ],
-)
-
-export const securityAuditEvents = sqliteTable(
-  "security_audit_events",
-  {
-    id: text().primaryKey(),
-    type: text().notNull(),
-    outcome: text().notNull(),
-    occurredAt: integer().notNull(),
-    subjectId: text(),
-    credentialId: text(),
-    clientId: text(),
-    ipFingerprint: text(),
-    requestId: text().notNull(),
-    metadata: text(),
-  },
-  (table) => [
-    index("security_audit_events_occurredAt_id_idx").on(
-      desc(table.occurredAt),
-      desc(table.id),
-    ),
-    index("security_audit_events_outcome_occurredAt_id_idx").on(
-      table.outcome,
-      desc(table.occurredAt),
-      desc(table.id),
-    ),
-    index("security_audit_events_type_occurredAt_id_idx").on(
-      table.type,
-      desc(table.occurredAt),
-      desc(table.id),
-    ),
-    index("security_audit_events_type_outcome_occurredAt_id_idx").on(
-      table.type,
-      table.outcome,
-      desc(table.occurredAt),
-      desc(table.id),
     ),
   ],
 )

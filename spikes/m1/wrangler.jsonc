@@ -1,0 +1,28 @@
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "eruoo-server-v2",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-19",
+  "compatibility_flags": ["nodejs_compat"],
+  "env": {
+    "staging": {
+      "name": "eruoo-server-staging",
+      "workers_dev": true,
+      "observability": {
+        "enabled": true,
+        "logs": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "invocation_logs": true,
+        },
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "eruoo-server-staging",
+          "database_id": "a43a01e6-e011-4cbf-9a9c-50642f79b61d",
+        },
+      ],
+    },
+  },
+}

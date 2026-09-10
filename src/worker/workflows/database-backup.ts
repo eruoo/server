@@ -362,8 +362,18 @@ export class DatabaseBackupWorkflow extends WorkflowEntrypoint<DatabaseBackupWor
         })
       }
 
-      await step.do(
-        "calculate current R2 backup storage",
+      const databaseExport = await completeD1ExportWithinDeadline(
+        createDurableExportOperations(step, this.env),
+        runStartedAtMs,
+      )
+      const descriptor = createBackupObjectDescriptor({
+        createdAt: new Date(runStartedAtMs).toISOString(),
+        exportBookmark: databaseExport.bookmark,
+        revision,
+        workflowInstanceId: event.instanceId,
+      })
+      const currentStoredBytes = await step.do(
+        "calculate R2 backup storage before upload",
         DATABASE_STEP_CONFIG,
         async () => {
           try {
@@ -378,35 +388,6 @@ export class DatabaseBackupWorkflow extends WorkflowEntrypoint<DatabaseBackupWor
               })
             }
 
-            if (storedBytes >= BACKUP_STORAGE_HARD_LIMIT_BYTES) {
-              throw new DatabaseBackupError("backup_storage_budget_exceeded", {
-                retryable: false,
-              })
-            }
-
-            return storedBytes
-          } catch (error) {
-            throw createWorkflowStepError(error)
-          }
-        },
-      )
-
-      const databaseExport = await completeD1ExportWithinDeadline(
-        createDurableExportOperations(step, this.env),
-        runStartedAtMs,
-      )
-      const descriptor = createBackupObjectDescriptor({
-        createdAt: new Date(runStartedAtMs).toISOString(),
-        exportBookmark: databaseExport.bookmark,
-        revision,
-        workflowInstanceId: event.instanceId,
-      })
-      const currentStoredBytes = await step.do(
-        "recalculate R2 backup storage before upload",
-        DATABASE_STEP_CONFIG,
-        async () => {
-          try {
-            const storedBytes = await listCurrentBackupBytes(this.env.BACKUPS)
             if (storedBytes >= BACKUP_STORAGE_HARD_LIMIT_BYTES) {
               throw new DatabaseBackupError("backup_storage_budget_exceeded", {
                 retryable: false,

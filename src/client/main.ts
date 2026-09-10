@@ -1,10 +1,7 @@
-import App from "@client/App.vue"
-import { initializeTheme } from "@client/composables/useTheme"
-import { router } from "@client/router"
 import { createApp } from "vue"
 
-import "@client/styles/main.css"
+import App from "./App.vue"
+import { router } from "./router"
 
-initializeTheme()
-
+import "./styles/main.css"
 createApp(App).use(router).mount("#app")

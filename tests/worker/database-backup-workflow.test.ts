@@ -115,6 +115,40 @@ describe("database backup Workflow durability", () => {
     await env.DB.prepare("DELETE FROM maintenance_lease").run()
   })
 
+  it("performs one inventory and preserves a completed SQL backup and health", async () => {
+    const list = vi.spyOn(env.BACKUPS, "list")
+    vi.stubGlobal("fetch", async (url: string) =>
+      url === "https://signed.example/dump.sql"
+        ? new Response("SELECT 1;", { headers: { "Content-Length": "9" } })
+        : Response.json({
+            success: true,
+            result: {
+              at_bookmark: "bookmark-1",
+              status: "complete",
+              result: {
+                filename: "dump.sql",
+                signed_url: "https://signed.example/dump.sql",
+              },
+            },
+          }),
+    )
+    const result = await runDatabaseBackupWorkflow(
+      databaseBackupWorkflowEvent(crypto.randomUUID(), new Date()),
+      async (_name, _config, callback) => callback(),
+    )
+    try {
+      expect(list).toHaveBeenCalledTimes(1)
+      expect(result.rawBytes).toBe(9)
+      expect(await (await env.BACKUPS.get(result.key))?.text()).toBe(
+        "SELECT 1;",
+      )
+      expect((await getDatabaseBackupStatus(env.DB)).status).toBe("ok")
+    } finally {
+      list.mockRestore()
+      await env.BACKUPS.delete(result.key)
+    }
+  })
+
   it("keeps the worst-case external request budget below Workers Free", () => {
     expect(POLL_EXPORT_STEP_CONFIG.retries.limit).toBe(2)
     expect(UPLOAD_STEP_CONFIG.retries.limit).toBe(2)

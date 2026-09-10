@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { createBackupObjectDescriptor } from "../src/worker/backup/storage"
+import { migrationReceiptTableSql } from "./lib/migration-receipt"
 import {
   createCredentialScrubSql,
   createRestoreCompletedAuditSql,
@@ -72,6 +73,19 @@ async function writeSql(sql: string): Promise<string> {
   return filePath
 }
 
+it("validates deployment receipt schema and removes its source binding during restore", async () => {
+  const sql = await createDump(
+    migrationReceiptTableSql +
+      `INSERT INTO deployment_migrations VALUES (1,'source-db','{}');`,
+  )
+  const snapshot = await writeSql(sql)
+  const inspection = await inspectBackupSql(snapshot, repositoryMigrations)
+  expect(inspection.hasDeploymentReceipt).toBe(true)
+  expect(createCredentialScrubSql(true)).toContain(
+    'DELETE FROM "deployment_migrations";',
+  )
+})
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories
@@ -132,6 +146,45 @@ describe("database restore planning", () => {
       sha256: expect.stringMatching(/^[a-f\d]{64}$/),
     })
   })
+
+  it("restores native D1 exports containing CR, LF, quotes, and Unicode", async () => {
+    const exportedRows = await readFile(
+      new URL("./fixtures/d1-export-text.sql", import.meta.url),
+      "utf8",
+    )
+    const sql = await createDump(exportedRows)
+    const database = new DatabaseSync(":memory:")
+    try {
+      database.exec(sql)
+      expect(
+        database.prepare("SELECT id,name FROM apikey ORDER BY id").all(),
+      ).toEqual([
+        { id: "cr", name: "a\rb" },
+        { id: "lf", name: "a\nb" },
+        { id: "mixed", name: "设备's\r\nkey" },
+        { id: "plain", name: "a b" },
+      ])
+    } finally {
+      database.close()
+    }
+    await expect(
+      inspectBackupSql(await writeSql(sql), repositoryMigrations),
+    ).resolves.toMatchObject({ migration: { count: 1 } })
+  })
+
+  it.each(["upper('owner')", "replace('a','a',hex(randomblob(8)))"])(
+    "still rejects functions outside the export allowlist: %s",
+    async (expression) => {
+      const snapshot = await writeSql(
+        await createDump(
+          `INSERT INTO "user" VALUES ('owner',${expression},'owner@example.invalid',1,NULL,0,0);`,
+        ),
+      )
+      await expect(
+        inspectBackupSql(snapshot, repositoryMigrations),
+      ).rejects.toThrow("isolated semantic restore validation")
+    },
+  )
 
   it("executes INSERT OR REPLACE audit data before proving scrub removes it", async () => {
     const snapshot = await writeSql(

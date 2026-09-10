@@ -100,7 +100,7 @@ function toBase64Url(bytes: Uint8Array): string {
     .replaceAll("=", "")
 }
 
-function fromBase64Url(value: string): Uint8Array {
+function fromBase64Url(value: string): Uint8Array<ArrayBuffer> {
   if (!/^[A-Za-z0-9_-]+$/.test(value)) {
     throw new InvalidAuditCursorError("The audit cursor is malformed.")
   }
@@ -335,16 +335,4 @@ export async function listAuditEvents(
         ? await encodeCursor(lastVisibleRow, filters, secret)
         : null,
   }
-}
-
-export async function deleteExpiredAuditEvents(
-  databaseBinding: D1Database,
-  now = Date.now(),
-): Promise<number> {
-  const database = drizzle(databaseBinding)
-  const result = await database
-    .delete(securityAuditEvents)
-    .where(lt(securityAuditEvents.occurredAt, now - auditRetentionMs))
-
-  return result.meta.changes
 }

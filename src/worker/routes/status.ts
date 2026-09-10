@@ -1,121 +1,133 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi"
 
-import { API_KEY_EXPIRATION_HEADER } from "../../shared/api-key"
-import { requireOwnerSessionOrStatusApiKey } from "../auth/api-key"
-import { apiKeyStatusRateLimit } from "../auth/rate-limit"
-import { problemSchema } from "../http/problem"
+import {
+  API_KEY_EXPIRATION_HEADER,
+  API_KEY_EXPIRATION_WARNING_WINDOW_MS,
+} from "../../shared/api-key"
+import { assertAuditSecret, scheduleAuditEvent } from "../audit"
+import { inspectCredentialCarriers } from "../auth/carriers"
+import { limitAuthEntry } from "../auth/entry-limit"
+import { getRequestAuth, readOwnerSession } from "../auth/session"
+import { errorResponse, problem, withReadDeadline } from "../http/response"
 import type { AppBindings } from "../http/types"
 
-const statusSchema = z
-  .object({
-    status: z.literal("ok"),
+export function registerStatusRoute(app: OpenAPIHono<AppBindings>) {
+  const route = createRoute({
+    method: "get",
+    path: "/api/status",
+    operationId: "getStatus",
+    security: [{ ownerSession: [] }, { apiKey: [] }],
+    responses: {
+      default: errorResponse,
+      200: {
+        description: "Authenticated service status",
+        content: {
+          "application/json": {
+            schema: z.object({ status: z.literal("ok") }).openapi("Status"),
+          },
+        },
+      },
+    },
   })
-  .openapi("Status")
-
-const statusRoute = createRoute({
-  method: "get",
-  middleware: [
-    apiKeyStatusRateLimit,
-    requireOwnerSessionOrStatusApiKey,
-  ] as const,
-  operationId: "getStatus",
-  path: "/api/status",
-  security: [{ ownerSession: [] }, { apiKey: [] }],
-  responses: {
-    200: {
-      content: {
-        "application/json": {
-          schema: statusSchema,
-        },
-      },
-      headers: {
-        [API_KEY_EXPIRATION_HEADER]: {
-          description:
-            "UTC RFC 3339 expiration returned only for a successfully authenticated API key with at most 14 days remaining.",
-          schema: {
-            format: "date-time",
-            type: "string",
-          },
-        },
-      },
-      description:
-        "The owner Session or status:read API key and its D1 record are valid.",
-    },
-    400: {
-      content: {
-        "application/problem+json": {
-          schema: problemSchema,
-        },
-      },
-      description: "The request contains ambiguous credential carriers.",
-    },
-    401: {
-      content: {
-        "application/problem+json": {
-          schema: problemSchema,
-        },
-      },
-      description: "A valid owner Session or status:read API key is required.",
-    },
-    403: {
-      content: {
-        "application/problem+json": {
-          schema: problemSchema,
-        },
-      },
-      description: "The authenticated API key does not grant status:read.",
-    },
-    429: {
-      content: {
-        "application/problem+json": {
-          schema: problemSchema,
-        },
-      },
-      description:
-        "The platform ingress or credential-level API key request limit was exceeded.",
-      headers: {
-        "Retry-After": {
-          description: "Seconds until this API key request may be retried.",
-          schema: {
-            pattern: "^[1-9][0-9]*$",
-            type: "string",
-          },
-        },
-      },
-    },
-    503: {
-      content: {
-        "application/problem+json": {
-          schema: problemSchema,
-        },
-      },
-      description:
-        "The platform rate limiter or credential dependency could not be checked.",
-    },
-    500: {
-      content: {
-        "application/problem+json": {
-          schema: problemSchema,
-        },
-      },
-      description: "The request failed unexpectedly.",
-    },
-    504: {
-      content: {
-        "application/problem+json": {
-          schema: problemSchema,
-        },
-      },
-      description: "The request exceeded the service time limit.",
-    },
-  },
-  tags: ["System"],
-})
-
-export const statusRouter = new OpenAPIHono<AppBindings>({ strict: true })
-
-statusRouter.openapi(statusRoute, (context) =>
-  context.json(statusSchema.parse({ status: "ok" }), 200, {
-    "Cache-Control": "no-store",
-  }),
-)
+  app.openapi(route, async (c) => {
+    const requestId = c.get("requestId")
+    if (c.req.method !== "GET" || new URL(c.req.url).pathname !== route.path)
+      return problem("not-found", requestId)
+    const startedAt = Date.now()
+    const inspection = inspectCredentialCarriers(c.req.raw)
+    if (inspection.invalid) return problem("invalid-request", requestId)
+    if (inspection.carriers[0] === "apiKey") {
+      const limited = await limitAuthEntry(
+        c,
+        "GET /api/status",
+        c.env.API_KEY_RATE_LIMITER,
+      )
+      if (limited) return limited
+    }
+    const remainingReadBudget = Math.max(0, 5000 - (Date.now() - startedAt))
+    if (remainingReadBudget === 0) return problem("request-timeout", requestId)
+    return withReadDeadline(
+      (async () => {
+        if (inspection.carriers[0] !== "apiKey") {
+          const owner = await readOwnerSession(c)
+          return owner instanceof Response
+            ? owner
+            : c.json({ status: "ok" as const }, 200, {
+                "cache-control": "no-store",
+              })
+        }
+        assertAuditSecret(c.env.AUDIT_IP_HASH_SECRET)
+        const reject = (reason: string) =>
+          scheduleAuditEvent(c, {
+            type: reason === "expired" ? "api_key_expired" : "api_key_rejected",
+            outcome: "failure",
+            metadata: { reason },
+          })
+        try {
+          const limited = () => {
+            const response = problem("rate-limit-exceeded", requestId)
+            response.headers.set("retry-after", "60")
+            return response
+          }
+          const result = await getRequestAuth(c).api.verifyApiKey({
+            body: { configId: "default", key: c.req.header("x-api-key")! },
+          })
+          if (!result.valid || !result.key) {
+            const code = result.error?.code
+            if (code === "RATE_LIMITED" || code === "USAGE_EXCEEDED")
+              return limited()
+            if (
+              code &&
+              [
+                "INVALID_API_KEY",
+                "KEY_DISABLED",
+                "KEY_EXPIRED",
+                "KEY_NOT_FOUND",
+              ].includes(code)
+            ) {
+              reject(code === "KEY_EXPIRED" ? "expired" : "invalid_credential")
+              return problem("invalid-credential", requestId)
+            }
+            reject("dependency_unavailable")
+            return problem("service-unavailable", requestId)
+          }
+          const key = result.key
+          const owner = await c.env.DB.prepare(
+            "SELECT 1 FROM account WHERE userId=? AND providerId='github' AND accountId=? LIMIT 1",
+          )
+            .bind(key.referenceId, c.env.OWNER_GITHUB_ID)
+            .first()
+          if (!owner) {
+            reject("invalid_owner")
+            return problem("invalid-credential", requestId)
+          }
+          if (!key.permissions?.status?.includes("read")) {
+            reject("insufficient_permission")
+            return problem("insufficient-permission", requestId)
+          }
+          if (
+            !(key.expiresAt instanceof Date) ||
+            !Number.isFinite(key.expiresAt.getTime())
+          )
+            return problem("service-unavailable", requestId)
+          const remaining = key.expiresAt.getTime() - Date.now()
+          if (remaining <= 0) {
+            reject("expired")
+            return problem("invalid-credential", requestId)
+          }
+          return c.json({ status: "ok" as const }, 200, {
+            "cache-control": "no-store",
+            ...(remaining <= API_KEY_EXPIRATION_WARNING_WINDOW_MS
+              ? { [API_KEY_EXPIRATION_HEADER]: key.expiresAt.toISOString() }
+              : {}),
+          })
+        } catch {
+          reject("dependency_unavailable")
+          return problem("service-unavailable", requestId)
+        }
+      })(),
+      requestId,
+      remainingReadBudget,
+    )
+  })
+}

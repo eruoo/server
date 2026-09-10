@@ -6,7 +6,7 @@ import {
   createD1OAuthJwksResolver,
   OAuthJwksDependencyError,
   OAUTH_JWKS_POSITIVE_CACHE_TTL_MS,
-} from "../../src/worker/auth/oauth-jwks"
+} from "../../src/worker/oauth/jwks"
 
 const tokenInput = { payload: "", signature: "" }
 
@@ -48,10 +48,14 @@ describe("D1 OAuth JWKS resolver", () => {
     const keyId = crypto.randomUUID()
     await insertJwk(keyId, await publicEd25519Jwk())
 
-    const key = await createD1OAuthJwksResolver(env.DB)(
-      { alg: "EdDSA", kid: keyId },
-      tokenInput,
-    )
+    const key = await createD1OAuthJwksResolver(
+      new Proxy(env.DB, {
+        get: (target, property) => {
+          const value = Reflect.get(target, property)
+          return typeof value === "function" ? value.bind(target) : value
+        },
+      }),
+    )({ alg: "EdDSA", kid: keyId }, tokenInput)
 
     expect(key).toBeInstanceOf(CryptoKey)
     expect((key as CryptoKey).type).toBe("public")
@@ -78,7 +82,14 @@ describe("D1 OAuth JWKS resolver", () => {
       malformedKeyId,
       JSON.stringify({ crv: "Ed25519", kty: "OKP", x: "not-base64!" }),
     )
-    const resolver = createD1OAuthJwksResolver(env.DB)
+    const resolver = createD1OAuthJwksResolver(
+      new Proxy(env.DB, {
+        get: (target, property) => {
+          const value = Reflect.get(target, property)
+          return typeof value === "function" ? value.bind(target) : value
+        },
+      }),
+    )
 
     await expect(
       resolver({ alg: "EdDSA", kid: privateMaterialId }, tokenInput),
@@ -92,15 +103,11 @@ describe("D1 OAuth JWKS resolver", () => {
   })
 
   it("negative-caches an unknown kid to avoid repeated D1 lookups", async () => {
-    const first = vi.fn<() => Promise<null>>().mockResolvedValue(null)
-    const bind = vi.fn<(...values: unknown[]) => { first: typeof first }>(
-      () => ({
-        first,
-      }),
-    )
-    const prepare = vi.fn<(query: string) => { bind: typeof bind }>(() => ({
-      bind,
-    }))
+    const all = vi
+      .fn<() => Promise<{ results: never[] }>>()
+      .mockResolvedValue({ results: [] })
+    const statement = { all, bind: () => statement }
+    const prepare = vi.fn<() => typeof statement>(() => statement)
     const database = { prepare } as unknown as D1Database
     const resolver = createD1OAuthJwksResolver(database)
 
@@ -108,11 +115,11 @@ describe("D1 OAuth JWKS resolver", () => {
       resolver({ alg: "EdDSA", kid: "missing-key" }, tokenInput),
     ).rejects.toThrow("unknown")
     await expect(
-      resolver({ alg: "EdDSA", kid: "missing-key" }, tokenInput),
+      resolver({ alg: "EdDSA", kid: "different-missing-key" }, tokenInput),
     ).rejects.toThrow("unknown")
 
     expect(prepare).toHaveBeenCalledTimes(1)
-    expect(first).toHaveBeenCalledTimes(1)
+    expect(all).toHaveBeenCalledTimes(1)
   })
 
   it("rechecks D1 after the positive-cache TTL and observes key deletion", async () => {
@@ -126,7 +133,15 @@ describe("D1 OAuth JWKS resolver", () => {
     }
     const first = vi.fn<() => Promise<JwksRowForTest | null>>(async () => row)
     const database = {
-      prepare: () => ({ bind: () => ({ first }) }),
+      prepare: () => ({
+        bind() {
+          return this
+        },
+        all: async () => {
+          const row = await first()
+          return { results: row ? [{ ...row, id: keyId }] : [] }
+        },
+      }),
     } as unknown as D1Database
     const resolver = createD1OAuthJwksResolver(database)
 
@@ -155,9 +170,17 @@ describe("D1 OAuth JWKS resolver", () => {
       expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
       publicKey: await publicEd25519Jwk(),
     }
-    const first = vi.fn<() => Promise<JwksRowForTest>>(async () => row)
+    const first = vi.fn<() => Promise<JwksRowForTest | null>>(async () => row)
     const database = {
-      prepare: () => ({ bind: () => ({ first }) }),
+      prepare: () => ({
+        bind() {
+          return this
+        },
+        all: async () => {
+          const row = await first()
+          return { results: row ? [{ ...row, id: keyId }] : [] }
+        },
+      }),
     } as unknown as D1Database
     const resolver = createD1OAuthJwksResolver(database)
     const cachedKey = await resolver({ alg: "EdDSA", kid: keyId }, tokenInput)
@@ -179,7 +202,12 @@ describe("D1 OAuth JWKS resolver", () => {
       .fn<() => Promise<never>>()
       .mockRejectedValue(new Error("synthetic D1 failure"))
     const database = {
-      prepare: () => ({ bind: () => ({ first }) }),
+      prepare: () => ({
+        all: first,
+        bind() {
+          return this
+        },
+      }),
     } as unknown as D1Database
 
     await expect(

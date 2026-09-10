@@ -91,6 +91,7 @@ export async function listCurrentBackupBytes(
 ): Promise<number> {
   let currentStoredBytes = 0
   let cursor: string | undefined
+  let pages = 0
 
   try {
     while (true) {
@@ -121,7 +122,7 @@ export async function listCurrentBackupBytes(
         break
       }
 
-      if (page.cursor.length === 0 || page.cursor === cursor) {
+      if (++pages >= 10 || page.cursor.length === 0 || page.cursor === cursor) {
         throw new DatabaseBackupError("backup_storage_inventory_invalid", {
           retryable: false,
         })

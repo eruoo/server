@@ -1,24 +1,54 @@
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-import vue from "@vitejs/plugin-vue"
+import {
+  cloudflareTest,
+  readD1Migrations,
+} from "@cloudflare/vitest-pool-workers"
 import { defineConfig } from "vitest/config"
 
 const rootDirectory = path.dirname(fileURLToPath(import.meta.url))
 
+/**
+ * 测试用合成凭证(仅存在于 workerd 内存,无真实值)。
+ * BETTER_AUTH_SECRETS 保持 Better Auth 的 <version>:<secret> 形态
+ * (value ≥32 字符,与生产校验一致)。
+ */
+const syntheticTestBindings = {
+  CF_ACCOUNT_ID: "0123456789abcdef0123456789abcdef",
+  D1_DATABASE_ID: "11111111-1111-4111-8111-111111111111",
+  D1_EXPORT_API_TOKEN: "synthetic-export-token",
+  APP_ORIGIN: "http://local.test",
+  BETTER_AUTH_SECRETS:
+    "1:synthetic-better-auth-secret-used-only-in-worker-tests-32ch",
+  GITHUB_CLIENT_ID: "synthetic-github-client-id",
+  GITHUB_CLIENT_SECRET: "synthetic-github-client-secret",
+  AUDIT_IP_HASH_SECRET: "synthetic-audit-secret-only-for-tests-32-characters",
+  OWNER_GITHUB_ID: "50254496",
+} as const
+
 export default defineConfig({
-  plugins: [vue()],
-  resolve: {
-    alias: {
-      "@client": path.resolve(rootDirectory, "src/client"),
-      "@shared": path.resolve(rootDirectory, "src/shared"),
-    },
-  },
+  plugins: [
+    cloudflareTest(async () => ({
+      wrangler: {
+        configPath: path.resolve(rootDirectory, "wrangler.jsonc"),
+        environment: "staging",
+      },
+      miniflare: {
+        compatibilityFlags: ["nodejs_compat"],
+        bindings: {
+          ...syntheticTestBindings,
+          TEST_MIGRATIONS: await readD1Migrations(
+            path.resolve(rootDirectory, "migrations"),
+          ),
+        },
+      },
+    })),
+  ],
   test: {
-    name: "client",
-    environment: "happy-dom",
-    include: ["tests/client/**/*.test.ts"],
-    clearMocks: true,
-    restoreMocks: true,
+    name: "worker",
+    include: ["tests/worker/**/*.test.ts"],
+    setupFiles: ["./tests/worker/apply-migrations.ts"],
+    passWithNoTests: false,
   },
 })

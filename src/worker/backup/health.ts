@@ -5,7 +5,6 @@ import { z } from "zod"
 import { databaseBackupHealth } from "../db/schema"
 import {
   DATABASE_BACKUP_ERROR_CODES,
-  type DatabaseBackupErrorCode,
   isDatabaseBackupErrorCode,
 } from "./errors"
 
@@ -88,26 +87,8 @@ const storedHealthSchema = z
 
 export type DatabaseBackupTerminalState = z.input<typeof terminalStateSchema>
 
-export type DatabaseBackupStatus =
-  | {
-      errorCode: null
-      lastAttemptAt: null
-      lastSuccessAt: null
-      status: "never-run"
-    }
-  | {
-      errorCode: null
-      lastAttemptAt: number
-      lastSuccessAt: number
-      status: "ok"
-    }
-  | {
-      errorCode: DatabaseBackupErrorCode
-      lastAttemptAt: number
-      lastSuccessAt: number | null
-      status: "failed"
-    }
-
+export type { DatabaseBackupStatus } from "../../shared/backup"
+import type { DatabaseBackupStatus } from "../../shared/backup"
 export class InvalidDatabaseBackupTerminalStateError extends Error {
   override readonly name = "InvalidDatabaseBackupTerminalStateError"
 }

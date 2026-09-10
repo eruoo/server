@@ -1,7 +1,6 @@
 import { drizzle } from "drizzle-orm/d1"
 import type { Context } from "hono"
 
-import type { WorkerAuthEnv } from "./auth"
 import { securityAuditEvents } from "./db/schema"
 import type { AppBindings } from "./http/types"
 
@@ -44,7 +43,10 @@ export interface AuditEvent {
 }
 
 export function assertAuditSecret(secret: string): void {
-  if (new TextEncoder().encode(secret).byteLength < 32) {
+  if (
+    typeof secret !== "string" ||
+    new TextEncoder().encode(secret).byteLength < 32
+  ) {
     throw new InvalidAuditSecretError(
       "The audit HMAC secret must contain at least 32 UTF-8 bytes.",
     )
@@ -81,8 +83,42 @@ async function fingerprintIp(
   return toHex(signature)
 }
 
+const metadataFields: Record<AuditEventType, readonly string[]> = {
+  api_key_created: ["status"],
+  api_key_updated: ["status"],
+  api_key_revoked: ["status"],
+  api_key_expired: ["reason"],
+  api_key_rejected: ["reason"],
+  github_login: ["status"],
+  passkey_login: ["status"],
+  passkey_created: ["status"],
+  passkey_updated: ["status"],
+  passkey_deleted: ["status"],
+  oauth_grant_created: ["status"],
+  oauth_grant_revoked: [
+    "tokenType",
+    "deletedConsentCount",
+    "revokedRefreshTokenCount",
+  ],
+  oauth_refresh_reuse_detected: ["reason"],
+  sensitive_operation_denied: ["status"],
+  jwt_signing_key_rotated: ["algorithm"],
+  security_configuration_changed: ["setting"],
+  database_restore_completed: ["source", "target"],
+}
+function auditMetadata(event: AuditEvent): string | null {
+  const allowed = metadataFields[event.type]
+  const entries = Object.entries(event.metadata ?? {}).filter(
+    ([key, value]) =>
+      allowed.includes(key) &&
+      (typeof value !== "string" || value.length <= 256) &&
+      (typeof value !== "number" || Number.isFinite(value)),
+  )
+  return entries.length ? JSON.stringify(Object.fromEntries(entries)) : null
+}
+
 export async function recordAuditEvent(
-  env: Pick<WorkerAuthEnv, "AUDIT_IP_HASH_SECRET" | "DB">,
+  env: Pick<Env, "AUDIT_IP_HASH_SECRET" | "DB">,
   ipAddress: string | null,
   requestId: string,
   event: AuditEvent,
@@ -96,7 +132,7 @@ export async function recordAuditEvent(
     credentialId: event.credentialId,
     id: crypto.randomUUID(),
     ipFingerprint,
-    metadata: event.metadata ? JSON.stringify(event.metadata) : null,
+    metadata: auditMetadata(event),
     occurredAt: Date.now(),
     outcome: event.outcome,
     requestId,

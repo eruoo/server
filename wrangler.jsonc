@@ -1,117 +1,59 @@
 {
-  "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "eruoo-server",
-  "main": "./src/worker/index.ts",
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "eruoo-server-v2",
+  "main": "src/worker/index.ts",
   "compatibility_date": "2026-08-19",
   "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": false,
-  "preview_urls": false,
-  "assets": {
-    "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api", "/api/*", "/problems/*", "/.well-known/*"],
-  },
-  "version_metadata": {
-    "binding": "CF_VERSION_METADATA",
-  },
-  "observability": {
-    "enabled": true,
-    "logs": {
-      "enabled": true,
-      "head_sampling_rate": 1,
-      "invocation_logs": true,
-    },
-    "traces": {
-      "enabled": false,
-      "head_sampling_rate": 0,
-    },
-  },
-  "triggers": {
-    "crons": [],
-  },
-  "vars": {
-    "APP_ENV": "development",
-    "OWNER_GITHUB_ID": "50254496",
-    "ALLOWED_CORS_ORIGINS": "[]",
-    "CF_ACCOUNT_ID": "",
-    "D1_DATABASE_ID": "",
-  },
-  "secrets": {
-    "required": [
-      "APP_ORIGIN",
-      "BETTER_AUTH_SECRETS",
-      "GITHUB_CLIENT_ID",
-      "GITHUB_CLIENT_SECRET",
-      "AUDIT_IP_HASH_SECRET",
-      "D1_EXPORT_API_TOKEN",
-    ],
-  },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "eruoo-server",
-      "migrations_table": "d1_migrations",
-      "migrations_dir": "./migrations",
-      "migrations_pattern": "./migrations/*.sql",
-      "remote": false,
-    },
-  ],
-  "r2_buckets": [
-    {
-      "binding": "BACKUPS",
-      "bucket_name": "eruoo-server-backups",
-      "remote": false,
-    },
-  ],
-  "workflows": [
-    {
-      "binding": "DATABASE_BACKUP_WORKFLOW",
-      "name": "eruoo-database-backup",
-      "class_name": "DatabaseBackupWorkflow",
-      "remote": false,
-    },
-  ],
-  "ratelimits": [
-    {
-      "name": "AUTH_RATE_LIMITER",
-      "namespace_id": "1001",
-      "simple": {
-        "limit": 1000,
-        "period": 60,
-      },
-    },
-    {
-      "name": "API_KEY_RATE_LIMITER",
-      "namespace_id": "1003",
-      "simple": {
-        "limit": 1000,
-        "period": 60,
-      },
-    },
-  ],
   "env": {
-    "production": {
-      "account_id": "1d204c847b5870d3438dc79534b91798",
-      "streaming_tail_consumers": [],
+    "staging": {
+      "name": "eruoo-server-staging",
+      "vars": {
+        "APP_ORIGIN": "https://eruoo-server-staging.l709937065.workers.dev",
+        "OWNER_GITHUB_ID": "50254496",
+        "CF_ACCOUNT_ID": "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID",
+        "D1_DATABASE_ID": "REPLACE_WITH_NEW_STAGING_D1_ID",
+      },
+      "workers_dev": true,
       "version_metadata": {
         "binding": "CF_VERSION_METADATA",
       },
-      "triggers": {
-        "crons": ["0 20 * * *", "0 19 * * SAT"],
+      "observability": {
+        "enabled": true,
+        "logs": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "invocation_logs": true,
+        },
+        "traces": {
+          "enabled": true,
+          "head_sampling_rate": 0.01,
+        },
       },
-      "routes": [
+      "d1_databases": [
         {
-          "pattern": "auth.eruoo.me",
-          "custom_domain": true,
+          "binding": "DB",
+          "database_name": "eruoo-server-staging-v2",
+          "database_id": "REPLACE_WITH_NEW_STAGING_D1_ID",
         },
       ],
-      "vars": {
-        "APP_ENV": "production",
-        "APP_ORIGIN": "https://auth.eruoo.me",
-        "OWNER_GITHUB_ID": "50254496",
-        "ALLOWED_CORS_ORIGINS": "[]",
-        "CF_ACCOUNT_ID": "1d204c847b5870d3438dc79534b91798",
-        "D1_DATABASE_ID": "652f931e-a445-46fa-bc2b-72be095fdc01",
-      },
+      "ratelimits": [
+        {
+          "name": "AUTH_RATE_LIMITER",
+          "namespace_id": "1001",
+          "simple": {
+            "limit": 10,
+            "period": 60,
+          },
+        },
+        {
+          "name": "API_KEY_RATE_LIMITER",
+          "namespace_id": "1003",
+          "simple": {
+            "limit": 5,
+            "period": 60,
+          },
+        },
+      ],
       "secrets": {
         "required": [
           "BETTER_AUTH_SECRETS",
@@ -121,31 +63,53 @@
           "D1_EXPORT_API_TOKEN",
         ],
       },
-      "d1_databases": [
-        {
-          "binding": "DB",
-          "database_name": "eruoo-server",
-          "database_id": "652f931e-a445-46fa-bc2b-72be095fdc01",
-          "migrations_table": "d1_migrations",
-          "migrations_dir": "./migrations",
-          "migrations_pattern": "./migrations/*.sql",
-          "remote": false,
-        },
-      ],
+      "triggers": {
+        "crons": ["0 20 * * *", "0 19 * * *"],
+      },
       "r2_buckets": [
         {
           "binding": "BACKUPS",
-          "bucket_name": "eruoo-server-backups",
-          "remote": false,
+          "bucket_name": "eruoo-server-backups-v2-staging",
         },
       ],
       "workflows": [
         {
           "binding": "DATABASE_BACKUP_WORKFLOW",
-          "name": "eruoo-database-backup",
+          "name": "eruoo-server-backup-v2-staging",
           "class_name": "DatabaseBackupWorkflow",
         },
       ],
+      "assets": {
+        "binding": "ASSETS",
+        "directory": "./dist/client",
+        "not_found_handling": "single-page-application",
+        "run_worker_first": [
+          "/api/*",
+          "/.well-known/*",
+          "/problems/*",
+          "/health",
+        ],
+      },
+    },
+    "production": {
+      "name": "eruoo-server-production",
+      "workers_dev": false,
+      "vars": {
+        "APP_ORIGIN": "https://auth.eruoo.me",
+        "OWNER_GITHUB_ID": "50254496",
+        "CF_ACCOUNT_ID": "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID",
+        "D1_DATABASE_ID": "REPLACE_WITH_NEW_PRODUCTION_D1_ID",
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "eruoo-server-production-v2",
+          "database_id": "REPLACE_WITH_NEW_PRODUCTION_D1_ID",
+        },
+      ],
+      "version_metadata": {
+        "binding": "CF_VERSION_METADATA",
+      },
       "ratelimits": [
         {
           "name": "AUTH_RATE_LIMITER",
@@ -164,6 +128,128 @@
           },
         },
       ],
+      "observability": {
+        "enabled": true,
+        "logs": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "invocation_logs": true,
+        },
+        "traces": {
+          "enabled": true,
+          "head_sampling_rate": 0.01,
+        },
+      },
+      "secrets": {
+        "required": [
+          "BETTER_AUTH_SECRETS",
+          "GITHUB_CLIENT_ID",
+          "GITHUB_CLIENT_SECRET",
+          "AUDIT_IP_HASH_SECRET",
+          "D1_EXPORT_API_TOKEN",
+        ],
+      },
+      "triggers": {
+        "crons": ["0 20 * * *", "0 19 * * *"],
+      },
+      "r2_buckets": [
+        {
+          "binding": "BACKUPS",
+          "bucket_name": "eruoo-server-backups-v2-production",
+        },
+      ],
+      "workflows": [
+        {
+          "binding": "DATABASE_BACKUP_WORKFLOW",
+          "name": "eruoo-server-backup-v2-production",
+          "class_name": "DatabaseBackupWorkflow",
+        },
+      ],
+      "assets": {
+        "binding": "ASSETS",
+        "directory": "./dist/client",
+        "not_found_handling": "single-page-application",
+        "run_worker_first": [
+          "/api/*",
+          "/.well-known/*",
+          "/problems/*",
+          "/health",
+        ],
+      },
     },
   },
+  "vars": {
+    "APP_ORIGIN": "http://localhost:5173",
+    "OWNER_GITHUB_ID": "50254496",
+    "CF_ACCOUNT_ID": "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID",
+    "D1_DATABASE_ID": "00000000-0000-0000-0000-000000000000",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "eruoo-server-local",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+    },
+  ],
+  "version_metadata": {
+    "binding": "CF_VERSION_METADATA",
+  },
+  "ratelimits": [
+    {
+      "name": "AUTH_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 10,
+        "period": 60,
+      },
+    },
+    {
+      "name": "API_KEY_RATE_LIMITER",
+      "namespace_id": "1002",
+      "simple": {
+        "limit": 5,
+        "period": 60,
+      },
+    },
+  ],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.01,
+    },
+  },
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist/client",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/.well-known/*", "/problems/*", "/health"],
+  },
+  "secrets": {
+    "required": [
+      "BETTER_AUTH_SECRETS",
+      "GITHUB_CLIENT_ID",
+      "GITHUB_CLIENT_SECRET",
+      "AUDIT_IP_HASH_SECRET",
+      "D1_EXPORT_API_TOKEN",
+    ],
+  },
+  "r2_buckets": [
+    {
+      "binding": "BACKUPS",
+      "bucket_name": "eruoo-server-backups-v2-local",
+    },
+  ],
+  "workflows": [
+    {
+      "binding": "DATABASE_BACKUP_WORKFLOW",
+      "name": "eruoo-server-backup-v2-local",
+      "class_name": "DatabaseBackupWorkflow",
+    },
+  ],
 }

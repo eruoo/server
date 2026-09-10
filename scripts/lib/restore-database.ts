@@ -16,6 +16,10 @@ import {
   BACKUP_SINGLE_OBJECT_MAX_BYTES,
 } from "../../src/worker/backup/constants"
 import { createBackupObjectDescriptor } from "../../src/worker/backup/storage"
+import {
+  migrationReceiptTable,
+  migrationReceiptTableSql,
+} from "./migration-receipt"
 import { isProductionMigrationFileName } from "./production-migrations"
 
 const uuidPattern =
@@ -76,6 +80,7 @@ export interface ValidatedBackupDescriptor {
 }
 
 export interface InspectedBackupSql {
+  hasDeploymentReceipt: boolean
   migration: {
     count: number
     digest: string
@@ -331,6 +336,11 @@ function createImportAuthorizer() {
         )
           ? sqliteConstants.SQLITE_OK
           : sqliteConstants.SQLITE_DENY
+      case sqliteConstants.SQLITE_FUNCTION:
+        // D1 exports CR/LF text as nested replace(..., char(10|13)) calls.
+        return ["replace", "char"].includes(argument2?.toLowerCase() ?? "")
+          ? sqliteConstants.SQLITE_OK
+          : sqliteConstants.SQLITE_DENY
       default:
         return sqliteConstants.SQLITE_DENY
     }
@@ -366,6 +376,7 @@ function createReadOnlyAuthorizer() {
 }
 
 const scrubDeleteTables = new Set([
+  migrationReceiptTable,
   "oauthAccessToken",
   "oauthRefreshToken",
   "oauthRefreshTokenFamilyRevocation",
@@ -671,6 +682,12 @@ function assertRepositorySchema(
     )) {
       expectedDatabase.exec(migration.sql)
     }
+    if (
+      actualSchema.some(
+        (row) => row.type === "table" && row.name === migrationReceiptTable,
+      )
+    )
+      expectedDatabase.exec(migrationReceiptTableSql)
     const expectedSchema = queryAll<SqliteSchemaRow>(
       expectedDatabase,
       'SELECT type, name, tbl_name AS "tableName", sql FROM sqlite_schema ORDER BY type, name',
@@ -689,6 +706,15 @@ function assertRepositorySchema(
 }
 
 function assertScrubbed(database: DatabaseSync): void {
+  if (
+    queryAll(
+      database,
+      "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='deployment_migrations'",
+    ).length &&
+    queryAll(database, "SELECT databaseId FROM deployment_migrations LIMIT 1")
+      .length
+  )
+    throw new Error("Deployment receipt was not cleared")
   for (const table of scrubEmptyTables) {
     const rows = queryAll(database, `SELECT * FROM "${table}" LIMIT 1`)
     if (rows.length !== 0) {
@@ -814,11 +840,14 @@ export async function inspectBackupSql(
     assertRepositorySchema(schema, repositoryMigrations, migration.count)
 
     database.setAuthorizer(createScrubAuthorizer())
-    database.exec(`BEGIN IMMEDIATE;\n${createCredentialScrubSql()}\nCOMMIT;`)
+    database.exec(
+      `BEGIN IMMEDIATE;\n${createCredentialScrubSql(tables.has(migrationReceiptTable))}\nCOMMIT;`,
+    )
     database.setAuthorizer(createReadOnlyAuthorizer())
     assertScrubbed(database)
 
     return {
+      hasDeploymentReceipt: tables.has(migrationReceiptTable),
       migration,
       md5: createHash("md5").update(bytes).digest("hex"),
       rawBytes: bytes.byteLength,
@@ -852,7 +881,7 @@ function createStaticOAuthSeedSql(): string {
   return statements.join("\n")
 }
 
-export function createCredentialScrubSql(): string {
+export function createCredentialScrubSql(hasDeploymentReceipt = false): string {
   return [
     'DELETE FROM "oauthAccessToken";',
     'DELETE FROM "oauthRefreshToken";',
@@ -872,6 +901,7 @@ export function createCredentialScrubSql(): string {
     'DELETE FROM "security_audit_events";',
     'DELETE FROM "maintenance_lease";',
     'DELETE FROM "database_backup_health";',
+    ...(hasDeploymentReceipt ? ['DELETE FROM "deployment_migrations";'] : []),
     createStaticOAuthSeedSql(),
   ].join("\n")
 }

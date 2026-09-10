@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto"
 import { readdir, readFile, stat } from "node:fs/promises"
 import path from "node:path"
 
+import { createMigrationReceiptSql } from "./lib/migration-receipt"
 import {
   createCredentialScrubSql,
   inspectBackupSql,
@@ -63,7 +65,16 @@ if (sql.md5 !== descriptor.etag) {
 const plan = {
   externalOperationsPerformed: false,
   generatedSql: {
-    credentialScrub: createCredentialScrubSql(),
+    credentialScrub: createCredentialScrubSql(sql.hasDeploymentReceipt),
+    targetMigrationReceipt: createMigrationReceiptSql(
+      target.databaseId,
+      Object.fromEntries(
+        repositoryMigrations.map((migration) => [
+          migration.name,
+          createHash("sha256").update(migration.sql).digest("hex"),
+        ]),
+      ),
+    ),
   },
   migrationState: sql.migration,
   nextAuthorizedSteps: [
@@ -71,6 +82,7 @@ const plan = {
     "Import the validated raw SQL snapshot into only that isolated D1.",
     "Apply repository migrations forward from the restored d1_migrations ledger.",
     "Run credentialScrub against the isolated D1, then validate all credentials and audit rows are absent.",
+    "After applying all repository migrations and validating the scrub, record targetMigrationReceipt for this isolated database only.",
     "Regenerate Ed25519 and RS256 JWKS in the isolated environment and run authentication smoke tests.",
     "Write database_restore_completed only after validation; switching the production binding requires separate authorization.",
   ],

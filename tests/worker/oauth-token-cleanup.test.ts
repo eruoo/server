@@ -10,7 +10,7 @@ import {
   cleanupExpiredOAuthTokenState,
   createOAuthRefreshFamilyRevocationCutoff,
   OAUTH_REFRESH_FAMILY_REVOCATION_RETENTION_MS,
-} from "../../src/worker/auth/oauth-token-cleanup"
+} from "../../src/worker/oauth/cleanup"
 import { DAILY_CLEANUP_SCHEDULE } from "../../src/worker/schedules"
 
 const now = 2_000_000_000_000

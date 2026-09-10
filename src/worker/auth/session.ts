@@ -1,173 +1,118 @@
-import type { MiddlewareHandler } from "hono"
+import type { Context, MiddlewareHandler } from "hono"
 
-import type { Principal } from "../../shared/principal"
 import { scheduleAuditEvent } from "../audit"
-import { getInitializedAuth } from "../auth"
-import { getRuntimeConfig } from "../config"
-import { problem } from "../http/problem"
-import type { AppBindings } from "../http/types"
+import { createAuth } from "../auth"
+import { problem } from "../http/response"
+import type { AppBindings, OwnerSession } from "../http/types"
 import {
   hasUnsupportedBodyAccessToken,
   inspectCredentialCarriers,
 } from "./carriers"
 
-const recentAuthenticationWindowMs = 15 * 60 * 1000
-
-export function authDateToEpochMilliseconds(
-  value: unknown,
-): number | undefined {
-  if (value instanceof Date) {
-    const timestamp = value.getTime()
-    return Number.isFinite(timestamp) ? timestamp : undefined
+export function getRequestAuth(c: Context<AppBindings>) {
+  let auth = c.get("auth")
+  if (!auth) {
+    auth = createAuth(
+      {
+        appOrigin: c.env.APP_ORIGIN,
+        betterAuthSecrets: c.env.BETTER_AUTH_SECRETS,
+        githubClientId: c.env.GITHUB_CLIENT_ID,
+        githubClientSecret: c.env.GITHUB_CLIENT_SECRET,
+        ownerGitHubId: c.env.OWNER_GITHUB_ID,
+        onSigningKeyCreated: (key) =>
+          scheduleAuditEvent(c, {
+            type: "jwt_signing_key_rotated",
+            outcome: "success",
+            credentialId: key.id,
+            metadata: { algorithm: key.alg ?? "EdDSA" },
+          }),
+        onSessionCreated: (session) =>
+          c.set("principal", {
+            subject: session.userId,
+            sessionId: session.id,
+          }),
+      },
+      c.env.DB,
+    )
+    c.set("auth", auth)
   }
-
-  if (typeof value === "string" || typeof value === "number") {
-    const timestamp = new Date(value).getTime()
-    return Number.isFinite(timestamp) ? timestamp : undefined
-  }
+  return auth
 }
 
-async function resolveOwnerSession(
-  context: Parameters<MiddlewareHandler<AppBindings>>[0],
-  options: { authoritative?: boolean } = {},
-): Promise<Principal | Response> {
-  const inspection = inspectCredentialCarriers(context.req.raw)
-  const bodyAccessToken = await hasUnsupportedBodyAccessToken(context.req.raw)
-
-  if (inspection.invalid || bodyAccessToken) {
-    return problem(context, {
-      detail:
-        "The request contains an invalid or ambiguous credential carrier.",
-      slug: "invalid-request",
-    })
-  }
-
+export async function readOwnerSession(
+  c: Context<AppBindings>,
+  recent = false,
+  persistent = recent,
+): Promise<OwnerSession | ReturnType<typeof problem>> {
+  const cached = c.get("principal")
   if (
-    inspection.carriers.length !== 1 ||
-    inspection.carriers[0] !== "session"
-  ) {
-    return problem(context, {
-      detail: "A valid owner session is required.",
-      slug: "authentication-required",
-    })
-  }
-
+    cached &&
+    c.get("sessionRead") &&
+    (!persistent || c.get("sessionRead") === "strong")
+  )
+    return cached
+  const inspection = inspectCredentialCarriers(c.req.raw)
+  if (inspection.invalid || (await hasUnsupportedBodyAccessToken(c.req.raw)))
+    return problem("invalid-request", c.get("requestId"))
+  if (inspection.carriers.length === 0)
+    return problem("authentication-required", c.get("requestId"))
+  if (inspection.carriers[0] !== "session")
+    return problem("permission-denied", c.get("requestId"))
   try {
-    const auth = await getInitializedAuth(context.env)
-    const result = await auth.api.getSession({
-      headers: context.req.raw.headers,
-      // Sensitive operations must bypass the session cookie cache so that a
-      // revoked or rotated session cannot keep authorizing credential
-      // mutations within the bounded cache window.
-      ...(options.authoritative ? { query: { disableCookieCache: true } } : {}),
+    const result = await getRequestAuth(c).api.getSession({
+      headers: c.req.raw.headers,
+      query: { disableCookieCache: persistent },
+      returnHeaders: true,
     })
-
-    if (!result) {
-      return problem(context, {
-        detail: "A valid owner session is required.",
-        slug: "invalid-credential",
-      })
-    }
-
-    const config = getRuntimeConfig(context.env)
-    const ownerAccount = await context.env.DB.prepare(
-      `SELECT 1
-       FROM account
-       WHERE userId = ?1 AND providerId = 'github' AND accountId = ?2
-       LIMIT 1`,
+    for (const cookie of result.headers.getSetCookie())
+      c.get("responseCookies").push(cookie)
+    if (!result.response)
+      return problem("invalid-credential", c.get("requestId"))
+    const { user, session } = result.response
+    const owner = await c.env.DB.prepare(
+      "SELECT 1 FROM account WHERE userId=? AND providerId='github' AND accountId=? LIMIT 1",
     )
-      .bind(result.user.id, config.ownerGitHubId)
+      .bind(user.id, c.env.OWNER_GITHUB_ID)
       .first()
-
-    if (!ownerAccount) {
-      return problem(context, {
-        detail: "A valid owner session is required.",
-        slug: "invalid-credential",
-      })
-    }
-
-    const session = result.session as typeof result.session & {
-      reauthenticatedAt?: unknown
-    }
-    const reauthenticatedAt = authDateToEpochMilliseconds(
-      session.reauthenticatedAt,
+    if (!owner) return problem("invalid-credential", c.get("requestId"))
+    const raw = (
+      session as typeof session & { reauthenticatedAt?: string | number | Date }
+    ).reauthenticatedAt
+    const reauthenticatedAt =
+      raw === undefined ? undefined : new Date(raw).getTime()
+    if (
+      recent &&
+      (reauthenticatedAt === undefined ||
+        !Number.isFinite(reauthenticatedAt) ||
+        Date.now() < reauthenticatedAt ||
+        Date.now() - reauthenticatedAt > 900_000)
     )
-
-    return {
-      authMethod: "session",
-      permissions: [],
-      ...(reauthenticatedAt === undefined ? {} : { reauthenticatedAt }),
-      scopes: [],
-      subject: result.user.id,
+      return problem("recent-authentication-required", c.get("requestId"))
+    const principal = {
+      subject: user.id,
+      sessionId: session.id,
+      reauthenticatedAt,
     }
-  } catch (error) {
-    console.error({
-      event: "session_dependency_failed",
-      message: error instanceof Error ? error.name : "unknown_error",
-      requestId: context.get("requestId"),
-    })
-
-    return problem(context, {
-      detail: "The session could not be verified.",
-      slug: "service-unavailable",
-    })
+    c.set("sessionRead", recent ? "strong" : "weak")
+    c.set("principal", principal)
+    return principal
+  } catch {
+    return problem("service-unavailable", c.get("requestId"))
   }
 }
-
 export const requireOwnerSession: MiddlewareHandler<AppBindings> = async (
-  context,
+  c,
   next,
 ) => {
-  const principal = await resolveOwnerSession(context)
-
-  if (principal instanceof Response) {
-    return principal
-  }
-
-  context.set("principal", principal)
+  const result = await readOwnerSession(c)
+  if (result instanceof Response) return result
   await next()
 }
-
 export const requireRecentOwnerSession: MiddlewareHandler<AppBindings> = async (
-  context,
+  c,
   next,
 ) => {
-  const principal = await resolveOwnerSession(context, {
-    authoritative: true,
-  })
-
-  if (principal instanceof Response) {
-    scheduleAuditEvent(context, {
-      metadata: { reason: "credential_rejected", status: principal.status },
-      outcome: "failure",
-      type: "sensitive_operation_denied",
-    })
-    return principal
-  }
-
-  const authenticationAge =
-    principal.reauthenticatedAt === undefined
-      ? undefined
-      : Date.now() - principal.reauthenticatedAt
-
-  if (
-    authenticationAge === undefined ||
-    authenticationAge < 0 ||
-    authenticationAge > recentAuthenticationWindowMs
-  ) {
-    scheduleAuditEvent(context, {
-      metadata: { reason: "recent_authentication_required", status: 403 },
-      outcome: "failure",
-      subjectId: principal.subject,
-      type: "sensitive_operation_denied",
-    })
-    return problem(context, {
-      detail:
-        "This operation requires authentication within the last 15 minutes.",
-      slug: "recent-authentication-required",
-    })
-  }
-
-  context.set("principal", principal)
+  const result = await readOwnerSession(c, true)
+  if (result instanceof Response) return result
   await next()
 }

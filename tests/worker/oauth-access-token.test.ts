@@ -18,7 +18,7 @@ import {
   OAUTH_ACCESS_TOKEN_SIGNING_ALGORITHMS,
   type OAuthAccessTokenVerificationPolicy,
   verifyOAuthAccessToken,
-} from "../../src/worker/auth/oauth-access-token"
+} from "../../src/worker/oauth/access-token"
 
 const issuer = "https://auth.example.invalid"
 const audience = "https://api.example.invalid"

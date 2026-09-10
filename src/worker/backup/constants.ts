@@ -1,7 +1,7 @@
 export const AUDIT_EVENTS_TABLE = "security_audit_events"
 export const D1_MIGRATIONS_TABLE = "d1_migrations"
 
-export const BACKUP_OBJECT_PREFIX = "d1"
+export const BACKUP_OBJECT_PREFIX = "d1/daily"
 export const BACKUP_OBJECT_SUFFIX = ".sql"
 export const BACKUP_FORMAT_VERSION = "2"
 
