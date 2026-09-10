@@ -1,0 +1,142 @@
+import { env, SELF } from "cloudflare:test"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+beforeEach(async () => {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM user"),
+    env.DB.prepare("DELETE FROM verification"),
+    env.DB.prepare("DELETE FROM rateLimit"),
+  ])
+})
+afterEach(() => vi.restoreAllMocks())
+
+function githubProfile(id: number) {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = new URL(input instanceof Request ? input.url : String(input))
+    if (
+      url.origin === "https://github.com" &&
+      url.pathname === "/login/oauth/access_token"
+    )
+      return Response.json({
+        access_token: "synthetic-token",
+        token_type: "bearer",
+        scope: "read:user user:email",
+      })
+    if (url.origin === "https://api.github.com" && url.pathname === "/user")
+      return Response.json({
+        id,
+        login: "synthetic",
+        name: "Synthetic",
+        email: "synthetic@example.invalid",
+      })
+    if (
+      url.origin === "https://api.github.com" &&
+      url.pathname === "/user/emails"
+    )
+      return Response.json([
+        { email: "synthetic@example.invalid", primary: true, verified: true },
+      ])
+    throw new Error("Unexpected outbound request")
+  })
+}
+
+async function login() {
+  const start = await SELF.fetch("http://local.test/api/auth/sign-in/social", {
+    method: "POST",
+    headers: {
+      origin: "http://local.test",
+      "content-type": "application/json",
+      "cf-connecting-ip": `192.0.2.${Math.floor(Math.random() * 200) + 1}`,
+    },
+    body: JSON.stringify({
+      provider: "github",
+      callbackURL: "/",
+      disableRedirect: true,
+    }),
+  })
+  expect(start.status).toBe(200)
+  const result = (await start.json()) as { url: string }
+  const authorize = new URL(result.url)
+  expect(authorize.searchParams.get("code_challenge_method")).toBe("S256")
+  const state = authorize.searchParams.get("state")!
+  const cookies = start.headers
+    .getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ")
+  return SELF.fetch(
+    `http://local.test/api/auth/callback/github?code=synthetic-code&state=${encodeURIComponent(state)}`,
+    { headers: { cookie: cookies }, redirect: "manual" },
+  )
+}
+
+describe("real GitHub callback owner admission", () => {
+  it("creates and reauthenticates only the verified owner", async () => {
+    githubProfile(50254496)
+    const first = await login()
+    expect(first.status).toBe(302)
+    expect(first.headers.get("set-cookie")).toContain("eruoo.session_token=")
+    const second = await login()
+    expect(second.headers.get("set-cookie")).toContain("eruoo.session_token=")
+    expect(
+      await env.DB.prepare("SELECT count(*) AS count FROM user").first("count"),
+    ).toBe(1)
+    expect(
+      await env.DB.prepare("SELECT count(*) AS count FROM session").first(
+        "count",
+      ),
+    ).toBe(2)
+  })
+
+  it("rejects a non-owner through the actual handler without creating a Session", async () => {
+    githubProfile(12345)
+    for (let i = 0; i < 2; i++) {
+      const response = await login()
+      expect(response.headers.get("location")).toContain("owner_not_allowed")
+      expect(response.headers.get("set-cookie") ?? "").not.toContain(
+        "eruoo.session_token=",
+      )
+    }
+    expect(
+      await env.DB.prepare("SELECT count(*) AS count FROM session").first(
+        "count",
+      ),
+    ).toBe(0)
+  })
+})
+
+it("aborts a stalled GitHub response body and does not issue a Session", async () => {
+  const timeout = AbortSignal.timeout.bind(AbortSignal)
+  const signalFactory = vi
+    .spyOn(AbortSignal, "timeout")
+    .mockImplementation((milliseconds) => {
+      expect(milliseconds).toBe(10000)
+      return timeout(20)
+    })
+  vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (_input, init) =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            init?.signal?.addEventListener(
+              "abort",
+              () => controller.error(new Error("GitHub deadline")),
+              { once: true },
+            )
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+  )
+  const response = await login()
+  expect(response.status).toBe(302)
+  expect(response.headers.get("location")).toContain("error=")
+  expect(response.headers.get("set-cookie") ?? "").not.toContain(
+    "eruoo.session_token=",
+  )
+  expect(signalFactory).toHaveBeenCalled()
+  expect(
+    await env.DB.prepare("SELECT count(*) AS count FROM session").first(
+      "count",
+    ),
+  ).toBe(0)
+})

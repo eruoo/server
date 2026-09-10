@@ -1,7 +1,7 @@
 # 协议与 HTTP 契约
 
 > 属于 [完整架构规格](architecture.md)，状态与其一致。本文维护外部行为；应用架构、安全窗口和运维策略分别由配套规格维护。
-> 设计参考来源：当前 `docs/openapi.json` 与历史实现的 auth/app/oauth 模块。owner 已明确允许数据从零、Desktop 同步改版并放弃旧版本接口兼容。本文定义服务端与新版 Desktop 的共同目标，旧客户端、schema、数据和备份格式不构成兼容约束。
+> 设计参考来源：当前 `docs/openapi.json` 与历史实现的 auth/app/oauth 模块。owner 已明确允许数据从零、Desktop 同步改版并放弃旧版本接口兼容。最新 Q7 将 Desktop 客户端延后；本文的服务端契约当前实施，客户端目标保留供后续使用。本文定义服务端与未来新版 Desktop 的共同目标，旧客户端、schema、数据和备份格式不构成兼容约束。
 
 ## 1. 请求边界
 
@@ -27,6 +27,8 @@ Worker 先识别精确 path/method，再执行该 operation 的认证、限流�
 - 通用 body 最大 1 MiB，流式计数，不能只信 Content-Length。需要 body 的 operation 检查媒体类型；不接收无需求的上传。
 
 ## 2. 路由清单
+
+下列清单描述完整目标；实际开放范围由 [验收规格 §5.2](acceptance.md#52-各切片开放的能力) 定义。尚未交付的端点不注册，也不进入该版本生成的 OpenAPI 或 discovery。路由关闭必须在 Auth 初始化和 D1 访问前生效。
 
 ### 2.1 自有 API
 
@@ -107,7 +109,7 @@ OAuth/Better Auth 不套自有成功/错误包装。token body 超 1 MiB 返回 
 
 ## 4. Desktop 授权契约
 
-以配套新版 Desktop 为验收对象。首次切换可要求升级客户端并重新登录授权，不迁移旧凭证。端点、参数、响应或错误行为需要变化时，在同一功能切片同步修改本规格、服务端与客户端；不维护两套协议或以旧版无修改可用作为门槛。下列安全规则继续作为目标测试依据。
+本次验收 OAuth 服务端与 Web 授权管理，使用合成调用方执行真实插件协议测试；配套新版 Desktop 的实施与联调暂缓。首次切换可要求升级客户端并重新登录授权，不迁移旧凭证。端点、参数、响应或错误行为需要变化时，在客户端启动实施后，同一功能切片同步修改本规格、服务端与客户端；不维护两套协议或以旧版无修改可用作为门槛。下列安全规则继续作为目标测试依据。
 
 ### 4.1 client、redirect 与 continuation
 
@@ -132,6 +134,8 @@ OAuth/Better Auth 不套自有成功/错误包装。token body 超 1 MiB 返回 
 authorization 与 code exchange 必须携带相同 resource；refresh 省略时继承，提供时不得扩大原集合。当前只有一个外部 resource，因此多个相同值视作同一目标，空值/未知值/不同值为 `invalid_target`。客户端不得请求 UserInfo 作为额外 resource。
 
 scope 按集合处理，但输入重复值拒绝为 `invalid_scope`。所有已知 singleton 参数在原始 query/form 层检查重复，包括 response_type、client_id、redirect_uri、state、nonce、prompt、code_challenge/method、grant_type、code、code_verifier、refresh_token、token、token_type_hint；即使值相同也拒绝。`resource` 按上段多值语义处理。
+
+`grant_type` 禁止首尾空白（包括制表符、换行与 Unicode 空白），在进入原生插件前返回 `invalid_request`；不能让插件去除空白后执行被外层 resource/family 检查跳过的操作。
 
 业务 resource 的 allowedScopes 包含表中五个 scope，保持 OIDC 签发能力。无 openid 时 aud 仅含业务 resource；有 openid 时仅含业务 resource 与 discovery 的 UserInfo URL 两项，不允许重复和额外 audience。Web/Mobile 未启用，不能因为 ID 已保留而获得任何授权。
 
@@ -162,11 +166,11 @@ Refresh token 30 天 idle sliding，无额外绝对寿命，每次成功轮换�
 3. owner 按 client 撤销，在同一 D1 batch 为已知 family 写 tombstone、撤销 refresh、删除 consent；commit 是撤销的持久起点。
 4. refresh 在库操作前后检查 tombstone。撤销跨过签发时，即使 successor 晚插入，也必须被清理且该响应为 `invalid_grant`。
 5. 超窗请求在执行中跨过窗口，且库精确返回 reuse 相关 `invalid_grant` 时，后置检查补齐 tombstone；合法窗口内成功的等价重放不能仅因响应迟到而误撤销。
-6. RFC 7009 的 hint 仅作提示；错误 hint 不能放过真实 refresh token。已轮换甚至已到期的可识别旧记录，若仍能关联活动 successor，也必须撤销 family。未知/已经撤销的 refresh 保持幂等成功。
+6. RFC 7009 的 hint 仅作提示；错误 hint 不能放过真实 refresh token。family 识别复用原生撤销入口的 token 解析，包括库接受的前缀形式，不在解析前按另一份字符串查找记录。已轮换甚至已到期的可识别旧记录，若仍能关联活动 successor，也必须撤销 family。未知/已经撤销的 refresh 保持幂等成功。
 7. self-contained access token 无即时逐 token 撤销能力，真实 access token 返回既有 `unsupported_token_type`，不能受错误 hint 影响而假装成功。已签发 access token 最长继续有效 1 小时，UI 明示。
 8. 审计以持久撤销赢家及其不可变 family 信息驱动；完成后才记 success，重试不重复。安全状态必须在同步路径提交，只有审计通知可延后。
 
-Tauri Rust 负责 refresh 存取、轮换和注销，存入 Stronghold，不向 WebView JavaScript 暴露。注销必须服务端撤销 refresh，再清本地凭证；失败时保留“服务端撤销未确认”状态。
+Tauri Rust 负责 refresh 存取、轮换和注销，存入 Stronghold，不向 WebView JavaScript 暴露。客户端成功、失败及退出顺序见 [§4.6](#46-desktop-状态与流程)。
 
 ### 4.5 OAuth 清理边界
 
@@ -177,25 +181,52 @@ Tauri Rust 负责 refresh 存取、轮换和注销，存入 Stronghold，不向 
 - tombstone：revokedAt 早于 31 天边界且 family 无未到期 refresh 才删除。
 - 查询由现有 replay、expiry、family 组合索引支撑；按有界批次清理，不把历史 token 全部读入 JS。
 
+### 4.6 Desktop 状态与流程
+
+本节是延期客户端的目标规格，不属于当前 Web 交付或 R5 服务端通过条件。下文涉及 R5 的客户端要求均在实际开始 Desktop 工作时执行。
+
+Rust 维护唯一认证控制器，协调同一凭证的所有窗口；WebView 只收到身份摘要、操作结果和状态，不接触 token、PKCE verifier 或 Stronghold 解锁材料，也不获得可读取认证存储的通用插件权限。不另外建立 JavaScript token 缓存、浏览器 Session 镜像或后台保活服务。
+
+| 状态                       | 客户端行为                                                                         |
+| -------------------------- | ---------------------------------------------------------------------------------- |
+| checking                   | 读取本地凭证；存储不可用不当作“没有凭证”，不发受保护请求                           |
+| authorizing                | 系统浏览器授权中；可以取消，同一时刻只有一次登录流程                               |
+| authenticated / refreshing | 使用有效 access token；需要续期时合并为一次 refresh，依赖新 token 的请求等待结果   |
+| unavailable                | 网络、依赖或本地持久化失败；显示原因和恢复动作，不伪装成登录过期，不循环打开浏览器 |
+| signing-out                | 停止授权请求，显示撤销和本地清理进度；失败保留未完成状态                           |
+| anonymous                  | 无凭证、已确认凭证失效，或退出已完成；可以重新登录                                 |
+
+**登录与取消**：Rust 先绑定 §4.1 允许的 loopback 地址和系统分配端口，再生成本次 state/nonce/PKCE 并打开系统浏览器。只接受当前流程的精确 callback path 与匹配 state；同一有效回调仅兑换一次 code。成功接收、取消或流程结束即关闭监听器；无关请求不能消费当前流程。取消或重新发起使旧 generation 失效，迟到的回调/HTTP 结果不能恢复登录。监听器生命周期依据 [RFC 8252 §8.3](https://datatracker.ietf.org/doc/html/rfc8252#section-8.3)。
+
+**持久化与恢复**：code exchange 的响应和适用的 ID token 校验通过后，先保存完整凭证记录并确认持久化成功，再发布已登录状态。轮换同样先保存 successor，再允许依赖新 token 的请求继续；不能把内存写入当作已经落盘，参见 [Stronghold 保存接口](https://v2.tauri.app/plugin/stronghold/)。保存失败停止该凭证的后续使用，明确提示存储失败；不得偷偷回用已轮换的旧 token。重启只接受完整记录，损坏记录要求重新登录；解锁失败提供重试，不自动覆盖存储。存储密钥不能硬编码、进入 WebView 或与密文一起明文保存；R5 须在目标系统验证现有安全存储接法，不能只凭选用 Stronghold 宣称安全。
+
+**按需刷新**：使用 token 响应的有效期，不能自行解码 access token 决定权限。到期或可信的 `invalid_token` 时由 Rust 合并刷新；没有用户使用时不定时续命。明确的 `invalid_grant` 使本地凭证失效并要求重新授权；网络超时、5xx 或存储错误保留故障状态。每次协议 HTTP 请求的客户端 deadline 为 10 秒，包含响应体；超时不表示服务端未轮换。结果未知时不自动重发 token POST：仅允许用户在 §4.4 的重试窗口内以同一请求参数重试，超过窗口重新授权，不能无限重放旧 refresh。窗口从首次发送时间保守计算；重启后不能确认窗口时也重新授权。code exchange 结果未知则重新发起登录，不盲目重兑 code。API mutation 不因 refresh 自动重放。
+
+**退出与竞争**：先失效当前 generation、停止新授权请求，并持久记录退出意图，再请求服务端撤销可识别的 refresh family；使用 §4.4 的旧 token family 识别覆盖在途轮换。收到撤销成功后删除本地凭证并确认保存，才报告退出完成。撤销失败显示“服务端撤销未确认”，保留仅供重试撤销的 Rust 凭证；本地清理失败显示“服务端已撤销，本地清理未完成”。重启遇到退出意图继续清理，不恢复已登录状态。退出意图本身保存失败也不能报告成功，应停止本次进程的凭证使用并提示重试。迟到的 refresh 不得覆盖退出状态或重新保存凭证。退出 Desktop 不代替浏览器 Session 退出，也不能缩短 §4.4 已声明的 access token 有效窗口。
+
+以上是客户端目标行为，尚未代表某个 Desktop 构建已实现。R5 必须记录实际客户端版本和持久化、取消、并发、退出失败的验证结果；不为这些状态新增服务端会话接口。
+
 ## 5. 契约维护与依赖依据
 
-实施时用 `@hono/zod-openapi` 的路由 schema 同时驱动输入验证、类型和 OpenAPI；响应做行为测试，尤其备份 union 和 OAuth 权限边界。`docs/openapi.json` 由生成器接管，原快照仅用于记录设计差异；契约的通过标准是本文与配套客户端测试，不是旧快照逐字段兼容。库原生端点使用插件类型与协议测试，不手写另一套兼容 SDK。
+实施时用 `@hono/zod-openapi` 的路由 schema 同时驱动输入验证、类型和 OpenAPI；响应做行为测试，尤其备份 union 和 OAuth 权限边界。`docs/openapi.json` 由生成器接管，原快照仅用于记录设计差异；契约的通过标准是本文与当前范围的协议测试，后续 Desktop 增加配套客户端测试，不是旧快照逐字段兼容。库原生端点使用插件类型与协议测试，不手写另一套兼容 SDK。
 
-R5 记录服务端 SHA、联调 Desktop 的精确版本/commit 与 code→refresh→revoke 结果；涉及跨端契约变更时，先完成配套新版客户端验收再启用对应能力。发布和回退选择契约匹配的版本组合，不依赖旧版兼容层。
+本次 R5 记录服务端代码与 code→refresh→revoke 协议测试；Desktop 开始实施后补充其精确版本/commit 与联调结果。涉及跨端契约变更时，先完成配套新版客户端验收再启用对应能力。发布和回退选择契约匹配的版本组合，不依赖旧版兼容层。
 
 认证依赖的版本策略由下表统一维护；三个插件不是 `better-auth/plugins` 的内置导出，必须按切片加入独立 npm 包并锁定精确版本。
 
-| npm 包                        | 目标版本 | 归属与当前验证状态                                                                                                           |
-| ----------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `better-auth`                 | `1.7.2`  | 已安装的核心基线；现有 GitHub/Session 测试不代表完整插件组合                                                                 |
-| `@better-auth/passkey`        | `1.7.2`  | R2 引入；[官方包定义](https://raw.githubusercontent.com/better-auth/better-auth/v1.7.2/packages/passkey/package.json)        |
-| `@better-auth/api-key`        | `1.7.2`  | R4 引入；[官方包定义](https://raw.githubusercontent.com/better-auth/better-auth/v1.7.2/packages/api-key/package.json)        |
-| `@better-auth/oauth-provider` | `1.7.2`  | R5 引入；[官方包定义](https://raw.githubusercontent.com/better-auth/better-auth/v1.7.2/packages/oauth-provider/package.json) |
+| npm 包                        | 目标版本 | 归属与当前验证状态                                                                                                                                              |
+| ----------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `better-auth`                 | `1.7.2`  | 已安装的核心基线；现有 GitHub/Session 测试不代表完整插件组合                                                                                                    |
+| `@better-auth/passkey`        | `1.7.2`  | 已引入，浏览器 WebAuthn 与实际端点测试通过；[官方包定义](https://raw.githubusercontent.com/better-auth/better-auth/v1.7.2/packages/passkey/package.json)        |
+| `@better-auth/api-key`        | `1.7.2`  | 已引入，原生端点及依赖故障测试通过；[官方包定义](https://raw.githubusercontent.com/better-auth/better-auth/v1.7.2/packages/api-key/package.json)                |
+| `@better-auth/oauth-provider` | `1.7.2`  | 已引入，code/refresh/revoke 和并发测试通过；[官方包定义](https://raw.githubusercontent.com/better-auth/better-auth/v1.7.2/packages/oauth-provider/package.json) |
 
-2026-09-09 已核对三个插件的 npm 1.7.2 发布记录及 `better-auth`、`@better-auth/core` peer 范围 `^1.7.2`。这些事实只证明依赖来源和版本可用；插件尚未加入当前依赖树，完整组合的 workerd/D1、初始化 I/O、请求隔离及协议行为仍须通过 A4/A7。旧资产清单的 1.7.0 仅作历史对照，不能与上述目标版本混装，也不顺带升级核心。
+2026-09-09 已核对三个插件的 npm 1.7.2 发布记录及 `better-auth`、`@better-auth/core` peer 范围 `^1.7.2`。插件现已加入依赖树，完整组合的本地 workerd/D1、初始化 I/O、请求隔离及协议行为验证见 implementation.md；此处的发布记录不替代运行结果。旧资产清单的 1.7.0 仅作历史对照，不能与上述目标版本混装，也不顺带升级核心。
 
 引入每个插件时，以实际安装包的端点声明、请求/响应类型核对 §2 路由表，并通过正常与拒绝路径的协议测试。例如两个 Passkey options 路由在 [1.7.2 路由源码](https://raw.githubusercontent.com/better-auth/better-auth/v1.7.2/packages/passkey/src/routes.ts) 中均为 GET；产生 challenge 的 GET 仍可能写入 verification。源码核对不代替完整登录流程验收。
 
 旧 OAuth/API Key 补丁按单项测试移植或退役；移植文件需列明上游缺口、最小改动及可删除条件，不以 changelog 未提及当作仍有缺陷的证明。
 
 协议校验依据：[RFC 8252](https://www.rfc-editor.org/rfc/rfc8252)、[RFC 8707](https://www.rfc-editor.org/rfc/rfc8707)、[RFC 9068](https://www.rfc-editor.org/rfc/rfc9068)、[RFC 7009](https://www.rfc-editor.org/rfc/rfc7009)、[RFC 6750](https://www.rfc-editor.org/rfc/rfc6750)。这些标准规定互操作边界，本文中更窄的 client/scope/redirect 选择是项目策略。
+
+实际补丁、版本和可删除条件见 [实施记录](implementation.md#3-依赖补丁与最小接法)。

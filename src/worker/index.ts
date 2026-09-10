@@ -1,60 +1,234 @@
-import { Hono } from "hono"
+import { OpenAPIHono } from "@hono/zod-openapi"
 
-import { createAuth, type WorkerAuthConfig } from "./auth"
-import { createResolvedInstanceGetter } from "./auth/initialized-instance-cache"
-import { applyReadTimeout, usesApplicationTimeout } from "./timeout"
+import { assertAuditSecret, scheduleAuditEvent } from "./audit"
+import type { AuditEventType } from "./audit"
+import { limitAuthEntry } from "./auth/entry-limit"
+import { authOperations, loginErrors } from "./auth/routes"
+import { getRequestAuth, readOwnerSession } from "./auth/session"
+import { isProblemSlug, problemTypeRegistry } from "./http/problem-registry"
+import { boundedRequest, problem, withReadDeadline } from "./http/response"
+import type { AppBindings } from "./http/types"
+import { handleOAuthRequest, oauthOperations } from "./oauth/handler"
+import {
+  serveOAuthMetadata,
+  serveProtectedResourceMetadata,
+} from "./oauth/protocol"
+import { registerApplicationRoutes } from "./routes"
+import { runScheduledMaintenance } from "./schedules"
 
-/**
- * v2 工程入口(M2:认证核心)。
- * Env 类型由 `wrangler types` 生成的 worker-configuration.d.ts 全局提供
- * (改 wrangler.jsonc 后需重跑 `pnpm run types:generate`)。
- */
+export const app = new OpenAPIHono<AppBindings>()
 
-function readAuthConfig(env: Env): WorkerAuthConfig {
-  return {
-    appOrigin: env.APP_ORIGIN,
-    betterAuthSecrets: env.BETTER_AUTH_SECRETS,
-    githubClientId: env.GITHUB_CLIENT_ID,
-    githubClientSecret: env.GITHUB_CLIENT_SECRET,
-    ownerGitHubId: env.OWNER_GITHUB_ID,
-  }
-}
-
-const getInitializedAuth = createResolvedInstanceGetter((env: Env) =>
-  createAuth(readAuthConfig(env), env.DB),
-)
-
-const app = new Hono<{ Bindings: Env }>()
-
-// D1 挂起防御:读路径 5s 快速失败(先于路由匹配,覆盖所有 /api/* 读)。
 app.use(async (c, next) => {
-  if (usesApplicationTimeout(c.req.method, c.req.path)) {
-    return applyReadTimeout(c, next)
-  }
-  return next()
+  c.set("requestId", crypto.randomUUID())
+  c.set("responseCookies", [])
+  await next()
+  if (c.res.status !== 504)
+    for (const cookie of c.get("responseCookies"))
+      c.header("set-cookie", cookie, { append: true })
+  c.header("x-request-id", c.get("requestId"))
+  c.header("x-content-type-options", "nosniff")
+  c.header("referrer-policy", "no-referrer")
+  c.header(
+    "content-security-policy",
+    `default-src 'self'; script-src 'self'; style-src 'self'${new URL(c.req.url).pathname === "/api/docs" ? " 'unsafe-inline'" : ""}; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
+  )
+  if (c.env.APP_ORIGIN === "https://auth.eruoo.me")
+    c.header("strict-transport-security", "max-age=31536000; includeSubDomains")
 })
 
-app.get("/health", (c) => {
-  return c.json(
-    {
-      ok: true,
-      service: "eruoo-server",
-      milestone: "M2",
-      version: c.env.CF_VERSION_METADATA?.tag ?? c.env.CF_VERSION_METADATA?.id,
-      time: new Date().toISOString(),
-    },
-    200,
-    { "cache-control": "no-store" },
+app.onError((_error, c) => {
+  console.error(
+    JSON.stringify({
+      event: "request_failed",
+      requestId: c.get("requestId"),
+      status: 503,
+    }),
+  )
+  return problem("service-unavailable", c.get("requestId"))
+})
+
+app.get("/health", (c) =>
+  c.req.method !== "GET"
+    ? problem("not-found", c.get("requestId"))
+    : c.json(
+        {
+          ok: true,
+          service: "eruoo-server",
+          milestone: "R5",
+          version: c.env.CF_VERSION_METADATA?.id,
+          time: new Date().toISOString(),
+        },
+        200,
+        { "cache-control": "no-store" },
+      ),
+)
+
+app.get("/problems/:slug", (c) => {
+  const slug = c.req.param("slug")
+  if (c.req.method !== "GET" || !isProblemSlug(slug))
+    return problem("not-found", c.get("requestId"))
+  return c.text(
+    `${problemTypeRegistry[slug].title}\n\n${problemTypeRegistry[slug].description}`,
   )
 })
 
 app.all("/api/auth/*", async (c) => {
-  const auth = await getInitializedAuth(c.env)
-  return auth.handler(c.req.raw)
+  const requestId = c.get("requestId")
+  const path = new URL(c.req.url).pathname
+  if (c.req.method === "GET" && path === "/api/auth/error") {
+    const error = c.req.query("error") ?? ""
+    return new Response(null, {
+      status: 302,
+      headers: {
+        location: `/login?error=${loginErrors.has(error) ? error : "service_unavailable"}`,
+        "cache-control": "no-store",
+      },
+    })
+  }
+  const operation = authOperations.get(`${c.req.method} ${path}`)
+  const isOAuth = oauthOperations.has(`${c.req.method} ${path}`)
+  if (!operation && !isOAuth) return problem("not-found", requestId)
+  const request = await boundedRequest(c.req.raw)
+  if (!request)
+    return isOAuth
+      ? Response.json(
+          { error: "invalid_request" },
+          { status: 400, headers: { "cache-control": "no-store" } },
+        )
+      : problem("payload-too-large", requestId)
+  c.req.raw = request
+  if (isOAuth) return handleOAuthRequest(c)
+  if (!operation) return problem("not-found", requestId)
+  if (
+    request.method === "POST" &&
+    request.headers.get("origin") !== c.env.APP_ORIGIN
+  ) {
+    return problem("permission-denied", requestId)
+  }
+  if (
+    request.method === "POST" &&
+    request.headers
+      .get("content-type")
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase() !== "application/json"
+  ) {
+    return problem("unsupported-media-type", requestId)
+  }
+  if (operation.limited || operation.owner)
+    assertAuditSecret(c.env.AUDIT_IP_HASH_SECRET)
+  if (
+    operation.owner === "recent" &&
+    request.headers.get("origin") !== c.env.APP_ORIGIN &&
+    !(
+      request.method === "GET" &&
+      !request.headers.has("origin") &&
+      request.headers.get("sec-fetch-site") === "same-origin" &&
+      new URL(request.url).origin === c.env.APP_ORIGIN
+    )
+  )
+    return problem("permission-denied", requestId)
+  if (operation.limited) {
+    const limited = await limitAuthEntry(c, `${c.req.method} ${path}`)
+    if (limited) return limited
+  }
+  const response = (async () => {
+    if (operation.owner) {
+      const principal = await readOwnerSession(c, operation.owner === "recent")
+      if (principal instanceof Response) {
+        if (operation.owner === "recent")
+          scheduleAuditEvent(c, {
+            type: "sensitive_operation_denied",
+            outcome: "failure",
+            metadata: { status: principal.status },
+          })
+        return principal
+      }
+    }
+    if (
+      path === "/api/auth/api-key/create" ||
+      path === "/api/auth/api-key/update"
+    ) {
+      let body: unknown
+      try {
+        body = await request.clone().json()
+      } catch {
+        return problem("invalid-request", requestId)
+      }
+      if (typeof body !== "object" || body === null || Array.isArray(body))
+        return problem("validation-failed", requestId)
+      const allowedFields = path.endsWith("/update")
+        ? ["keyId", "name"]
+        : ["name", "expiresIn"]
+      if (Object.keys(body).some((field) => !allowedFields.includes(field)))
+        return problem("validation-failed", requestId)
+      if (
+        "expiresIn" in body &&
+        (typeof body.expiresIn !== "number" ||
+          !Number.isInteger(body.expiresIn) ||
+          body.expiresIn < 86400 ||
+          body.expiresIn > 365 * 86400)
+      )
+        return problem("api-key-expiration-required", requestId)
+    }
+    const response = await getRequestAuth(c).handler(request)
+    const events: Record<string, AuditEventType> = {
+      "/api/auth/api-key/create": "api_key_created",
+      "/api/auth/api-key/update": "api_key_updated",
+      "/api/auth/api-key/delete": "api_key_revoked",
+      "/api/auth/callback/github": "github_login",
+      "/api/auth/passkey/verify-authentication": "passkey_login",
+      "/api/auth/passkey/verify-registration": "passkey_created",
+      "/api/auth/passkey/update-passkey": "passkey_updated",
+      "/api/auth/passkey/delete-passkey": "passkey_deleted",
+    }
+    const event = events[path]
+    if (event && response.status !== 429) {
+      const failed =
+        response.status >= 400 ||
+        new URL(
+          response.headers.get("location") ?? "/",
+          c.env.APP_ORIGIN,
+        ).searchParams.has("error")
+      scheduleAuditEvent(c, {
+        type: event,
+        outcome: failed ? "failure" : "success",
+        subjectId: c.get("principal")?.subject,
+        metadata: { status: response.status },
+      })
+    }
+    return response.status >= 500
+      ? problem("service-unavailable", requestId)
+      : response
+  })().catch(() => problem("service-unavailable", requestId))
+  return operation.read ? withReadDeadline(response, requestId) : response
 })
 
-app.notFound((c) => c.json({ error: "not_found" }, 404))
+for (const path of [
+  "/.well-known/oauth-authorization-server",
+  "/.well-known/openid-configuration",
+  "/.well-known/oauth-protected-resource/api",
+])
+  app.all(path, (c) => {
+    if (
+      !["GET", "HEAD"].includes(c.req.method) ||
+      new URL(c.req.url).pathname !== path
+    )
+      return problem("not-found", c.get("requestId"))
+    return path.endsWith("/api")
+      ? serveProtectedResourceMetadata(c)
+      : serveOAuthMetadata(c)
+  })
+
+registerApplicationRoutes(app)
+
+app.notFound((c) => problem("not-found", c.get("requestId")))
 
 export default {
-  fetch: (request, env, context) => app.fetch(request, env, context),
+  fetch: (request: Request, env, context) => app.fetch(request, env, context),
+  scheduled: async (controller, env) => {
+    await runScheduledMaintenance(controller, env)
+  },
 } satisfies ExportedHandler<Env>
+
+export { DatabaseBackupWorkflow } from "./workflows/database-backup"

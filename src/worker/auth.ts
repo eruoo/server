@@ -1,17 +1,19 @@
+import { apiKey } from "@better-auth/api-key"
+import { oauthProvider } from "@better-auth/oauth-provider"
+import { passkey } from "@better-auth/passkey"
 import { betterAuth } from "better-auth"
 import type { BetterAuthOptions } from "better-auth"
+import { APIError } from "better-auth/api"
+import { jwt } from "better-auth/plugins"
 
-/**
- * M2 认证核心:Better Auth 1.7.2 直连 D1(无需 ORM)。
- *
- * 规范依据 docs/specs/m2-auth.md(owner 已确认):
- * - §6 硬约束:GitHub numeric ID 唯一 owner,无开放注册
- * - §7:Session 30 天固定(不滑动)、15 分钟重认证窗口、cookieCache JWE 30s
- * - Passkey/API Key/OAuth Provider 插件在 M3/M4/M5 逐个叠加
- *
- * ALS patch 退役验证(见 redesign-assets.md §2):Better Auth 1.7.2 已上游修复
- * workerd async context loss(#10855),本文件无 patch 依赖。
- */
+import {
+  enabledOAuthClientIds,
+  oauthScopes,
+  OAUTH_REFRESH_TOKEN_MAX_TTL_SECONDS,
+} from "../shared/oauth"
+import { boundedGitHubTransport } from "./auth/github-transport"
+import { OAUTH_ACCESS_TOKEN_JWKS_OPTIONS } from "./oauth/access-token"
+import { persistSigningKey } from "./oauth/signing-keys"
 
 const DAYS_IN_SECONDS = 24 * 60 * 60
 
@@ -76,6 +78,8 @@ export interface WorkerAuthConfig {
   githubClientId: string
   githubClientSecret: string
   ownerGitHubId: string
+  onSigningKeyCreated?: (key: { id: string; alg?: string }) => void
+  onSessionCreated?: (session: { id: string; userId: string }) => void
 }
 
 interface VersionedSecret {
@@ -89,6 +93,7 @@ interface VersionedSecret {
  * 防止弱密钥进入轮换链)。
  */
 function parseVersionedSecrets(rawSecrets: string): VersionedSecret[] {
+  const versions = new Set<number>()
   return rawSecrets.split(",").map((rawEntry) => {
     const entry = rawEntry.trim()
     const separator = entry.indexOf(":")
@@ -96,7 +101,7 @@ function parseVersionedSecrets(rawSecrets: string): VersionedSecret[] {
       separator > 0 ? entry.slice(0, separator) : Number.NaN,
     )
 
-    if (!Number.isInteger(version) || version < 0) {
+    if (!Number.isInteger(version) || version < 0 || versions.has(version)) {
       throw new Error("BETTER_AUTH_SECRETS entries must use <version>:<secret>")
     }
 
@@ -107,6 +112,7 @@ function parseVersionedSecrets(rawSecrets: string): VersionedSecret[] {
       )
     }
 
+    versions.add(version)
     return { version, value }
   })
 }
@@ -114,12 +120,41 @@ function parseVersionedSecrets(rawSecrets: string): VersionedSecret[] {
 export function createAuthOptions(
   config: WorkerAuthConfig,
   database: D1Database,
-): BetterAuthOptions {
+) {
+  const origin = new URL(config.appOrigin)
+  if (
+    origin.origin !== config.appOrigin ||
+    !["http:", "https:"].includes(origin.protocol) ||
+    !/^\d+$/.test(config.ownerGitHubId) ||
+    !config.githubClientId ||
+    !config.githubClientSecret
+  ) {
+    throw new Error("Invalid authentication configuration")
+  }
   return {
     appName: "eruoo",
     basePath: "/api/auth",
     baseURL: config.appOrigin,
     database,
+    logger: { disabled: true },
+    databaseHooks: {
+      session: {
+        create: {
+          after: async (session) => {
+            config.onSessionCreated?.(session)
+          },
+          before: async (session) => {
+            const owner = await database
+              .prepare(
+                "SELECT 1 FROM account WHERE userId=? AND providerId='github' AND accountId=? LIMIT 1",
+              )
+              .bind(session.userId, config.ownerGitHubId)
+              .first()
+            return owner ? { data: session } : false
+          },
+        },
+      },
+    },
     disabledPaths: [...disabledPaths],
     secrets: parseVersionedSecrets(config.betterAuthSecrets),
     trustedOrigins: [config.appOrigin],
@@ -148,14 +183,16 @@ export function createAuthOptions(
       storeStateStrategy: "database",
     },
     session: {
-      // §7:30 天固定(不滑动),到期重新 GitHub OAuth。
       cookieCache: {
         enabled: true,
         maxAge: 30,
         // JWE 对称加密(非默认 HMAC compact):cookie 内容仅凭 secret 可读。
         strategy: "jwe",
+        refreshCache: false,
       },
-      disableSessionRefresh: true,
+      disableSessionRefresh: false,
+      deferSessionRefresh: false,
+      updateAge: DAYS_IN_SECONDS,
       expiresIn: 30 * DAYS_IN_SECONDS,
       freshAge: 0,
       additionalFields: {
@@ -174,21 +211,95 @@ export function createAuthOptions(
       },
       enabled: true,
       storage: "database",
+      window: 60,
+      max: 100,
     },
     advanced: {
       database: {
         joins: true,
       },
       cookiePrefix: "eruoo",
+      trustedProxyHeaders: false,
+      ipAddress: { ipAddressHeaders: ["cf-connecting-ip"] },
     },
+    plugins: [
+      boundedGitHubTransport(),
+      jwt({
+        adapter: {
+          createJwk: async (data) => {
+            const { key, created } = await persistSigningKey(database, data)
+            if (created) config.onSigningKeyCreated?.(key)
+            return key
+          },
+        },
+        disableSettingJwtHeader: true,
+        jwks: OAUTH_ACCESS_TOKEN_JWKS_OPTIONS,
+        jwt: { issuer: config.appOrigin },
+      }),
+      oauthProvider({
+        accessTokenExpiresIn: 3600,
+        allowDynamicClientRegistration: false,
+        allowUnauthenticatedClientRegistration: false,
+        cachedTrustedClients: enabledOAuthClientIds,
+        cachedResources: new Set<string>(),
+        clientPrivileges: () => false,
+        resourcePrivileges: () => false,
+        enforcePerClientResources: true,
+        grantTypes: ["authorization_code", "refresh_token"],
+        loginPage: "/login",
+        consentPage: "/oauth/consent",
+        refreshTokenExpiresIn: OAUTH_REFRESH_TOKEN_MAX_TTL_SECONDS,
+        refreshTokenReuseInterval: 30,
+        scopes: [...oauthScopes],
+        storeTokens: "hashed",
+      }),
+      apiKey({
+        apiKeyHeaders: "x-api-key",
+        configId: "default",
+        defaultPrefix: "eruoo_",
+        deferUpdates: false,
+        disableKeyHashing: false,
+        enableSessionForAPIKeys: false,
+        keyExpiration: {
+          defaultExpiresIn: 180 * DAYS_IN_SECONDS,
+          disableCustomExpiresTime: false,
+          minExpiresIn: 1,
+          maxExpiresIn: 365,
+        },
+        permissions: { defaultPermissions: { status: ["read"] } },
+        rateLimit: { enabled: true, maxRequests: 60, timeWindow: 60_000 },
+        requireName: true,
+        storage: "database",
+      }),
+      passkey({
+        rpID: origin.hostname,
+        rpName: "eruoo",
+        origin: config.appOrigin,
+        authenticatorSelection: { userVerification: "required" },
+        registration: {
+          requireSession: true,
+          afterVerification: ({ verification }) => {
+            if (!verification.registrationInfo?.userVerified)
+              throw new APIError("FORBIDDEN", {
+                message: "User verification required",
+              })
+          },
+        },
+        authentication: {
+          afterVerification: ({ verification }) => {
+            if (!verification.authenticationInfo.userVerified)
+              throw new APIError("FORBIDDEN", {
+                message: "User verification required",
+              })
+          },
+        },
+      }),
+    ],
   } satisfies BetterAuthOptions
 }
 
-export type Auth = ReturnType<typeof betterAuth>
+export type Auth = ReturnType<typeof createAuth>
 
-export function createAuth(
-  config: WorkerAuthConfig,
-  database: D1Database,
-): Auth {
+export function createAuth(config: WorkerAuthConfig, database: D1Database) {
   return betterAuth(createAuthOptions(config, database))
 }

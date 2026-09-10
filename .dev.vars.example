@@ -1,5 +1,8 @@
-# 复制为 .dev.vars 并填入本地开发值(合成值即可);staging/生产用 wrangler secret put。
-# BETTER_AUTH_SECRETS 形态:<version>:<secret>(Better Auth 轮换格式)
-BETTER_AUTH_SECRETS=1:change-me-local-only
-GITHUB_CLIENT_ID=change-me
-GITHUB_CLIENT_SECRET=change-me
+# 复制为 .dev.vars。本地密钥至少 32 字符；真实 GitHub OAuth App 回调设为
+# http://localhost:5173/api/auth/callback/github。文件不能提交或进入发布产物。
+BETTER_AUTH_SECRETS=1:replace-with-a-random-secret-at-least-32-characters
+GITHUB_CLIENT_ID=replace-with-local-github-client-id
+GITHUB_CLIENT_SECRET=replace-with-local-github-client-secret
+AUDIT_IP_HASH_SECRET=replace-with-a-separate-random-secret-at-least-32-characters
+# 默认本地开发不运行备份 cron；只有实际备份环境需要有效 export token。
+D1_EXPORT_API_TOKEN=local-backup-not-configured

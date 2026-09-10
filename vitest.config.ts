@@ -15,11 +15,15 @@ const rootDirectory = path.dirname(fileURLToPath(import.meta.url))
  * (value ≥32 字符,与生产校验一致)。
  */
 const syntheticTestBindings = {
+  CF_ACCOUNT_ID: "0123456789abcdef0123456789abcdef",
+  D1_DATABASE_ID: "11111111-1111-4111-8111-111111111111",
+  D1_EXPORT_API_TOKEN: "synthetic-export-token",
   APP_ORIGIN: "http://local.test",
   BETTER_AUTH_SECRETS:
     "1:synthetic-better-auth-secret-used-only-in-worker-tests-32ch",
   GITHUB_CLIENT_ID: "synthetic-github-client-id",
   GITHUB_CLIENT_SECRET: "synthetic-github-client-secret",
+  AUDIT_IP_HASH_SECRET: "synthetic-audit-secret-only-for-tests-32-characters",
   OWNER_GITHUB_ID: "50254496",
 } as const
 

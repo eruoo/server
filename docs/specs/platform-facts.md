@@ -1,5 +1,7 @@
 # 平台事实核查 (Platform Facts)
 
+> **事实记录范围**：本文保留各采样日期的实测与当时计划；下列“M0 进行中”“持续采集”等状态不代表当前任务仍活跃，旧后续安排也不构成执行指令。当前目标、预算与验证频率见 [完整架构规格](architecture.md)、[运维规格](operations.md) 和 [验收规格](acceptance.md)。历史数据不改写为新版本已通过的证据。
+
 > 状态：M0 进行中（阶段 1 数据已采集；cron 闲置分布持续采集中）
 > 探针：`eruoo-server-staging`（workers.dev）+ 独立 D1（APAC 区域），代码见 `probes/m0/`
 > 方法：真实 Workers 环境实测；每项数据标注采样方式与样本量。取代旧 foundation.md §23 的文档快照。

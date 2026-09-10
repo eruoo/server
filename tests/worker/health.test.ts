@@ -18,15 +18,15 @@ describe("M1 skeleton health", () => {
     }
     expect(body.ok).toBe(true)
     expect(body.service).toBe("eruoo-server")
-    expect(body.milestone).toBe("M2")
+    expect(body.milestone).toBe("R5")
     expect(response.headers.get("cache-control")).toBe("no-store")
   })
 
   it("returns 404 problem json for unknown paths", async () => {
     const response = await SELF.fetch("https://example.com/unknown")
     expect(response.status).toBe(404)
-    const body = (await response.json()) as { error: string }
-    expect(body.error).toBe("not_found")
+    const body = (await response.json()) as { status: number }
+    expect(body.status).toBe(404)
   })
 
   it("has a working D1 binding", async () => {

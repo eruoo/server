@@ -1,25 +1,31 @@
 # eruoo-server
 
-个人身份与授权服务（Workers + Hono + Better Auth + D1 + R2 + Vue），v2 重设计进行中。
+个人身份与授权服务：一个 Cloudflare Worker 提供认证、OAuth、管理 API 和同源 Vue Web 界面，D1 保存状态，R2 + Workflow 保存独立备份。
 
-## 当前状态
+当前已实现服务端与 Web。Desktop 客户端暂缓；本地验证与尚未执行的平台验收见 [实施记录](docs/specs/implementation.md)。架构和契约从 [文档导航](docs/index.md) 进入。
 
-`refactor/v2` 已有 M0 平台实测、M1 骨架与 M2 GitHub/Session 核心代码。完整重设计方案见 [架构规格](docs/specs/architecture.md)，配套覆盖协议、运维与消融验收；需求选择已收敛，允许 Desktop 同步改版并放弃旧接口兼容，新架构尚未实施。
+## 本地开发
 
-历史 M0-M8 路线与执行授权保留于 [refactoring.md](docs/specs/refactoring.md)；平台事实见 [platform-facts.md](docs/specs/platform-facts.md)。当前分支尚未恢复完整 Passkey、OAuth Provider、API Key、SPA 和备份流程。
-
-## 开发
+使用 Node.js 24、pnpm 11。首次复制 `.dev.vars.example` 为 `.dev.vars`，填写独立的本地 GitHub OAuth 凭证和随机密钥。已有 `.dev.vars` 时补齐缺少项，不覆盖原值。
 
 ```bash
-pnpm install
-pnpm run check        # format + lint + typecheck + test
-pnpm run dev          # 本地开发
-pnpm run deploy:staging   # 部署验证环境（eruoo-server-staging）
+pnpm install --frozen-lockfile
+pnpm exec playwright install chromium
+pnpm run dev                 # 校验本地配置，应用本地 migration，启动 localhost:5173
+pnpm run check               # 格式、lint、类型、Worker/Web/脚本测试、OpenAPI、浏览器 E2E
+pnpm run build:release staging
+pnpm run build:release production
 ```
 
-当前默认本地配置存在 bindings/Origin 缺失问题，已纳入新规格 R1；`/health` 成功不能代替真实登录验证。上面的命令是现有脚本入口，不代表完整新架构已验收。
+测试只使用合成凭证、GitHub stub 和本地 D1/R2，不需要真实登录。真实 GitHub 回调地址配置为 `http://localhost:5173/api/auth/callback/github`。
 
-## 文档入口
+## 发布
 
-- [docs/index.md](docs/index.md) — 导航
-- 旧实现保留在 git 历史（`59bbd32`），旧规格 [foundation.md](docs/specs/foundation.md) 为参考档
+CI 对同一 SHA 检查一次，分别构建 staging/production 产物，保留 7 天。手动发布消费该产物并执行必要 migration、部署、读回与冒烟，不重复测试/构建。
+
+```bash
+pnpm run deploy:staging <完整的已通过 CI 的 SHA>
+pnpm run deploy:production <完整的已通过 CI 的 SHA>
+```
+
+这些命令会触发远端操作，须在获得对应环境、版本的授权后执行。首次上线前须创建并填入新 D1/R2、配置 secrets/生命周期和 GitHub Environment，见 [接线清单](docs/specs/implementation.md#4-运行与首次发布接线)。当前配置中的资源占位值会让发布前检查失败。

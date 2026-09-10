@@ -42,7 +42,7 @@
 
 目标 `pnpm run dev` 在启动前应用本地 migration，再以固定端口启动 Vite；无远端副作用。不复制生产数据库。本地 GitHub 凭证缺失时明确报配置错误，不能生成含 `undefined` 的 OAuth callback。测试使用合成凭证和固定 provider stub，无需真实第三方账号。
 
-SPA assets fallback 只处理页面导航；`/api/*`、`/.well-known/*`、`/problems/*`、`/health` 由 Worker 优先处理，API 404 不返回 HTML。哈希静态资源可长期 immutable；HTML、身份响应和私有 API 禁止公共缓存。CSP、HSTS（生产）、nosniff、frame-ancestors 和 Referrer-Policy 由一个入口策略管理；文档页仅添加其所需的局部 CSP。
+SPA assets fallback 只处理页面导航；`/api/*`、`/.well-known/*`、`/problems/*`、`/health` 由 Worker 优先处理，API 404 不返回 HTML。哈希静态资源可长期 immutable；HTML、身份响应和私有 API 禁止公共缓存。CSP、HSTS（生产）、nosniff、frame-ancestors 和 Referrer-Policy 由一个入口策略管理；动态响应由 Worker 设置响应头；直出的 SPA/静态资源由 `public/_headers` 设置对应策略。文档及 Vue/对话框需要内联 style，因此 HTML 的 style-src 允许 unsafe-inline，script-src 仍仅 self，不允许内联脚本；JSON 接口不需要该样式例外。
 
 ## 2. 限流与成本边界
 
@@ -55,11 +55,13 @@ SPA assets fallback 只处理页面导航；`/api/*`、`/.well-known/*`、`/prob
 | get-session、静态响应、未知/禁用路径、非支持方法 | 不做数据库限流计数                                     | 无                                                                                           |
 | 内部 Cron/Workflow                               | 不经过 HTTP 限流                                       | 维护任务自身的批次、重试、容量预算                                                           |
 
-认证粗入口沿用既有生产阈值。Better Auth 持久限流则是目标变更：当前 `src/worker/auth.ts` 启用数据库限流、关闭 `/get-session` 计数，但未设置 window/max；锁定的 1.7.2 默认值为 `window: 10, max: 100`。目标将计数窗口统一为 60 秒，收紧持续请求的持久限流，作为 location 局部入口限制之外的保护。这不是库默认，也不表示当前代码已经实施；实施时保留 `enabled: true`、`storage: "database"` 和 `/get-session: false`，显式加入 window/max，并通过实际请求的阈值、窗口重置和插件专用规则测试。
+认证粗入口沿用既有生产阈值。Better Auth 持久限流则是目标变更：原审查基线的 `src/worker/auth.ts` 未设置 window/max；当前实现已显式设置 60/100 并关闭 `/get-session` 计数。锁定的 1.7.2 默认值为 `window: 10, max: 100`。目标将计数窗口统一为 60 秒，收紧持续请求的持久限流，作为 location 局部入口限制之外的保护。这不是库默认。实现保留 `enabled: true`、`storage: "database"` 和 `/get-session: false`，显式加入 window/max，并通过实际请求的阈值、窗口重置和插件专用规则测试。
 
-限流 binding 异常或 5 秒内未返回时 503，不继续高成本认证；429 返回合适的 Retry-After，不追加 D1 拒绝审计。未知路径直接 404。多个 limiter 不串行检查同一个 operation。
+限流 binding 异常或 5 秒内未返回时 503，不继续高成本认证；API Key status 在入口限流通过后只使用请求剩余的 5 秒读预算，迟到 limiter 结果不能重新启动认证；429 返回合适的 Retry-After，不追加 D1 拒绝审计。未知路径直接 404。多个 limiter 不串行检查同一个 operation。
 
 原生 rate limiting 是 location 局部、近似限制，用于抑制常见放大，不是跨 IP/跨 location 的全球精确配额。[Cloudflare rate limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)。
+
+同账号相同 namespace 和 key 会跨 Worker 共享计数，因此 staging/production 的两种 limiter 必须使用四个互不相同的 namespace。实际值由 `wrangler.jsonc` 维护，生产沿用既有 namespace；不能只用 Worker 名区分环境。发布构建核对环境间隔离，阈值不因这项配置修复而改变。
 
 成本原则为**免费优先，按需求决定是否付费**：先用当前套餐验证完整流程、资源用量和尾延迟；能满足就保持免费。若免费限制影响实际需求，比较付费方案与继续维护规避逻辑的成本，向 owner 给出实测缺口、预计月费和推荐。现阶段无需预先指定付费预算，也不自动升级。有限重试、入口限流和容量告警仍作为运行保护保留，但不再把免费额度写成不可变的架构约束。
 
@@ -148,12 +150,14 @@ bucket 保持私有，禁用 r2.dev、自定义域名、浏览器 CORS 和下载
 
 1. **本地计划**：输入可信 R2 HEAD 描述与 SQL 文件，检查 format/size/ETag/metadata；以受限制 SQLite 执行 dump，验证 schema、外键和 migration ledger 为仓库的精确前缀。输出源快照、目标版本、清理范围、切换与回退步骤。
 2. **建立目标并导入**：执行时获得明确授权，创建隔离 D1，导入完整 SQL，再应用尚未执行的向前 migration；target ID 必须不同于生产。
-3. **清除可复活的安全状态**：删除 Session、verification、Passkey、API Key、OAuth token/consent/tombstone、限流、旧 JWKS、维护 lease/health 和快照内审计；保留 GitHub owner 关联但清空 provider tokens；静态 client/resource 按当前清单恢复。
-4. **建立新信任**：生成新 Ed25519/RS256 key，不保留旧公钥宽限；验证 owner bootstrap、凭证清理与业务数据，最后记录 `database_restore_completed`。
+3. **清除可复活的安全状态**：删除 Session、verification、Passkey、API Key、OAuth token/consent/tombstone、限流、旧 JWKS、维护 lease/health 和快照内审计；保留 GitHub owner 关联但清空 provider tokens；静态 client/resource 按当前清单恢复。若存在 `deployment_migrations`，同时清除其源库记录；规划器严格验证这张运维表的 schema，不把它当作任意附加表放行。
+4. **建立新信任**：向前 migration 与清理核验完成后，执行规划器输出的 `targetMigrationReceipt`，记录目标 D1 ID 与当前 migration 摘要；不能沿用源库发布记录。生成新 Ed25519/RS256 key，不保留旧公钥宽限；验证 owner bootstrap、凭证清理与业务数据，最后记录 `database_restore_completed`。
 5. **切换**：停止旧生产维护任务并核实，确认没有并发导出/写入后切新 binding；owner 重新登录、注册 Passkey、创建 API Key，Desktop 重新授权。
 6. **保留回退信息**：不删除原 D1；切换前可直接放弃新库。切换后如已有新写入，不能无条件切回旧库丢弃数据，需先停止写入并评估差异。
 
 规划器无 `--execute`、默认不访问网络；目标是验证可信自有快照，不提供通用 SQL 管理台。SQLite 禁止 extension loading，authorizer 拒绝 ATTACH/外部文件、危险 PRAGMA、virtual table、trigger/view 与未知结构；schema 与 ledger 逐项校验，不能只用 SQL 文本正则判断。生产 migration 同样禁止 D1 export 不支持的 virtual table。
+
+导入函数只允许 D1 导出文本所需的 `replace` 和 `char`，支持 CR/LF 的嵌套转义；其他函数仍拒绝。恢复测试使用实际导出器产出的字符串 fixture，不能只用手写的普通 SQL 字符串证明兼容。
 
 正常恢复不自动轮换 BETTER_AUTH_SECRETS；怀疑 secret 泄露时另行轮换并重认证。首个生产切换前必须成功做一次隔离恢复验收；之后在备份格式、schema 或凭证清理规则改变时重跑，不增加无需求的周期演练系统。
 
@@ -175,9 +179,13 @@ BETTER_AUTH_SECRETS 轮换先加入新主版本并保留仍被 D1 密文引用�
 4. **写入**：使用锁定 Wrangler 和选定环境的部署 token。检查精确 Worker name、account/D1/R2 ID、Origin、assets、必要 binding/secret 名称及已启用功能的 cron。只在存在未应用 migration 时执行迁移，随后显式 `wrangler deploy --config <产物中的实际配置路径>`。不通过 deploy 时的 `--env` 改变已构建环境，不自动创建缺失资源。每个环境最多一个在执行的发布，不自动取消正在迁移/部署的任务。
 5. **验收**：读回版本、binding 和启用的 cron；检查 health、无凭证 Session、受保护入口拒绝、API 404 非 HTML，及本次变更涉及的已启用流程。每个 HTTP 冒烟探针有 10 秒 deadline，整组预算 60 秒。失败明确标记发布未通过；发生远端写入后不自动重试或继续下一版本。
 
-发布记录由 Actions summary 自动生成：SHA、CI run/产物、目标环境、migration 结果、平台 version/deployment ID 和冒烟结果；涉及 Desktop 契约变更时关联配套客户端版本及联调结果。无需手工复制流水线记录或切换 GitHub 账号推动 production 分支。
+迁移前，发布脚本在 D1 的 `deployment_migrations` 运维表保存唯一一行 `databaseId + migrations`（文件名到 SHA-256 的映射）。DDL 由发布模块单独维护，早于应用 migration，因此不写入 Wrangler migration ledger；备份恢复规划器从同一 DDL 校验它。首次只接受空库；没有记录且非空的库仍拒绝。既有发布补建记录只允许旧 Worker 的 DB binding ID 与目标库一致，并校验其 RELEASE_MIGRATIONS；更换 DB binding 不继承旧库凭据。记录写入或 migration/deploy 失败后不自动重试；下次人工发起必须再次验证目标 D1 ID、已有 ledger 的精确前缀，以及所有已记录 migration 的内容未变。记录涵盖可能已经执行的计划文件，不能通过修改未确认完成的文件绕过恢复检查。验证通过后仅补未应用 migration，再部署；不靠删除数据库恢复发布。
 
-现有 `pnpm run deploy:staging` 和目标 `pnpm run deploy:production` 只包装同一个部署实现；接收已核验产物，不隐式安装/测试/重建。R1 本地验证仍可使用当前显式 Wrangler 命令；正式发布接线完成后统一消费 CI 产物，不保留第二条常规生产通道。使用安装好的锁定 Wrangler 或官方 action，避免为上传重新安装全部前端依赖。
+发布记录由 Actions summary 自动生成：SHA、CI run/产物、目标环境、migration 结果、平台 version/deployment ID 和冒烟结果；后续 Desktop 客户端开始交付后，涉及其契约变更时关联配套版本与联调结果。无需手工复制流水线记录或切换 GitHub 账号推动 production 分支。
+
+按 [能力开放表](acceptance.md#52-各切片开放的能力) 核对当前版本：R1 不启用维护 cron，R2 启用每日清理，R3 首次承载真实数据前补齐备份绑定与备份 cron 并验证；R5 才启用 OAuth discovery 与客户端。该范围由发布代码实际注册的能力决定，不增加线上 feature flag 服务，也不能让部署脚本自动修复或开启缺失能力。
+
+`pnpm run deploy:staging <完整 SHA>` 与 `pnpm run deploy:production <完整 SHA>` 只触发受保护 main 上的同一个 Actions 发布流程。流程下载匹配 CI 产物，按产物 lockfile 安装执行工具（禁用安装脚本），核验后发布，不重跑检查或构建。已移除独立远端 migration 快捷命令。首次资源接线及现有环境所需配置见 [实施记录](implementation.md#4-运行与首次发布接线)。
 
 官方机制依据：[Cloudflare GitHub Actions](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)、[GitHub 手动运行 workflow](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)、[Actions artifacts](https://docs.github.com/en/actions/tutorials/store-and-share-data)。Vite 环境必须在构建时确定，见 [Cloudflare Vite environments](https://developers.cloudflare.com/workers/vite-plugin/reference/cloudflare-environments/)。
 
@@ -194,11 +202,15 @@ BETTER_AUTH_SECRETS 轮换先加入新主版本并保留仍被 D1 密文引用�
 
 必要专项失败或缺失时阻止受影响能力发布，不能为达到 5 分钟目标跳过。记录最近五次常规流程的分阶段耗时，优先消除重复安装、检查和构建；不追加并行 CI 平台、长轮询或通用 preflight 框架。首次接线集中核对 GitHub environment 的部署 token、现有 GitHub App、新 D1/R2/Workflow 与所需 runtime secrets；这些是一次性工作。
 
+5 分钟目标指服务端常规流水线。Desktop 构建、签名/打包和跨端联调属于首次 R5 或相关契约变更的专项准备；普通服务端文案修改不重复整套客户端交付。服务端发布只关联客户端结果，不隐式发布客户端安装包。
+
 ### 6.3 授权与回退
 
 owner 对精确 SHA、环境和声明的 migration 触发一次发布即可，不在流程中重复确认同一操作。设计确认不自动触发线上操作；额外数据删除、secret/lifecycle 修改仍需覆盖具体动作的授权。staging 继续遵循 [既有预授权](refactoring.md#7-执行配置owner-已确认)。默认 GITHUB_TOKEN 仅赋予所需的 contents/actions 读取权限；Cloudflare 部署 token 只在目标环境的发布 job 使用，runtime 仍使用 §1.1 的 CF_ACCOUNT_ID，不把 CI 凭证暴露给 PR 测试或浏览器。
 
 首次从空库启用没有旧业务数据迁移和差异合并步骤。旧资源暂时保留，不作为发布依赖，也不在发布失败时自动删除。开始真实使用后，普通发布仍需保证已发布 migration 不改写、新 schema 向后兼容；代码回退优先用上一成功 Worker version，涉及 Desktop 契约变更时同时核对客户端版本匹配。回退不撤销数据库写入、secret 或 lifecycle 修改，存在新数据时不能直接换回旧空库。首次正式使用前验证一次代码回退，以及将实际数据投入使用所需的备份恢复能力。
+
+Desktop 已按 Q7 延后；以下跨端门槛在客户端启动交付后适用，不阻塞当前服务端/Web 的本地验收。后续首次启用实际 Desktop 和跨端破坏性变更，发布记录必须给出“服务端 SHA + Desktop 版本/commit + 联调结果 + 回退目标及能力影响”。先备妥配套客户端，再启用服务端能力；不要求维护旧版兼容层。首次 R5 可以回退到已验收的 R4，恢复浏览器管理并暂停 Desktop 授权，必须明确这不代表 Desktop 可用。后续回退若要求恢复 Desktop，必须有契约匹配的服务端/客户端组合，必要时切换客户端版本并重新授权；该组合未验证则阻止相应发布，不能把单端回退记为跨端已恢复。该要求复用现有发布记录，不建设协议版本协商系统。
 
 ## 7. 运行观测与故障判断
 

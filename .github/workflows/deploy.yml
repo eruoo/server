@@ -1,0 +1,63 @@
+name: Deploy verified artifact
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, production]
+        required: true
+      sha:
+        description: Full commit SHA with successful Check artifacts
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' && (inputs.environment != 'production' || (github.actor_id == '50254496' && github.triggering_actor == github.actor))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        with:
+          runtime: node@24.18.0
+          install: false
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Select successful CI artifact
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_ENV: ${{ inputs.environment }}
+        run: pnpm exec tsx scripts/select-release.ts "$RELEASE_SHA" "$RELEASE_ENV"
+      - name: Download exact environment artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ steps.release.outputs.artifact-id }}
+          path: .output/deploy/
+          merge-multiple: true
+          run-id: ${{ steps.release.outputs.run-id }}
+          github-token: ${{ github.token }}
+      - name: Install artifact's locked deployment toolchain
+        working-directory: .output/deploy
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify, migrate only if needed, deploy and smoke test
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_ENV: ${{ inputs.environment }}
+          RELEASE_RUN: ${{ steps.release.outputs.run-id }}
+          GITHUB_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: pnpm exec tsx scripts/deploy-release.ts .output/deploy "$RELEASE_ENV" "$RELEASE_SHA" "$RELEASE_RUN"

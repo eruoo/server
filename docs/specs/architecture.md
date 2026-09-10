@@ -1,8 +1,8 @@
 # eruoo-server 完整架构规格
 
-> 2026-09-09 · 目标规格，需求选择已收敛，待实施。
-> 代码基线：`e58f75866a9649d6ab40f39f99029f3b1c948c18`，`refactor/v2`。
-> 本轮交付是架构、协议、运维和验收规格；不包含业务代码、迁移执行或部署。
+> 2026-09-09 · 当前架构规格；本次实施范围为服务端与 Web。
+> 原设计审查基线：`e58f75866a9649d6ab40f39f99029f3b1c948c18`，`refactor/v2`。
+> 代码、测试和本地验证记录见 [implementation.md](implementation.md)。Desktop 客户端暂缓；远端迁移、资源创建和部署未执行。
 
 ## 1. 决策与文档边界
 
@@ -19,9 +19,9 @@
 | [operations.md](operations.md)               | 配置、审计、备份恢复、发布与运行观测                       |
 | [acceptance.md](acceptance.md)               | 已有实验证据、行为验收、消融门槛、实施顺序                 |
 | [platform-facts.md](platform-facts.md)       | 历史平台实测；不能把采样结论扩展成平台保证                 |
-| [../openapi.json](../openapi.json)           | 五个自有 API 的现存字段快照，实施时由路由 schema 生成接管  |
+| [../openapi.json](../openapi.json)           | 由路由 schema 生成的五个自有 API 契约                      |
 
-这四份新规格共同描述一个目标设计；其“必须”用于验收目标实现，不表示当前已经实现。owner 的最新需求优先于历史确认；尚未被新指令替代的条款继续有效。下表和 §1.2 明确记录覆盖关系，不允许实施者自行拼接新旧要求。旧规格保留历史价值，当前目标只在这四份规格维护；外部执行仍遵循适用授权。
+这四份规格共同维护目标设计；具体实现及验证状态由 implementation.md 维护，不从要求文字推断验收通过。owner 的最新需求优先于历史确认；尚未被新指令替代的条款继续有效。下表和 §1.2 明确记录覆盖关系，不允许实施者自行拼接新旧要求。旧规格保留历史价值，当前目标只在这四份规格维护；外部执行仍遵循适用授权。
 
 | 与旧记录的差异                                                    | 处理                                                                                                                                       |
 | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -50,12 +50,13 @@
 | Q4  | 生产没有有效使用，历史数据不用担心，可以完全从零开始 | 使用新空 D1 和独立新 R2 bucket，不迁移旧数据、Session、凭证或备份；正式使用前可以重建 schema 基线，开始真实使用后恢复增量迁移纪律                  |
 | Q5  | 发布简单、用时短，同时保留必要检查                   | 一个 CI 检查与构建流程、一个手动发布流程，消费已通过检查的产物；常规检查构建与发布执行时间合计目标 5 分钟，重型验证按变更触发                      |
 | Q6  | 允许 Desktop 同步改版、放弃旧版本接口兼容            | 服务端与新版 Desktop 使用同一份当前契约；不维护旧版兼容路由、双响应格式或旧凭证迁移，具体变更与客户端在 R5 同步验收                                |
+| Q7  | desktop 端暂时不做，先做 web                         | 本次交付服务端与 Web 管理；OAuth 服务端用真实插件的协议测试验收。Desktop 客户端、Rust 安全存储和跨端联调留待后续，不阻塞本次本地实现。             |
 
-单一 owner、同源边界和 15 分钟敏感操作门禁保持不变。Q1–Q6 已收敛，没有阻塞当前设计的需求待确认项；Desktop 可以同步调整，旧版本兼容不再是验收条件。当前协议规格仍是明确的实现目标，不因允许破坏兼容而随意改名或放宽安全校验。完整插件组合、D1 故障隔离、备份恢复和发布耗时由工程验收验证。新空库是启动方案；旧资源清理按具体对象与执行授权另行处理，本轮不执行删除、资源创建或部署。
+单一 owner、同源边界和 15 分钟敏感操作门禁保持不变。Q1–Q7 已收敛，没有阻塞当前设计的需求待确认项；Desktop 暂缓，旧版本兼容不再是验收条件；Q7 覆盖 Q6 的本次跨端交付要求。当前协议规格仍是明确的实现目标，不因允许破坏兼容而随意改名或放宽安全校验。完整插件组合、D1 故障隔离、备份恢复和发布耗时由工程验收验证。新空库是启动方案；旧资源清理按具体对象与执行授权另行处理，本轮不执行删除、资源创建或部署。
 
 ## 2. 产品范围与完成标准
 
-服务三个现有用途：owner 通过浏览器管理身份和长期凭证；Tauri Desktop 经系统浏览器完成 OAuth/OIDC；CLI/自动化通过 API Key 调用明确开放的业务 operation。
+架构覆盖三个用途（本次不实现 Desktop 客户端）：owner 通过浏览器管理身份和长期凭证；Tauri Desktop 经系统浏览器完成 OAuth/OIDC；CLI/自动化通过 API Key 调用明确开放的业务 operation。
 
 - 唯一 owner：GitHub numeric ID `50254496`。用户名、邮箱和前端声称的身份均不能授予权限。
 - 生产 Origin 与 issuer：`https://auth.eruoo.me`；Passkey RP ID：`auth.eruoo.me`。生产 `workers.dev` 禁用，同源 CORS allowlist 为空。
@@ -85,19 +86,19 @@ CLI ── x-api-key ───────────────────�
 
 采用单 package；目录是职责边界，不是独立发布单元。目标实现会涉及超过 8 个文件，但不增加独立服务、运行账号或第二套构建系统。
 
-| 目标目录/文件             | 唯一职责                                                     | 不承担                       |
-| ------------------------- | ------------------------------------------------------------ | ---------------------------- |
-| `src/worker/index.ts`     | 导出 fetch、scheduled 与 Workflow entrypoint                 | 业务规则                     |
-| `src/worker/app.ts`       | 装配路由、安全响应头和错误出口                               | Session 状态机               |
-| `src/worker/auth/`        | Better Auth 配置、请求实例、owner Session 解析、API Key 验证 | 手写 OAuth 签发、前端状态    |
-| `src/worker/oauth/`       | 静态 client/resource 定义、协议约束、JWT 验证、family 撤销   | 通用用户/角色系统            |
-| `src/worker/api/`         | 五个自有 operation 的 schema、权限声明和 handler             | 到处重复读取 Session         |
-| `src/worker/audit/`       | 安全事件写入、查询、脱敏                                     | 通用事件总线                 |
-| `src/worker/maintenance/` | 清理、备份 Workflow、备份终态                                | 通过公网 API 回调本 Worker   |
-| `src/worker/db/`          | 应用表与参数化领域查询                                       | 复制认证库 schema 和 CRUD    |
-| `src/shared/contracts/`   | 自有 API 的输入/输出 schema 与推导类型                       | 环境绑定、secret、数据库模块 |
-| `src/client/`             | Vue 路由、一个 Session 控制器、按功能组织的页面              | 服务端权限判定               |
-| `scripts/`                | 本地契约生成、构建产物核验、发布和恢复入口                   | 运行时自修复、通用部署平台   |
+| 目标目录/文件                                      | 唯一职责                                                     | 不承担                       |
+| -------------------------------------------------- | ------------------------------------------------------------ | ---------------------------- |
+| `src/worker/index.ts`                              | 导出 fetch、scheduled 与 Workflow entrypoint                 | 业务规则                     |
+| `src/worker/index.ts`                              | 同入口装配路由、安全响应头和错误出口                         | Session 状态机               |
+| `src/worker/auth/`                                 | Better Auth 配置、请求实例、owner Session 解析、API Key 验证 | 手写 OAuth 签发、前端状态    |
+| `src/worker/oauth/`                                | 静态 client/resource 定义、协议约束、JWT 验证、family 撤销   | 通用用户/角色系统            |
+| `src/worker/routes/`                               | 五个自有 operation 的 schema、权限声明和 handler             | 到处重复读取 Session         |
+| `src/worker/audit.ts`、`modules/audit/`            | 安全事件写入、查询、脱敏                                     | 通用事件总线                 |
+| `src/worker/schedules.ts`、`backup/`、`workflows/` | 清理、备份 Workflow、备份终态                                | 通过公网 API 回调本 Worker   |
+| `src/worker/db/`                                   | 应用表与参数化领域查询                                       | 复制认证库 schema 和 CRUD    |
+| `src/shared/`                                      | 自有 API 的输入/输出 schema 与推导类型                       | 环境绑定、secret、数据库模块 |
+| `src/client/`                                      | Vue 路由、一个 Session 控制器、按功能组织的页面              | 服务端权限判定               |
+| `scripts/`                                         | 本地契约生成、构建产物核验、发布和恢复入口                   | 运行时自修复、通用部署平台   |
 
 依赖只能从入口流向功能模块，再流向认证/数据边界。共享目录不导入 worker/client。Cron 直接调用清理函数；Workflow 不模拟 HTTP 用户，不使用 API Key。只在真实复用时提取函数，不为每个查询机械增加 repository/service/controller 三层。
 
@@ -134,6 +135,8 @@ Better Auth 是 Session Cookie、JWE、登录 ceremony 和持久 Session 的唯�
 选择原因：本轮真实 workerd 探针证明，共享原生 D1 adapter 的客户端连接互斥会把一次挂起传给后续请求；请求隔离能消除这条放大链。它不能消除 D1 服务端排队，也不保证所有库模块都天然无共享状态。新增插件必须继续通过隔离、无初始化 D1 I/O 和缓存命中测试，失败时修正具体适配点，不能恢复共享 pending 对象。
 
 官方 Provider 的初始化会调用 resource seed；种子输入为空时跳过该操作。这是将 seed 移至 migration 的具体依据，不以“幂等”推断“无 I/O”。[Better Auth 1.7.2 Provider](https://raw.githubusercontent.com/better-auth/better-auth/v1.7.2/packages/oauth-provider/src/oauth.ts)、[resource 实现](https://raw.githubusercontent.com/better-auth/better-auth/v1.7.2/packages/oauth-provider/src/resources.ts)。
+
+签名密钥通过 JWT 插件公开的 `createJwk` adapter 持久化：库先完成私钥加密，D1 在同一 batch 中按算法执行条件插入并读取赢家；已有未到期 key 时复用，过期轮换保留旧公钥宽限。仅插入成功者记录轮换审计。该机制覆盖跨实例竞争，不共享请求 Promise，也不提高公钥缓存数量上限。[D1 batch 事务语义](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch)。
 
 ### 4.3 owner 与凭证边界
 
@@ -211,7 +214,7 @@ Vue 3 + `<script setup lang="ts">` + Vue Router。一个 Session 控制器管理
 | `/oauth/consent`        | 库要求的授权续接                                   | 只处理服务端签名 continuation                 |
 | `/api/docs`             | 私有 Scalar 文档                                   | owner Session；不存 token、不启用在线试请求   |
 
-根路由 `/` 重定向 Passkey 管理。Web/Mobile 在授权状态中保留“未启用”说明，不呈现可启用/可撤销按钮。页面容器负责请求，表单/列表接受 typed props 并 emit 操作意图；不在多层组件重复请求。
+页面按 [验收规格 §5.2](acceptance.md#52-各切片开放的能力) 随功能开放。R1 的根路由 `/` 提供最小账号状态与退出操作；R2 起重定向 Passkey 管理，不能在 R1 跳向尚不存在的页面。未登录访问受保护页面时进入登录流程，未启用页面返回明确的未开放/404 状态，不能靠隐藏导航代替关闭路由。Web/Mobile 在授权状态中保留“未启用”说明，不呈现可启用/可撤销按钮。页面容器负责请求，表单/列表接受 typed props 并 emit 操作意图；不在多层组件重复请求。
 
 ### 6.2 Session 状态
 
@@ -222,6 +225,12 @@ Vue 3 + `<script setup lang="ts">` + Vue Router。一个 Session 控制器管理
 | anonymous             | 清敏感内存并显示登录入口；来自明确的 Session 空结果或可信的凭证失效响应     |
 | unavailable           | 显示服务暂不可用与重试；不跳转 GitHub、不清掉表单来伪装注销                 |
 | 已登录后的 refreshing | 保留已挂载表单和一次性 key，冻结操作；结果成功后恢复，明确 anonymous 才清理 |
+
+管理请求收到明确的 `authentication-required` / `invalid-credential` Problem 401 时，交由唯一 Session 控制器进入 anonymous；列表读取、mutation 及成功后的刷新遵循同一规则，不再额外请求 get-session。请求开始时绑定身份 generation 和 Session ID，旧登录周期或其他窗口登录前的拒绝，以及已卸载页面的结果不能清掉新身份。未知 401、权限 403、recent-auth 403 与依赖故障不冒充注销。
+
+关闭 Better Auth 客户端默认自动跳转插件；GitHub、Passkey continuation 和 OAuth consent 的响应由所属流程检查 generation/页面生命周期后，才通过统一的 HTTP(S) 跳转函数执行。不能让库的 onSuccess 提前导航绕过这条检查。
+
+路由路径或查询变化时，使该页尚未完成的登录流程失效并恢复可操作状态；其迟到成功、错误和 fallback 均不作用于新页面。取消登录保留已确认的身份，不中断全局 Session 检查或退出请求。
 
 只由 Session 控制器负责初始化、可见性恢复、登录/退出后的刷新；只允许一条在途刷新，使用 generation 丢弃过时结果。关闭库重复的自动触发选项。恢复可见性时距上次成功检查不足 30 秒则不重复请求；长时间不可用可由用户离开页面清理内存。
 

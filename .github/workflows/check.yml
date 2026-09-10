@@ -1,36 +1,49 @@
 name: Check
-
 on:
   push:
-    branches: [refactor/v2]
+    branches: [main, refactor/v2]
   pull_request:
-    branches: [refactor/v2]
-
+    branches: [main, refactor/v2]
 permissions:
   contents: read
-
 concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   check:
     name: check
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Set up pnpm and Node.js
-        uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
-          runtime: node@24
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Check
-        run: pnpm run check
+          runtime: node@24.18.0
+          install: false
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm run check
+      - name: Build staging artifact
+        run: pnpm run build:release staging
+      - name: Build production artifact
+        run: pnpm run build:release production
+      - name: Preserve staging artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-staging-${{ github.sha }}
+          path: .output/releases/staging/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve production artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-production-${{ github.sha }}
+          path: .output/releases/production/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
