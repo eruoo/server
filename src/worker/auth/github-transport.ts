@@ -2,6 +2,18 @@ import type { BetterAuthPlugin } from "better-auth"
 import { authorizationCodeRequest, getOAuth2Tokens } from "better-auth/oauth2"
 import { z } from "zod"
 
+class GitHubHttpError extends Error {
+  constructor(readonly status: number) {
+    super("GitHub dependency unavailable")
+  }
+}
+
+const tokenExchangeErrors = new Set([
+  "incorrect_client_credentials",
+  "bad_verification_code",
+  "redirect_uri_mismatch",
+])
+
 async function readGitHubJson(
   url: string,
   init: RequestInit = {},
@@ -16,7 +28,7 @@ async function readGitHubJson(
       ...init.headers,
     },
   })
-  if (!response.ok) throw new Error("GitHub dependency unavailable")
+  if (!response.ok) throw new GitHubHttpError(response.status)
   if (!response.body) throw new Error("GitHub returned an empty body")
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
@@ -69,23 +81,51 @@ export function boundedGitHubTransport(): BetterAuthPlugin {
               : {
                   ...provider,
                   async validateAuthorizationCode(input) {
-                    const request = await authorizationCodeRequest({
-                      ...input,
-                      options: provider.options ?? {},
-                    })
-                    const data = await readGitHubJson(
-                      "https://github.com/login/oauth/access_token",
-                      {
-                        method: "POST",
-                        body: request.body,
-                        headers: request.headers,
-                      },
-                    )
-                    const parsed = z
-                      .object({ access_token: z.string().min(1) })
-                      .passthrough()
-                      .parse(data)
-                    return getOAuth2Tokens(parsed)
+                    let reason = "request_failed"
+                    try {
+                      const request = await authorizationCodeRequest({
+                        ...input,
+                        options: provider.options ?? {},
+                      })
+                      const data = await readGitHubJson(
+                        "https://github.com/login/oauth/access_token",
+                        {
+                          method: "POST",
+                          body: request.body,
+                          headers: request.headers,
+                        },
+                      )
+                      if (
+                        typeof data === "object" &&
+                        data !== null &&
+                        "error" in data
+                      ) {
+                        reason =
+                          typeof data.error === "string" &&
+                          tokenExchangeErrors.has(data.error)
+                            ? data.error
+                            : "oauth_error"
+                        throw new Error("GitHub token request rejected")
+                      }
+                      reason = "invalid_token_response"
+                      const parsed = z
+                        .object({ access_token: z.string().min(1) })
+                        .passthrough()
+                        .parse(data)
+                      return getOAuth2Tokens(parsed)
+                    } catch (error) {
+                      console.error({
+                        event: "github_code_exchange_failed",
+                        reason:
+                          error instanceof GitHubHttpError
+                            ? "http_error"
+                            : reason,
+                        ...(error instanceof GitHubHttpError
+                          ? { status: error.status }
+                          : {}),
+                      })
+                      throw error
+                    }
                   },
                   async getUserInfo(token) {
                     const headers = {

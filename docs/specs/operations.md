@@ -177,7 +177,7 @@ BETTER_AUTH_SECRETS 轮换先加入新主版本并保留仍被 D1 密文引用�
 2. **选择版本**：owner 手动运行 deploy workflow，输入环境和完整 commit SHA。workflow 必须从 main 上受保护的定义执行；生产只接受 owner 的触发及重新运行，不能凭仓库写权限冒充生产授权。GitHub 原生 workflow_dispatch 提供按钮/CLI/API，不增加自建发布后台或依赖额外付费审批功能。
 3. **核对产物**：确认 SHA 属于 main 历史、同仓库该 SHA 的指定 CI 成功、环境一致，验证下载产物的来源与摘要。产物保留 7 天；缺失或过期时重跑该 SHA 的 CI，不能换一个 SHA 或本地重建后声称使用原产物。发布阶段不重复全套测试或 Vite 构建。
 4. **写入**：使用锁定 Wrangler 和选定环境的部署 token。检查精确 Worker name、account/D1/R2 ID、Origin、assets、必要 binding/secret 名称及已启用功能的 cron。只在存在未应用 migration 时执行迁移，随后显式 `wrangler deploy --config <产物中的实际配置路径>`。不通过 deploy 时的 `--env` 改变已构建环境，不自动创建缺失的 D1/R2；Workflow 依赖 Worker 导出的类，首次发布随代码注册配置中的定义，之后按固定名称更新。每个环境最多一个在执行的发布，不自动取消正在迁移/部署的任务。
-5. **验收**：读回版本、binding 和启用的 cron；检查 health、无凭证 Session、受保护入口拒绝、API 404 非 HTML，及本次变更涉及的已启用流程。每个 HTTP 冒烟探针有 10 秒 deadline，整组预算 60 秒。失败明确标记发布未通过；发生远端写入后不自动重试或继续下一版本。
+5. **验收**：读回版本、binding 和启用的 cron；检查 health、无凭证 Session、受保护入口拒绝、API 404 非 HTML，及本次变更涉及的已启用流程。每个 HTTP 冒烟探针最多 10 秒，整组共用 60 秒预算。仅当 health 返回 200 且版本仍属于读回的已知历史部署时，在剩余预算内每秒复查 health；命中目标版本后才检查其他入口。未知/缺失版本、HTTP 错误、无效正文立即失败，超时报告目标和已知观测版本。该等待只重复只读 health 请求，不重放 migration/deploy；失败明确标记发布未通过，发生远端写入后不自动重试或继续下一版本。
 
 迁移前，发布脚本在 D1 的 `deployment_migrations` 运维表保存唯一一行 `databaseId + migrations`（文件名到 SHA-256 的映射）。DDL 由发布模块单独维护，早于应用 migration，因此不写入 Wrangler migration ledger；备份恢复规划器从同一 DDL 校验它。首次只接受空库；没有记录且非空的库仍拒绝。既有发布补建记录只允许旧 Worker 的 DB binding ID 与目标库一致，并校验其 RELEASE_MIGRATIONS；更换 DB binding 不继承旧库凭据。记录写入或 migration/deploy 失败后不自动重试；下次人工发起必须再次验证目标 D1 ID、已有 ledger 的精确前缀，以及所有已记录 migration 的内容未变。记录涵盖可能已经执行的计划文件，不能通过修改未确认完成的文件绕过恢复检查。验证通过后仅补未应用 migration，再部署；不靠删除数据库恢复发布。
 
