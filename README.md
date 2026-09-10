@@ -28,4 +28,4 @@ pnpm run deploy:staging <完整的已通过 CI 的 SHA>
 pnpm run deploy:production <完整的已通过 CI 的 SHA>
 ```
 
-这些命令会触发远端操作，须在获得对应环境、版本的授权后执行。首次上线前须创建并填入新 D1/R2、配置 secrets/生命周期和 GitHub Environment，见 [接线清单](docs/specs/implementation.md#4-运行与首次发布接线)。当前配置中的资源占位值会让发布前检查失败。
+这些命令会触发远端操作，须在获得对应环境、版本的授权后执行。远端资源已按原名准备并写入配置；已完成接线与首次发布剩余步骤见 [接线记录](docs/specs/implementation.md#4-运行与首次发布接线)。资源准备不代表新版已发布。

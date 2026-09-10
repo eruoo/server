@@ -32,7 +32,7 @@ const secrets = [
   "AUDIT_IP_HASH_SECRET",
   "D1_EXPORT_API_TOKEN",
 ]
-const config = {
+const stagingConfig = {
   name: "eruoo-server-staging",
   vars: {
     CF_ACCOUNT_ID: accountId,
@@ -44,16 +44,20 @@ const config = {
     }),
   },
   d1_databases: [
-    { binding: "DB", database_id: databaseId, database_name: "new-db" },
+    {
+      binding: "DB",
+      database_id: databaseId,
+      database_name: "eruoo-server-staging",
+    },
   ],
   r2_buckets: [
-    { binding: "BACKUPS", bucket_name: "eruoo-server-backups-v2-staging" },
+    { binding: "BACKUPS", bucket_name: "eruoo-server-backups-staging" },
   ],
   assets: { binding: "ASSETS" },
   workflows: [
     {
       binding: "DATABASE_BACKUP_WORKFLOW",
-      name: "eruoo-server-backup-v2-staging",
+      name: "eruoo-database-backup-staging",
       class_name: "DatabaseBackupWorkflow",
     },
   ],
@@ -64,12 +68,14 @@ const config = {
   triggers: { crons: ["0 19 * * *", "0 20 * * *"] },
   secrets: { required: secrets },
 }
+let config: typeof stagingConfig
 let db: DatabaseSync
 let deployed = false
 let failDeploy = true
 let priorDatabaseId: string | undefined
 const argv = process.argv
 beforeEach(() => {
+  config = structuredClone(stagingConfig)
   db = new DatabaseSync(":memory:")
   deployed = false
   failDeploy = true
@@ -195,7 +201,10 @@ beforeEach(() => {
           ],
         }
       else if (url.includes("/d1/database/"))
-        result = { uuid: databaseId, name: "new-db" }
+        result = {
+          uuid: databaseId,
+          name: config.d1_databases[0]!.database_name,
+        }
       else if (url.includes("/r2/buckets/"))
         result = { name: config.r2_buckets[0]!.bucket_name }
       else throw new Error("Unexpected request")
@@ -213,6 +222,53 @@ async function deploy() {
   vi.resetModules()
   await import("./deploy-release")
 }
+function selectEnvironment(environment: "staging" | "production") {
+  process.argv[3] = environment
+  if (environment === "production") {
+    config.name = "eruoo-server-production"
+    config.vars.APP_ORIGIN = "https://auth.eruoo.me"
+    config.d1_databases[0]!.database_name = "eruoo-server"
+    config.r2_buckets[0]!.bucket_name = "eruoo-server-backups"
+    config.workflows[0]!.name = "eruoo-database-backup"
+    vi.stubEnv("GITHUB_ACTOR_ID", "50254496")
+    vi.stubEnv("GITHUB_ACTOR", "LoTwT")
+    vi.stubEnv("GITHUB_TRIGGERING_ACTOR", "LoTwT")
+  }
+}
+it.each(["staging", "production"] as const)(
+  "deploys %s with its stable resource names and verifies the deployed bindings",
+  async (environment) => {
+    selectEnvironment(environment)
+    failDeploy = false
+    await expect(deploy()).resolves.toBeUndefined()
+    expect(deployed).toBe(true)
+    expect(mocks.spawnSync).toHaveBeenCalledTimes(2)
+    expect(mocks.spawnSync.mock.calls[0]?.[1]).toContain("migrations")
+    expect(mocks.spawnSync.mock.calls[1]?.[1]).toContain("deploy")
+  },
+)
+it.each([
+  ["staging", "bucket", "eruoo-server-backups"],
+  ["production", "bucket", "eruoo-server-backups-staging"],
+  ["staging", "workflow", "eruoo-database-backup"],
+  ["production", "workflow", "eruoo-database-backup-staging"],
+  ["staging", "bucket", "eruoo-server-backups-v2-staging"],
+  ["production", "workflow", "eruoo-server-backup-v2-production"],
+] as const)(
+  "rejects %s %s target %s before any remote request or mutation",
+  async (environment, resource, name) => {
+    selectEnvironment(environment)
+    if (resource === "bucket") config.r2_buckets[0]!.bucket_name = name
+    else config.workflows[0]!.name = name
+    await expect(deploy()).rejects.toThrow(
+      resource === "bucket"
+        ? "Configure the isolated D1 and backup bucket"
+        : "Release workflow identity differs",
+    )
+    expect(fetch).not.toHaveBeenCalled()
+    expect(mocks.spawnSync).not.toHaveBeenCalled()
+  },
+)
 it("resumes the real deployment script after migrations committed but deploy failed", async () => {
   await expect(deploy()).rejects.toThrow("Remote write failed")
   expect(

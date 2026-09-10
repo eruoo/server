@@ -36,6 +36,9 @@ if (
 )
   throw new Error("Missing or mismatched Cloudflare account configuration")
 const expectedName = `eruoo-server-${environment}`
+const resourceSuffix = environment === "production" ? "" : "-staging"
+const expectedBucketName = `eruoo-server-backups${resourceSuffix}`
+const expectedWorkflowName = `eruoo-database-backup${resourceSuffix}`
 const expectedOrigin =
   environment === "production"
     ? "https://auth.eruoo.me"
@@ -59,10 +62,10 @@ if (
   ) ||
   database.database_id !== config.vars.D1_DATABASE_ID ||
   !bucket ||
-  bucket.bucket_name !== `eruoo-server-backups-v2-${environment}`
+  bucket.bucket_name !== expectedBucketName
 )
   throw new Error(
-    "Configure the new isolated D1 and backup bucket before deploying",
+    "Configure the isolated D1 and backup bucket before deploying",
   )
 if (
   config.assets?.binding !== "ASSETS" ||
@@ -94,7 +97,7 @@ for (const [name, limit] of [
 if (
   !config.workflows.some(
     (value: { name: string; binding: string; class_name: string }) =>
-      value.name === `eruoo-server-backup-v2-${environment}` &&
+      value.name === expectedWorkflowName &&
       value.binding === "DATABASE_BACKUP_WORKFLOW" &&
       value.class_name === "DatabaseBackupWorkflow",
   )
@@ -281,7 +284,7 @@ if (
   !settings.bindings.some(
     (value) =>
       value.name === "DATABASE_BACKUP_WORKFLOW" &&
-      value.workflow_name === `eruoo-server-backup-v2-${environment}`,
+      value.workflow_name === expectedWorkflowName,
   ) ||
   !settings.bindings.some(
     (value) => value.name === "ASSETS" && value.type === "assets",
