@@ -20,7 +20,7 @@ async function readGitHubJson(
 ): Promise<unknown> {
   const response = await fetch(url, {
     ...init,
-    redirect: "error",
+    redirect: "manual",
     signal: AbortSignal.timeout(10_000),
     headers: {
       accept: "application/json",

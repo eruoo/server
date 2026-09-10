@@ -126,7 +126,7 @@ Cron 只做派发，长任务由 Workflow 完成。instance ID 命名保持稳�
 | R2 项目预算              | 总量达 8,000,000,000 bytes 告警；新总量必须严格小于 9,000,000,000 bytes                 |
 | 单 SQL 对象              | 必须有规范正整数 Content-Length 且严格小于 5 GiB                                        |
 
-以上是初始运行预算，不是平台性能承诺或永久免费上限。存储到达告警线时核算未来 30 天需求与月费，必要时请求 owner 调整预算；未批准新预算前，达到现有写入上限仍停止新增并明确报告备份失败，不隐性产生未评估的费用。所有对外 fetch `redirect:error`，避免 Bearer 误转发与额外请求；校验状态码、JSON schema、bookmark 和 signed URL 的 HTTPS。signed URL 不写日志，响应流直接传给 R2.put，不整库读入 Worker 内存。
+以上是初始运行预算，不是平台性能承诺或永久免费上限。存储到达告警线时核算未来 30 天需求与月费，必要时请求 owner 调整预算；未批准新预算前，达到现有写入上限仍停止新增并明确报告备份失败，不隐性产生未评估的费用。所有对外 fetch 使用 `redirect:manual`，并由状态码校验直接拒绝 3xx，避免 Bearer 误转发与额外请求；当前锁定的 workerd 原生 Request 会拒绝 `redirect:error`，不能以替换 fetch 的测试证明兼容。继续校验状态码、JSON schema、bookmark 和 signed URL 的 HTTPS。signed URL 不写日志，响应流直接传给 R2.put，不整库读入 Worker 内存。
 
 专用 bucket 只能由持有 lease 的备份 Workflow 写入。相比旧实现，正常路径只在已知 Content-Length、准备 put 时做**一次完整容量盘点**；第一次 export 前盘点删去，因为它不能替代写入前的新鲜检查。所有对象及后缀都计入，最多 10 页 × 1000 对象，超出即失败并告警，不无限扫描。达到容量边界时停止新增，不提前删除未到保留期的快照。
 

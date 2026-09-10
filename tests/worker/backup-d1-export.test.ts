@@ -31,7 +31,10 @@ function exportResponse(
 
 describe("D1 REST export client", () => {
   it("starts one complete export without dump filters", async () => {
-    const fetcher = vi.fn<BackupFetch>(async () => exportResponse({}))
+    const fetcher = vi.fn<BackupFetch>(async (input, init) => {
+      expect(new Request(input, init).redirect).toBe("manual")
+      return exportResponse({})
+    })
 
     await expect(
       startD1Export(fetcher, {
@@ -49,22 +52,23 @@ describe("D1 REST export client", () => {
       Authorization: `Bearer ${apiToken}`,
       "Content-Type": "application/json",
     })
-    expect(request?.[1]?.redirect).toBe("error")
+    expect(request?.[1]?.redirect).toBe("manual")
     expect(JSON.parse(String(request?.[1]?.body))).toEqual({
       output_format: "polling",
     })
   })
 
   it("parses a completed poll and never sends dump options again", async () => {
-    const fetcher = vi.fn<BackupFetch>(async () =>
-      exportResponse({
+    const fetcher = vi.fn<BackupFetch>(async (input, init) => {
+      expect(new Request(input, init).redirect).toBe("manual")
+      return exportResponse({
         result: {
           filename: "dump.sql",
           signed_url: "https://signed.example/dump.sql",
         },
         status: "complete",
-      }),
-    )
+      })
+    })
 
     await expect(
       pollD1Export(fetcher, {
@@ -82,7 +86,7 @@ describe("D1 REST export client", () => {
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
       current_bookmark: "bookmark-1",
     })
-    expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe("error")
+    expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe("manual")
   })
 
   it("accepts optional inner export discriminators omitted by the API", async () => {
@@ -133,17 +137,17 @@ describe("D1 REST export client", () => {
   )
 
   it("downloads only an HTTPS signed URL as a stream", async () => {
-    const fetcher = vi.fn<BackupFetch>(
-      async () =>
-        new Response("SELECT 1;", { headers: { "Content-Length": "9" } }),
-    )
+    const fetcher = vi.fn<BackupFetch>(async (input, init) => {
+      expect(new Request(input, init).redirect).toBe("manual")
+      return new Response("SELECT 1;", { headers: { "Content-Length": "9" } })
+    })
     const download = await downloadD1Export(
       fetcher,
       "https://signed.example/dump.sql",
     )
 
     expect(download.contentLength).toBe(9)
-    expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe("error")
+    expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe("manual")
     await expect(new Response(download.body).text()).resolves.toBe("SELECT 1;")
     await expect(
       downloadD1Export(fetcher, "http://signed.example/dump.sql"),
@@ -163,6 +167,38 @@ describe("D1 REST export client", () => {
       await expect(
         downloadD1Export(fetcher, "https://signed.example/dump.sql"),
       ).rejects.toThrow("backup_export_download_invalid")
+    },
+  )
+
+  it.each(["start", "poll", "download"] as const)(
+    "refuses a %s redirect without a retry or follow-up request",
+    async (operation) => {
+      const fetcher = vi.fn<BackupFetch>(async (input, init) => {
+        expect(new Request(input, init).redirect).toBe("manual")
+        return new Response(null, {
+          status: 307,
+          headers: { location: "https://redirect.invalid/credentials" },
+        })
+      })
+      const result =
+        operation === "download"
+          ? downloadD1Export(fetcher, "https://signed.example/dump.sql")
+          : operation === "start"
+            ? startD1Export(fetcher, { accountId, apiToken, databaseId })
+            : pollD1Export(fetcher, {
+                accountId,
+                apiToken,
+                databaseId,
+                bookmark: "bookmark-1",
+              })
+      await expect(result).rejects.toMatchObject({
+        code:
+          operation === "download"
+            ? "backup_export_download_failed"
+            : "backup_export_request_failed",
+        retryable: false,
+      })
+      expect(fetcher).toHaveBeenCalledTimes(1)
     },
   )
 })

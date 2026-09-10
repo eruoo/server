@@ -179,7 +179,7 @@ async function sendD1ExportRequest(
           "Content-Type": "application/json",
         },
         method: "POST",
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(30_000),
       },
     )
@@ -298,7 +298,7 @@ export async function downloadD1Export(
   try {
     response = await fetcher(signedUrl, {
       method: "GET",
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(timeoutMs),
     })
   } catch (error) {

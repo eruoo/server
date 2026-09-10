@@ -126,6 +126,16 @@ owner 要求继续完成可自动处理的上线准备，以下配置均已执�
 
 本地完整 `pnpm run check` 通过：Worker 190 项、前端 30 项、脚本 54 项、Chromium 4 项，共 **278 项**。六项发布回归与五项 GitHub 诊断回归均先在原实现上检出失败，再验证修正。检查同类入口后，版本比较和 GitHub token 兑换各只有这一处实现；GitHub 正常 owner 登录、拒绝非 owner、凭证/PKCE 参数及正文超时测试继续通过。
 
+### 4.4 2026-09-10 发布通过与原生网络兼容性修正
+
+[PR #15](https://github.com/eruoo/server/pull/15) 合入 `87e44c6200b6b629efb9d7dcfcaffc9aeb675f5c`；[main CI](https://github.com/eruoo/server/actions/runs/34466187065) 和 [staging 发布](https://github.com/eruoo/server/actions/runs/34466475698) 均成功。发布没有新 migration，五个冒烟全部通过；Worker 版本 `2ebfa525-c1b1-478a-b889-5d35271de9bf`、deployment `78e3c064-e191-4bba-8d75-3d961895cbac` 已读回。production 版本与空 cron 保持不变。
+
+真实 GitHub 回跳仍失败，新诊断为 `request_failed`。随后用合成凭证执行锁定 workerd 的原生 fetch，确认 `redirect: "error"` 在网络请求发出前抛出 TypeError。原测试替换了 fetch，掩盖了这个参数不兼容；GitHub 错误不能据此归因于密码或 client secret。修正覆盖全部三处同类调用：GitHub JSON 传输、D1 export 的 start/poll、SQL 下载。均改为 `manual`，复用既有非 2xx 拒绝逻辑；备份 3xx 不重试，任何调用都不跟随 Location。
+
+回归现在经过 workerd 原生 Request 构造校验，再模拟外部响应；保留正常 owner/非 owner 与 export/poll/download 正向测试，补充 GitHub 五类重定向和备份三种操作的重定向拒绝。原生网络探针只使用合成凭证，未更换 GitHub secret；该修正的真实登录和备份验收仍需使用新 main 产物完成。
+
+旧实现运行这些回归时 13 项失败；修复后完整 `pnpm run check` 通过：Worker 198 项、前端 30 项、脚本 54 项、Chromium 4 项，共 **286 项**。测试为每次登录分配独立合成 IP，并在发起与回调中保持一致，避免新增案例互相消耗粗限流额度；未放宽实际限流策略。
+
 ## 5. 尚未执行的外部验收
 
 Cloudflare 与 GitHub 接线、首次 staging migration/应用上传/Workflow 注册和 cron 已按 §4.1–§4.3 执行。以下结果仍需在实际授权环境取得，不能由本地测试替代：
