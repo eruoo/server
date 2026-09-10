@@ -176,15 +176,35 @@ owner 更新导出 Secret 后，个人 Token verify 返回 Active，并确认该
 
 完整 `pnpm run check` 通过：Worker 209 项、前端 30 项、脚本 54 项、Chromium 4 项，共 **297 项**。仅导出客户端和调度间隔需要修正；编排中的 bookmark 一致性、下载与 R2 上传校验保持有效。本轮未重跑全量消融矩阵。
 
-脱敏对照与部署读回保存在本地忽略目录 `.output/staging-release-2026-09-11/`；未记录 Token、SQL 或签名下载地址。production v2 尚未发布，隔离恢复尚未导入。
+脱敏对照与部署读回保存在本地忽略目录 `.output/staging-release-2026-09-11/`；对照日志未记录 Token、SQL 或签名下载地址。该轮修正后的真实备份与隔离恢复结果见 §4.8。
+
+### 4.8 2026-09-11 完整备份与隔离恢复通过
+
+[PR #19](https://github.com/eruoo/server/pull/19) 合入 `640b8da00958a36ebdcff9a804e9ec5a2454144b`；[main CI](https://github.com/eruoo/server/actions/runs/34508285701) 与 [staging 发布](https://github.com/eruoo/server/actions/runs/34508722531) 成功，无新增 migration。发布 job 约 65 秒，Worker 版本 `255bf6b2-cbed-4f33-895c-379fa0852967`、deployment `4f9c4638-5002-4828-9b9b-a2031e7f2f66` 与 RELEASE_SHA 已读回；保留 owner 新写入的导出 Secret。
+
+§4.7 的失败实例留下未到期 lease。重新确认实例已 errored、没有活动实例、从未进入下载/上传、R2 仍为空且 health 对应该次失败后，以原 ownerId、expiresAt 与失败终态条件删除唯一 lease 行；没有强占上传中的任务或改变租约时长。
+
+真实实例 `database-backup-v1-20260911-acceptance-640b8da` 于 17:34:16–17:34:26 UTC 完成：full export 启动一次、5 秒后 poll 一次、容量盘点一次、流式上传一次，所有步骤均只尝试一次。R2 保存 **22,025 bytes** SQL，`database_backup_health` 为 `ok` 并写入 lastSuccessAt。新 Token 已通过实际完整导出→下载→R2 保存链路验证，无需再次更换。
+
+通过原生 R2 HEAD 核对对象大小、ETag、11 个 metadata 字段及源 Worker 版本；下载文件的 MD5 与 ETag 一致。本地恢复规划器接受真实导出，确认 schema、外键和唯一 `0001_foundation.sql` migration；没有待补 migration。随后将快照导入既有空库 `eruoo-server-restore-20260910-1f4612b`（`e74c0ef8-1f2a-4d51-8866-baf35c03ae9d`），未切换 staging 或 production binding。
+
+隔离库验收于 17:48:37 UTC 完成：
+
+- 清除快照内 3 个 Session、1 个 Passkey、provider 凭证和 9 条审计记录；其余安全状态表均核验为空。user 与 GitHub account 各一行，内容及关联保持一致，外键违规为 0。
+- 按当前清单恢复静态 OAuth client/resource；源 `deployment_migrations` 记录已清除，核验后写入隔离目标 ID 与当前 migration 内容摘要。
+- 使用当前 Better Auth 和原生远端 D1 生成新 Ed25519、RS256/2048 密钥，私钥加密存储，两个算法的签名验证通过。源快照 JWKS 为 0 行，因此该快照不覆盖已有 JWKS 行的清理验收。演练使用独立本地测试 Secret，没有轮换任何线上认证 Secret，也未部署对外恢复应用。
+- 原生会话 hook 允许保留的 owner 创建会话，拒绝无 owner 关联的用户；新会话读取通过，撤销后拒绝，3 个源 Session 均不能在恢复库查回。测试会话已删除，未重演 GitHub 网络登录、未签发 OAuth grant。
+- 全部校验完成后才写入唯一 `database_restore_completed` 审计。终态保留 user/account 各一行、新 JWKS 两行和该审计一行，无 Session、Passkey、API Key 或 OAuth token。
+
+脱敏执行回执保存在上述本地忽略目录；完整 SQL 与隔离演练 Secret 单独以私有文件权限保存，不进入 Git、执行日志或报告。最后读回确认原 staging/production D1 binding 未变，owner 在 production Dashboard 更新 Secret 所产生的 deployment `9c2d02eb-ba62-4eba-975b-7adb5b4a055d` 保持不变；production v2 尚未发布。
 
 ## 5. 尚未执行的外部验收
 
 Cloudflare 与 GitHub 接线、首次 staging migration/应用上传/Workflow 注册和 cron 已按 §4.1–§4.3 执行。以下结果仍需在实际授权环境取得，不能由本地测试替代：
 
-- D1 export 轮询修正后的真实备份验证、production 首次发布及其 token 实际有效性；任何进一步导出权限调整仍按 §4.6 的实际凭证身份授权。
+- production 首次发布及其 runtime secret 的实际有效性；staging 新导出 Token、完整备份和隔离恢复已在 §4.8 通过。
 - 远端端到端 code→refresh→revoke；地区/冷启动/CPU/尾延迟与后续常规发布耗时样本。真实 owner GitHub 与 Passkey 登录已通过。
-- 一次成功的真实备份导出/上传、停止/超时行为、向已建隔离 D1 导入恢复、凭证清理、新信任验证、代码回退演练。
+- Workflow 停止/超时后的外部副作用边界与代码回退演练；成功导出/上传、隔离库导入、凭证清理及新信任验证已在 §4.8 通过。
 - Desktop App、Rust 安全存储、客户端打包与跨端联调：按 owner 最新决定延期，不属于本次 Web 交付。
 
 恢复规划器只输出可审核计划；恢复、secret 轮换、资源删除及正式部署仍需当次具体授权。Git 提交和 PR 合并与这些平台操作分别记录，不代表远端发布或验收已经完成。
