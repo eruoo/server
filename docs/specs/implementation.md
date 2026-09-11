@@ -198,13 +198,79 @@ owner 更新导出 Secret 后，个人 Token verify 返回 Active，并确认该
 
 脱敏执行回执保存在上述本地忽略目录；完整 SQL 与隔离演练 Secret 单独以私有文件权限保存，不进入 Git、执行日志或报告。最后读回确认原 staging/production D1 binding 未变，owner 在 production Dashboard 更新 Secret 所产生的 deployment `9c2d02eb-ba62-4eba-975b-7adb5b4a055d` 保持不变；production v2 尚未发布。
 
-## 5. 尚未执行的外部验收
+### 4.9 2026-09-11 staging 可靠性专项
+
+本轮按 owner 的继续指令验收 staging 性能、Workflow 中断边界与代码回退；未签发 OAuth grant，未发布 production。性能采样固定使用 §4.8 的 Worker 版本，Git 中的文档更新不作为新运行时代码。
+
+**Workflow 中断。** 使用独立私有 Worker/Workflow/R2 `eruoo-reliability-staging`，无公网入口、无 Secret、无 D1 或业务备份绑定。探针调用当前 `uploadD1ExportToR2`，通过原生 HTTP Service Binding 提供 64 KiB 合成 SQL 流，实际交给原生 R2.put；使用真实 Cloudflare Workflow 引擎。只缩短实验时限并关闭额外重试，未修改 staging 的运行预算。
+
+| 对照                                 | 实际终态及外部对象                                                                                          |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| 正常上传                             | complete；步骤约 1.21 秒，保存 65,536 bytes SQL                                                             |
+| 应用 3 秒截止、慢速流                | errored / `backup_upload_timed_out`；步骤约 3.41 秒，流随后停止，无 SQL 对象                                |
+| 平台 step timeout 2 秒               | errored / `WorkflowTimeoutError`；平台在 2 秒结束步骤，流随后停止，无 SQL 对象；应用 catch 没有完成错误记录 |
+| 首块已被消费、上传仍进行时 terminate | terminated；流随后停止，无 SQL 对象；应用 catch 没有完成错误记录                                            |
+| 上传已完成、步骤尚未返回时 terminate | terminated；已写入的 SQL 对象仍保留                                                                         |
+
+每组从派发起持续观察至少 42 秒，超过合成流正常完成时间与应用截止时间；截至最终读回，没有迟到的第三个 SQL 对象。两个成功写入对象的原生 R2 读取、大小、11 个 metadata 字段及 MD5/ETag 一致性均通过。结果仅证明此次小流与指定中断时点的行为，不证明大对象提交的所有竞争窗口、15 分钟运行或强制取消后应用健康状态必定落库；因此不放宽 lease，也不自动清理被终止任务的租约。25 个合成对象及三个临时资源已清理，并读回确认不存在。
+
+随后直接调用真实 staging D1 export：首次为 active，在 10 秒内不发任何 poll，下一次以原 bookmark 查询即为 complete，返回下载地址；总计约 12.94 秒，未下载行数据或记录签名 URL。这证明该次导出无需持续轮询也会继续完成，不证明停止轮询会取消服务端导出，也不建立平台状态保留时间保证。
+
+**Session 与性能。** 同一代理网络经 LAX，连续发送 30 次有效 JWE 请求、10 次仅 Session Cookie 的权威读取和匿名/health 对照；均返回 200。采样独立使用一个最长一小时的 owner 测试 Session，不改变真实登录会话。HTTP TTFB 包括客户端网络与连接成本；Cloudflare 的 CPU/wall time 单独报告。
+
+| 样本               | 数量 | TTFB p50 / p95 / max（ms）  |
+| ------------------ | ---- | --------------------------- |
+| warm JWE           | 30   | 220.812 / 233.524 / 292.878 |
+| warm D1            | 10   | 401.465 / 518.709 / 518.709 |
+| 匿名               | 3    | 220.310 / 623.107 / 623.107 |
+| health，含首次连接 | 6    | 202.134 / 786.973 / 786.973 |
+
+再执行五轮各 310 秒的无探针请求间隔，关闭 staging 浏览器页，并在整段采样期间保持同一 Worker 版本；不假定平台一定回收 isolate。每轮仅携带 Session Cookie，首次请求后紧随一次 health 对照。五轮均为 200，TTFB p50/p95/max 为 1260.457/1701.332/1701.332ms：
+
+| 闲置轮次 | TTFB（ms） | 平台 CPU / wall time（ms） |
+| -------- | ---------- | -------------------------- |
+| 1        | 1108.199   | 51 / 270                   |
+| 2        | 1701.332   | 76 / 786                   |
+| 3        | 1322.968   | 96 / 322                   |
+| 4        | 1260.457   | 84 / 308                   |
+| 5        | 1063.752   | 52 / 268                   |
+
+对应 health TTFB 为 199.800–221.269ms、平台 wall time 为 1–2ms。合计 60 次采样请求成功，性能探针 Session 已按自己的 id/token/userAgent 条件删除并确认剩余为 0。采样进程的远端开发连接曾输出 internal error；测量 HTTP 请求及最终 D1 清理均成功，未把该开发连接日志记为 staging 应用失败。
+
+后五次 warm health 为 200.706–206.244ms。Dashboard 可见的同一采样时段中，29 条 JWE 对应调用的 CPU p50/p95/max 为 11/19/92ms、wall time 为 14/33/93ms；10 条 D1 对应调用为 CPU 12/118/118ms、wall time 201/318/318ms。按时间与顺序对应，未逐条以 request ID 关联；精确一分钟窗口取得 48 条调用，一条 JWE 和一条匿名调用未取得平台记录，不补造数据。客户端 50 个响应的 request ID 均不同。官方遥测 API 在当前 Wrangler OAuth 权限下返回 403，以上读数来自已登录 Dashboard，未修改 Token 权限。
+
+30 个 JWE 请求均携带缓存 Cookie，且没有重新下发缓存；远端响应不直接暴露逐请求 D1 次数，不能仅据此写成远端零 I/O。当前代码的本地原生 workerd/D1 回归另行通过 2 文件、10 项测试，覆盖 JWE 零 I/O、滑动续期、过期会话、数据库故障 503，以及首请求阻塞时约 5 秒返回 504、相邻请求独立完成。没有将本地故障注入写成真实 D1 服务故障。
+
+warm TTFB 未达到 acceptance §4 的 100ms 门槛，五轮闲置首次请求也都超过 600ms 目标。网络已有约 200ms 基线，D1 调用另外存在等待及 CPU 峰值，第二次闲置请求的平台 wall time 本身也达到 786ms；不能只归因于其中一项，也不以减去 health 的数值冒充应用 TTFB。性能仍未通过，后续地区与尾延迟优化需按该门槛复测。
+
+**发布与回退。** 从受保护 main 的 `7f9713ab8593fe54a90c76d72b3ad6190d758f4c` 发布 staging；相对原 staging 的 `640b8da00958a36ebdcff9a804e9ec5a2454144b` 仅修改实施记录，应用代码、配置及 migration 相同。[CI 34511372587](https://github.com/eruoo/server/actions/runs/34511372587) 与 [staging 发布 34598345340](https://github.com/eruoo/server/actions/runs/34598345340) 均成功。CI job 为 218 秒，部署 job 为 36 秒，合计执行 254 秒（4 分 14 秒）；不含排队或 owner 等待，也不是连续实时时长。总执行时间在约 5 分钟目标内，但 CI 单阶段超过 3 分钟参考，单次样本不足以证明最近五次发布达标。
+
+新 Worker version 为 `92cc84f2-4e4b-464c-a6a3-8538c09ca09f`，deployment 为 `d6ba9aa5-369f-492b-8c84-bc3562be1f2a`。使用另一个最长一小时的测试 Session，依次验证原版本、发布后版本和回退版本均能读取同一会话；最后只删除该测试 Session，并核对剩余为 0，真实 owner 会话未变。
+
+回退选择凭证轮换之后的已验收版本 `255bf6b2-cbed-4f33-895c-379fa0852967`。首次请求因不支持的可选 annotation 被平台拒绝，health 确认版本未改变；移除该字段并重新核对后，以 `force=false` 保留平台的 Secret 变更保护，2026-09-11 12:23:34 UTC 回退成功。deployment 为 `bae13839-4716-4ca2-9505-3b6162c17e40`，100% 流量指向目标版本，成功提交及控制面读回约 2.75 秒。未轮换 Secret、回退数据库或修改 lifecycle。
+
+回退后再运行真实备份 `database-backup-v1-20260911-post-rollback-255bf6b`：约 9.04 秒 complete，非 sleep 步骤均一次成功，导出仅需一次 poll，SQL 为 21,511 bytes，`sourceRevision` 等于回退版本。原生 R2 HEAD 通过当前恢复描述符校验，包括 11 个 metadata 字段、大小和实例身份；backup health 为 ok。该次未下载完整 SQL，不重复记为隔离恢复验收。真实备份对象按现有 30 天策略保留，46 分钟 lease 按设计自然到期。
+
+最终确认活动版本的全部 binding 描述与演练前一致，UTC 19:00/20:00 两个 cron 未变、D1 外键检查为 0 个异常，production deployment 保持 `9c2d02eb-ba62-4eba-975b-7adb5b4a055d`。staging 当前实际运行 `640b8da` 对应版本；Worker `settings` 仍显示最新上传的 `7f9713a` 配置，不能据此判断当前运行 SHA。该差异触发了下节的发布脚本修复。
+
+本地脱敏观察、复现脚本和中断探针保存在 `.output/staging-reliability-2026-09-11/`；该目录不是长期产物仓库，临时平台资源不是后续运行依赖。
+
+### 4.10 活动版本配置校验修复
+
+上述回退实测表明，Worker `settings` 与当前 deployment 的版本配置可以不同。原发布脚本以最新上传的 binding 判断既有 D1 归属及发布成功，却用另一份 deployment 记录判断 health 版本；两者不一致时可能接纳错误数据库，或把旧版本误记为发布成功。
+
+现在迁移前与发布后都读取当前 deployment，要求单一版本承载 100% 流量，再从该版本的 `resources.bindings` 核对数据库归属、RELEASE_SHA 和其余必要 binding。HTTP health 必须命中同一个已核对版本。最新上传的 `settings` 只用于部署所需 Secret 名称及已声明 migration 摘要的保守检查，不能提供活动数据库的归属证明；目标库中的迁移记录仍独立校验。
+
+四项回归分别覆盖“最新上传配置指向目标非空库、活动版本却指向其他库”、“上传 SHA 正确但活动 SHA 过旧”、“上传 DB 正确但活动 DB 错误”及“活动版本混合分流”。实际先在原实现运行：四项均错误地执行到部署成功，18 项既有对照通过；修复后 22 项发布脚本测试全部通过，脚本测试合计 6 文件、58 项通过。该修复不改变应用运行时、认证或 migration；§4.9 的真实发布使用修复前脚本，不作为新脚本已完成远端发布的证据。
+
+## 5. 尚未完成的外部验收
 
 Cloudflare 与 GitHub 接线、首次 staging migration/应用上传/Workflow 注册和 cron 已按 §4.1–§4.3 执行。以下结果仍需在实际授权环境取得，不能由本地测试替代：
 
 - production 首次发布及其 runtime secret 的实际有效性；staging 新导出 Token、完整备份和隔离恢复已在 §4.8 通过。
-- 远端端到端 code→refresh→revoke；地区/冷启动/CPU/尾延迟与后续常规发布耗时样本。真实 owner GitHub 与 Passkey 登录已通过。
-- Workflow 停止/超时后的外部副作用边界与代码回退演练；成功导出/上传、隔离库导入、凭证清理及新信任验证已在 §4.8 通过。
+- 远端端到端 code→refresh→revoke，需要另行明确授权测试 grant；真实 owner GitHub 与 Passkey 登录已通过。
+- §4.9 的 warm 与闲置首次请求性能未达标，仍需按实际使用地区优化、复测；常规发布阶段耗时尚未积累五次样本。不能把请求成功等同于性能通过。
+- Workflow 中断与代码回退已在 §4.9 完成所列场景；大对象提交竞争与长时限的所有窗口未穷尽。成功导出/上传、隔离库导入、凭证清理及新信任验证已在 §4.8 通过。
 - Desktop App、Rust 安全存储、客户端打包与跨端联调：按 owner 最新决定延期，不属于本次 Web 交付。
 
 恢复规划器只输出可审核计划；恢复、secret 轮换、资源删除及正式部署仍需当次具体授权。Git 提交和 PR 合并与这些平台操作分别记录，不代表远端发布或验收已经完成。

@@ -140,7 +140,7 @@ Cron 只做派发，长任务由 Workflow 完成。instance ID 命名保持稳�
 
 专用 bucket 只能由持有 lease 的备份 Workflow 写入。相比旧实现，正常路径只在已知 Content-Length、准备 put 时做**一次完整容量盘点**；第一次 export 前盘点删去，因为它不能替代写入前的新鲜检查。所有对象及后缀都计入，最多 10 页 × 1000 对象，超出即失败并告警，不无限扫描。达到容量边界时停止新增，不提前删除未到保留期的快照。
 
-lease 解决重叠盘点/写入的竞争，不是可取消 R2 操作的证明。无法确认旧上传已结束时，不允许人工强制夺取租约后继续写；先停止旧实例并核实对象。平台取消/超时、停止 polling 后 export 结束的真实行为，必须在 staging 验收，不能由定时器推断。官方 export API 本轮可读，但该副作用行为未在本轮重新部署验证。
+lease 解决重叠盘点/写入的竞争，不是可取消 R2 操作的证明。无法确认旧上传已结束时，不允许人工强制夺取租约后继续写；先停止旧实例并核实对象。平台取消/超时、停止 polling 后 export 结束的真实行为，必须在 staging 验收，不能由定时器推断。实际中断实验与覆盖限度见[实施记录 §4.9](implementation.md#49-2026-09-11-staging-可靠性专项)：强制停止可能跳过应用错误收尾，已完成的 R2 写入不会因此撤销；不能仅凭 terminated/errored 状态强制释放 lease。
 
 ### 4.4 对象与终态
 
@@ -187,9 +187,9 @@ BETTER_AUTH_SECRETS 轮换先加入新主版本并保留仍被 D1 密文引用�
 2. **选择版本**：owner 手动运行 deploy workflow，输入环境和完整 commit SHA。workflow 必须从 main 上受保护的定义执行；生产只接受 owner 的触发及重新运行，不能凭仓库写权限冒充生产授权。GitHub 原生 workflow_dispatch 提供按钮/CLI/API，不增加自建发布后台或依赖额外付费审批功能。
 3. **核对产物**：确认 SHA 属于 main 历史、同仓库该 SHA 的指定 CI 成功、环境一致，验证下载产物的来源与摘要。产物保留 7 天；缺失或过期时重跑该 SHA 的 CI，不能换一个 SHA 或本地重建后声称使用原产物。发布阶段不重复全套测试或 Vite 构建。
 4. **写入**：使用锁定 Wrangler 和选定环境的部署 token。检查精确 Worker name、account/D1/R2 ID、Origin、assets、必要 binding/secret 名称及已启用功能的 cron。只在存在未应用 migration 时执行迁移，随后显式 `wrangler deploy --config <产物中的实际配置路径>`。不通过 deploy 时的 `--env` 改变已构建环境，不自动创建缺失的 D1/R2；Workflow 依赖 Worker 导出的类，首次发布随代码注册配置中的定义，之后按固定名称更新。每个环境最多一个在执行的发布，不自动取消正在迁移/部署的任务。
-5. **验收**：读回版本、binding 和启用的 cron；检查 health、无凭证 Session、受保护入口拒绝、API 404 非 HTML，及本次变更涉及的已启用流程。每个 HTTP 冒烟探针最多 10 秒，整组共用 60 秒预算。仅当 health 返回 200 且版本仍属于读回的已知历史部署时，在剩余预算内每秒复查 health；命中目标版本后才检查其他入口。未知/缺失版本、HTTP 错误、无效正文立即失败，超时报告目标和已知观测版本。该等待只重复只读 health 请求，不重放 migration/deploy；失败明确标记发布未通过，发生远端写入后不自动重试或继续下一版本。
+5. **验收**：读回当前 deployment，要求单一 Worker version 承载 100% 流量，再读取该版本的 `resources.bindings`，核对 SHA 与必要 binding，并独立读回启用的 cron；最新上传的 Worker `settings` 不能证明活动版本配置。检查同一版本的 health、无凭证 Session、受保护入口拒绝、API 404 非 HTML，及本次变更涉及的已启用流程。每个 HTTP 冒烟探针最多 10 秒，整组共用 60 秒预算。仅当 health 返回 200 且版本仍属于读回的已知历史部署时，在剩余预算内每秒复查 health；命中目标版本后才检查其他入口。未知/缺失版本、HTTP 错误、无效正文立即失败，超时报告目标和已知观测版本。该等待只重复只读 health 请求，不重放 migration/deploy；失败明确标记发布未通过，发生远端写入后不自动重试或继续下一版本。
 
-迁移前，发布脚本在 D1 的 `deployment_migrations` 运维表保存唯一一行 `databaseId + migrations`（文件名到 SHA-256 的映射）。DDL 由发布模块单独维护，早于应用 migration，因此不写入 Wrangler migration ledger；备份恢复规划器从同一 DDL 校验它。首次只接受空库；没有记录且非空的库仍拒绝。既有发布补建记录只允许旧 Worker 的 DB binding ID 与目标库一致，并校验其 RELEASE_MIGRATIONS；更换 DB binding 不继承旧库凭据。记录写入或 migration/deploy 失败后不自动重试；下次人工发起必须再次验证目标 D1 ID、已有 ledger 的精确前缀，以及所有已记录 migration 的内容未变。记录涵盖可能已经执行的计划文件，不能通过修改未确认完成的文件绕过恢复检查。验证通过后仅补未应用 migration，再部署；不靠删除数据库恢复发布。
+迁移前，发布脚本在 D1 的 `deployment_migrations` 运维表保存唯一一行 `databaseId + migrations`（文件名到 SHA-256 的映射）。DDL 由发布模块单独维护，早于应用 migration，因此不写入 Wrangler migration ledger；备份恢复规划器从同一 DDL 校验它。首次只接受空库；没有记录且非空的库仍拒绝。既有发布补建记录只允许当前单一活动版本的 DB binding ID 与目标库一致，并校验该版本的 RELEASE_MIGRATIONS；更换 DB binding 不继承旧库凭据。最新上传 `settings` 中的 Secret 名称用于检查 Wrangler 部署所需凭证，其 migration 摘要仍作为不可改写的保守检查，但二者不能替代活动版本身份。记录写入或 migration/deploy 失败后不自动重试；下次人工发起必须再次验证目标 D1 ID、已有 ledger 的精确前缀，以及所有已记录 migration 的内容未变。记录涵盖可能已经执行的计划文件，不能通过修改未确认完成的文件绕过恢复检查。验证通过后仅补未应用 migration，再部署；不靠删除数据库恢复发布。
 
 发布记录由 Actions summary 自动生成：SHA、CI run/产物、目标环境、migration 结果、平台 version/deployment ID 和冒烟结果；后续 Desktop 客户端开始交付后，涉及其契约变更时关联配套版本与联调结果。无需手工复制流水线记录或切换 GitHub 账号推动 production 分支。
 
@@ -218,7 +218,7 @@ BETTER_AUTH_SECRETS 轮换先加入新主版本并保留仍被 D1 密文引用�
 
 owner 对精确 SHA、环境和声明的 migration 触发一次发布即可，不在流程中重复确认同一操作。设计确认不自动触发线上操作；额外数据删除、secret/lifecycle 修改仍需覆盖具体动作的授权。staging 继续遵循 [既有预授权](refactoring.md#7-执行配置owner-已确认)。默认 GITHUB_TOKEN 仅赋予所需的 contents/actions 读取权限；Cloudflare 部署 token 只在目标环境的发布 job 使用，runtime 仍使用 §1.1 的 CF_ACCOUNT_ID，不把 CI 凭证暴露给 PR 测试或浏览器。
 
-首次从空库启用没有旧业务数据迁移和差异合并步骤。旧资源暂时保留，不作为发布依赖，也不在发布失败时自动删除。开始真实使用后，普通发布仍需保证已发布 migration 不改写、新 schema 向后兼容；代码回退优先用上一成功 Worker version，涉及 Desktop 契约变更时同时核对客户端版本匹配。回退不撤销数据库写入、secret 或 lifecycle 修改，存在新数据时不能直接换回旧空库。首次正式使用前验证一次代码回退，以及将实际数据投入使用所需的备份恢复能力。
+首次从空库启用没有旧业务数据迁移和差异合并步骤。旧资源暂时保留，不作为发布依赖，也不在发布失败时自动删除。开始真实使用后，普通发布仍需保证已发布 migration 不改写、新 schema 向后兼容；代码回退优先用上一成功 Worker version，涉及 Desktop 契约变更时同时核对客户端版本匹配。回退不撤销数据库写入、R2 对象/lifecycle 或第三方凭证轮换，存在新数据时不能直接换回旧空库。Worker 变量与 Secret binding 属于版本配置，回退前必须确认目标版本包含当前有效凭证，不能假定最新 Secret 会自动保留；不选择凭证轮换之前的版本作为本次回退目标。[Versions](https://developers.cloudflare.com/workers/versions-and-deployments/)、[Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)。首次正式使用前验证一次代码回退，以及将实际数据投入使用所需的备份恢复能力。
 
 Desktop 已按 Q7 延后；以下跨端门槛在客户端启动交付后适用，不阻塞当前服务端/Web 的本地验收。后续首次启用实际 Desktop 和跨端破坏性变更，发布记录必须给出“服务端 SHA + Desktop 版本/commit + 联调结果 + 回退目标及能力影响”。先备妥配套客户端，再启用服务端能力；不要求维护旧版兼容层。首次 R5 可以回退到已验收的 R4，恢复浏览器管理并暂停 Desktop 授权，必须明确这不代表 Desktop 可用。后续回退若要求恢复 Desktop，必须有契约匹配的服务端/客户端组合，必要时切换客户端版本并重新授权；该组合未验证则阻止相应发布，不能把单端回退记为跨端已恢复。该要求复用现有发布记录，不建设协议版本协商系统。
 

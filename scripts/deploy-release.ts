@@ -134,11 +134,34 @@ type Binding = {
   workflow_name?: string
   simple?: { limit: number; period: number }
 }
+type WorkerDeployment = {
+  id: string
+  versions: { version_id: string; percentage: number }[]
+}
 const scriptPath = `workers/scripts/${expectedName}`
+async function readActiveWorkerVersion(
+  deployment: WorkerDeployment | undefined,
+) {
+  if (!deployment) return undefined
+  const version = deployment.versions[0]
+  if (deployment.versions.length !== 1 || version?.percentage !== 100)
+    throw new Error("Missing single fully deployed Worker version")
+  const details = await cloudflare<{
+    id: string
+    resources: { bindings: Binding[] }
+  }>(`${scriptPath}/versions/${version.version_id}`)
+  if (
+    details.id !== version.version_id ||
+    !Array.isArray(details.resources?.bindings)
+  )
+    throw new Error("Active Worker version identity or bindings differ")
+  return { versionId: details.id, bindings: details.resources.bindings }
+}
 const [
   remoteDatabase,
   remoteBucket,
-  previous,
+  latestSettings,
+  priorDeployments,
   lifecycle,
   managedDomain,
   customDomains,
@@ -148,6 +171,7 @@ const [
   ),
   cloudflare<{ name: string }>(`r2/buckets/${bucket.bucket_name}`),
   cloudflare<{ bindings: Binding[] }>(`${scriptPath}/settings`),
+  cloudflare<{ deployments: WorkerDeployment[] }>(`${scriptPath}/deployments`),
   cloudflare<unknown>(`r2/buckets/${bucket.bucket_name}/lifecycle`),
   cloudflare<{ enabled: boolean }>(
     `r2/buckets/${bucket.bucket_name}/domains/managed`,
@@ -156,6 +180,9 @@ const [
     `r2/buckets/${bucket.bucket_name}/domains/custom`,
   ),
 ])
+const previousActiveVersion = await readActiveWorkerVersion(
+  priorDeployments.deployments[0],
+)
 if (
   remoteDatabase.uuid !== database.database_id ||
   remoteDatabase.name !== database.database_name ||
@@ -174,7 +201,7 @@ if (
   requiredSecrets.length !== 5 ||
   requiredSecrets.some(
     (name) =>
-      !previous.bindings.some(
+      !latestSettings.bindings.some(
         (binding) => binding.type === "secret_text" && binding.name === name,
       ),
   )
@@ -183,7 +210,15 @@ if (
 const currentMigrations: Record<string, string> = JSON.parse(
   config.vars.RELEASE_MIGRATIONS,
 )
-const priorMigrationsText = previous.bindings.find(
+const latestMigrations: Record<string, string> = JSON.parse(
+  latestSettings.bindings.find(
+    (binding) => binding.name === "RELEASE_MIGRATIONS",
+  )?.text ?? "{}",
+)
+for (const [name, hash] of Object.entries(latestMigrations))
+  if (currentMigrations[name] !== hash)
+    throw new Error("A previously deployed migration was changed or removed")
+const priorMigrationsText = previousActiveVersion?.bindings.find(
   (binding) => binding.name === "RELEASE_MIGRATIONS",
 )?.text
 const priorMigrations: Record<string, string> = priorMigrationsText
@@ -240,8 +275,11 @@ await prepareMigrationReceipt({
   priorMigrations,
   hasPriorDeployment:
     Boolean(priorMigrationsText) &&
-    previous.bindings.some(
-      (binding) => binding.name === "DB" && binding.id === database.database_id,
+    Boolean(
+      previousActiveVersion?.bindings.some(
+        (binding) =>
+          binding.name === "DB" && binding.id === database.database_id,
+      ),
     ),
   tables: names,
   ledger,
@@ -257,44 +295,40 @@ await prepareMigrationReceipt({
 if (ledger.length < migrations.length)
   runWrangler(["d1", "migrations", "apply", "DB", "--remote"])
 runWrangler(["deploy"])
-const [settings, schedules, deployments] = await Promise.all([
-  cloudflare<{ bindings: Binding[] }>(`${scriptPath}/settings`),
+const [schedules, deployments] = await Promise.all([
   cloudflare<{ schedules: { cron: string }[] }>(`${scriptPath}/schedules`),
-  cloudflare<{
-    deployments: {
-      id: string
-      versions: { version_id: string; percentage: number }[]
-    }[]
-  }>(`${scriptPath}/deployments`),
+  cloudflare<{ deployments: WorkerDeployment[] }>(`${scriptPath}/deployments`),
 ])
+const activeVersion = await readActiveWorkerVersion(deployments.deployments[0])
+if (!activeVersion) throw new Error("Missing fully deployed Worker version")
 if (
-  !settings.bindings.some(
+  !activeVersion.bindings.some(
     (value) => value.name === "DB" && value.id === database.database_id,
   ) ||
-  !settings.bindings.some(
+  !activeVersion.bindings.some(
     (value) =>
       value.name === "BACKUPS" && value.bucket_name === bucket.bucket_name,
   ) ||
-  !settings.bindings.some(
+  !activeVersion.bindings.some(
     (value) => value.name === "RELEASE_SHA" && value.text === sha,
   )
 )
   throw new Error("Deployed binding or source verification failed")
 if (
-  !settings.bindings.some(
+  !activeVersion.bindings.some(
     (value) =>
       value.name === "DATABASE_BACKUP_WORKFLOW" &&
       value.workflow_name === expectedWorkflowName,
   ) ||
-  !settings.bindings.some(
+  !activeVersion.bindings.some(
     (value) => value.name === "ASSETS" && value.type === "assets",
   ) ||
-  !settings.bindings.some(
+  !activeVersion.bindings.some(
     (value) => value.name === "APP_ORIGIN" && value.text === expectedOrigin,
   ) ||
   requiredSecrets.some(
     (name) =>
-      !settings.bindings.some(
+      !activeVersion.bindings.some(
         (value) => value.name === name && value.type === "secret_text",
       ),
   )
@@ -305,7 +339,7 @@ for (const [name, limit] of [
   ["API_KEY_RATE_LIMITER", 5],
 ] as const)
   if (
-    !settings.bindings.some(
+    !activeVersion.bindings.some(
       (value) =>
         value.name === name &&
         value.simple?.limit === limit &&
@@ -318,10 +352,7 @@ if (
   JSON.stringify(crons)
 )
   throw new Error("Deployed cron verification failed")
-const expectedVersion = deployments.deployments[0]?.versions.find(
-  (version) => version.percentage === 100,
-)?.version_id
-if (!expectedVersion) throw new Error("Missing fully deployed Worker version")
+const expectedVersion = activeVersion.versionId
 const previousVersions = new Set(
   deployments.deployments
     .slice(1)
