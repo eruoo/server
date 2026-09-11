@@ -73,6 +73,13 @@ let db: DatabaseSync
 let deployed = false
 let failDeploy = true
 let priorDatabaseId: string | undefined
+type WorkerVersionResponse = {
+  result: {
+    resources: {
+      bindings: { name: string; id?: string; text?: string }[]
+    }
+  }
+}
 const argv = process.argv
 beforeEach(() => {
   config = structuredClone(stagingConfig)
@@ -139,42 +146,46 @@ beforeEach(() => {
           params?: string[]
         }
         result = [{ results: db.prepare(body.sql).all(...(body.params ?? [])) }]
-      } else if (url.endsWith("/settings"))
-        result = {
-          bindings: [
-            ...secrets.map((name) => ({ name, type: "secret_text" })),
-            ...(priorDatabaseId && !deployed
-              ? [
-                  { name: "DB", id: priorDatabaseId },
-                  {
-                    name: "RELEASE_MIGRATIONS",
-                    text: config.vars.RELEASE_MIGRATIONS,
-                  },
-                ]
-              : []),
-            ...(deployed
-              ? [
-                  ...Object.entries(config.vars).map(([name, text]) => ({
-                    name,
-                    text,
-                    type: "plain_text",
-                  })),
-                  { name: "DB", id: databaseId },
-                  {
-                    name: "BACKUPS",
-                    bucket_name: config.r2_buckets[0]!.bucket_name,
-                  },
-                  { name: "ASSETS", type: "assets" },
-                  {
-                    name: "DATABASE_BACKUP_WORKFLOW",
-                    workflow_name: config.workflows[0]!.name,
-                  },
-                  ...config.ratelimits,
-                ]
-              : []),
-          ],
-        }
-      else if (url.endsWith("/schedules"))
+      } else if (
+        url.endsWith("/settings") ||
+        url.endsWith("/versions/version-1")
+      ) {
+        const bindings = [
+          ...secrets.map((name) => ({ name, type: "secret_text" })),
+          ...(priorDatabaseId && !deployed
+            ? [
+                { name: "DB", id: priorDatabaseId },
+                {
+                  name: "RELEASE_MIGRATIONS",
+                  text: config.vars.RELEASE_MIGRATIONS,
+                },
+              ]
+            : []),
+          ...(deployed
+            ? [
+                ...Object.entries(config.vars).map(([name, text]) => ({
+                  name,
+                  text,
+                  type: "plain_text",
+                })),
+                { name: "DB", id: databaseId },
+                {
+                  name: "BACKUPS",
+                  bucket_name: config.r2_buckets[0]!.bucket_name,
+                },
+                { name: "ASSETS", type: "assets" },
+                {
+                  name: "DATABASE_BACKUP_WORKFLOW",
+                  workflow_name: config.workflows[0]!.name,
+                },
+                ...config.ratelimits,
+              ]
+            : []),
+        ]
+        result = url.endsWith("/settings")
+          ? { bindings }
+          : { id: "version-1", resources: { bindings } }
+      } else if (url.endsWith("/schedules"))
         result = { schedules: config.triggers.crons.map((cron) => ({ cron })) }
       else if (url.endsWith("/deployments"))
         result = {
@@ -284,6 +295,34 @@ it.each([
     expect(mocks.spawnSync).not.toHaveBeenCalled()
   },
 )
+
+it("rejects mixed active Worker versions before migration or deployment writes", async () => {
+  failDeploy = false
+  const original = vi.mocked(fetch).getMockImplementation()!
+  vi.mocked(fetch).mockImplementation(async (input, init) => {
+    if (String(input).endsWith("/deployments") && !deployed)
+      return Response.json({
+        success: true,
+        result: {
+          deployments: [
+            {
+              id: "mixed-release",
+              versions: [
+                { version_id: "version-0", percentage: 50 },
+                { version_id: "version-1", percentage: 50 },
+              ],
+            },
+          ],
+        },
+      })
+    return original(input, init)
+  })
+  await expect(deploy()).rejects.toThrow("fully deployed Worker version")
+  expect(mocks.spawnSync).not.toHaveBeenCalled()
+  expect(
+    db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all(),
+  ).toHaveLength(0)
+})
 it("resumes the real deployment script after migrations committed but deploy failed", async () => {
   await expect(deploy()).rejects.toThrow("Remote write failed")
   expect(
@@ -331,6 +370,67 @@ it("accepts the existing deployment only when its database binding matches", asy
   expect(mocks.spawnSync).toHaveBeenCalledTimes(1)
   expect(mocks.spawnSync.mock.calls[0]?.[1]).toContain("deploy")
 })
+
+it("does not adopt a populated database from an uploaded version while another database is active", async () => {
+  priorDatabaseId = databaseId
+  failDeploy = false
+  db.exec(
+    "CREATE TABLE user(id TEXT); CREATE TABLE d1_migrations(id INTEGER, name TEXT); INSERT INTO d1_migrations VALUES (1,'0001_foundation.sql');",
+  )
+  const original = vi.mocked(fetch).getMockImplementation()!
+  vi.mocked(fetch).mockImplementation(async (input, init) => {
+    const response = await original(input, init)
+    if (String(input).endsWith("/versions/version-1") && !deployed) {
+      const body = (await response.json()) as WorkerVersionResponse
+      body.result.resources.bindings.find(
+        (binding) => binding.name === "DB",
+      )!.id = "22222222-2222-4222-8222-222222222222"
+      return Response.json(body)
+    }
+    return response
+  })
+  await expect(deploy()).rejects.toThrow("not empty")
+  expect(mocks.spawnSync).not.toHaveBeenCalled()
+  expect(
+    db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE name='deployment_migrations'",
+      )
+      .all(),
+  ).toHaveLength(0)
+})
+
+it.each([
+  ["RELEASE_SHA", "text", "a".repeat(40)],
+  ["DB", "id", "22222222-2222-4222-8222-222222222222"],
+] as const)(
+  "rejects stale active %s even when the latest uploaded settings match the release",
+  async (name, property, value) => {
+    failDeploy = false
+    const original = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const response = await original(input, init)
+      if (String(input).endsWith("/versions/version-1") && deployed) {
+        const body = (await response.json()) as WorkerVersionResponse
+        body.result.resources.bindings.find(
+          (binding) => binding.name === name,
+        )![property] = value
+        return Response.json(body)
+      }
+      return response
+    })
+    await expect(deploy()).rejects.toThrow(
+      "Deployed binding or source verification failed",
+    )
+    expect(
+      vi
+        .mocked(fetch)
+        .mock.calls.filter(([url]) =>
+          String(url).startsWith(config.vars.APP_ORIGIN),
+        ),
+    ).toHaveLength(0)
+  },
+)
 
 it("waits for a known previous Worker version before continuing smoke probes", async () => {
   vi.useFakeTimers()
