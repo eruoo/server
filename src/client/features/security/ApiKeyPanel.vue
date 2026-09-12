@@ -80,7 +80,9 @@ onUnmounted(() => {
           step="1"
           :disabled="list.busy.value"
       /></label>
-      <button class="primary" :disabled="list.busy.value">创建密钥</button>
+      <button class="primary pressable" :disabled="list.busy.value">
+        创建密钥
+      </button>
     </form>
     <section v-if="secret" class="notice" aria-label="新密钥">
       <p>请保存密钥。关闭此处或离开页面后无法再次查看。</p>
@@ -91,14 +93,18 @@ onUnmounted(() => {
         autocomplete="off"
         spellcheck="false"
       />
-      <button :disabled="clipboardBusy" @click="copy">复制密钥</button
-      ><button @click="forget">已保存，关闭</button>
+      <button class="pressable" :disabled="clipboardBusy" @click="copy">
+        复制密钥</button
+      ><button class="pressable" @click="forget">已保存，关闭</button>
       <p role="status">{{ copyMessage }}</p>
     </section>
     <p role="status">{{ list.message.value }}</p>
     <template v-if="list.needsReauthentication.value"
-      ><button @click="session.signInPasskey">使用 Passkey 重新验证</button
-      ><button @click="session.signIn">使用 GitHub 重新验证</button></template
+      ><button class="pressable" @click="session.signInPasskey">
+        使用 Passkey 重新验证</button
+      ><button class="pressable" @click="session.signIn">
+        使用 GitHub 重新验证
+      </button></template
     >
     <ul class="credential-list">
       <li v-for="key in list.items.value" :key="key.id">
@@ -130,6 +136,8 @@ onUnmounted(() => {
         />
       </li>
     </ul>
-    <button :disabled="list.busy.value" @click="list.load">刷新列表</button>
+    <button class="pressable" :disabled="list.busy.value" @click="list.load">
+      刷新列表
+    </button>
   </section>
 </template>

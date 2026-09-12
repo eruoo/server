@@ -202,6 +202,8 @@ Better Auth 是 Session Cookie、JWE、登录 ceremony 和持久 Session 的唯�
 
 Vue 3 + `<script setup lang="ts">` + Vue Router。一个 Session 控制器管理 Better Auth 客户端结果；页面不各自维护 isLoggedIn，不引入 Pinia 或第二套查询缓存。使用现有 theme token、Reka UI 可访问原语和同源字体；仅保留实际使用的组件。
 
+管理界面采用 `@ayingott/theme` 的 brutal 风格：默认主题后导入 `brutal.css`，`<html>` 始终保留 `.brutal`，深色时在同一根元素追加 `.dark`，分别对应 Neo Light / Neo Dark。组件的颜色、边框宽度、圆角、阴影与焦点使用主题公共角色；危险操作的 hover/active 和弹窗遮罩由应用映射。按钮与顶部导航统一使用包内 `pressable` 交互，当前页导航通过强调色持续标识；保留禁用、减少动态效果和强制颜色模式支持。Scalar API 文档使用同一主题状态，通过应用样式映射其变量，不显示独立主题开关。
+
 ### 6.1 页面与职责
 
 | 页面/组件               | 负责                                               | 数据交互                                      |

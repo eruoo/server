@@ -17,6 +17,6 @@ const emit = defineEmits<{
     >
     <label>起始时间<input v-model="filters.from" type="datetime-local" /></label
     ><label>结束时间<input v-model="filters.to" type="datetime-local" /></label
-    ><button :disabled="busy">筛选</button>
+    ><button class="pressable" :disabled="busy">筛选</button>
   </form>
 </template>

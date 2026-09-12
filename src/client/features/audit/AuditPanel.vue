@@ -57,9 +57,10 @@ onUnmounted(() => {
     <p>查看最近 180 天的登录与凭证操作。</p>
     <AuditFilters :busy="busy" @apply="apply" />
     <p v-if="message" role="alert">
-      {{ message }}<button @click="load()">重试</button>
+      {{ message }}<button class="pressable" @click="load()">重试</button>
     </p>
     <AuditList :events="events" /><button
+      class="pressable"
       v-if="nextCursor"
       :disabled="busy"
       @click="load(true)"

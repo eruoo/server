@@ -4,7 +4,13 @@ defineProps<{ events: readonly AuditEvent[] }>()
 </script>
 <template>
   <p v-if="!events.length" class="empty">此范围内没有安全事件。</p>
-  <div v-else class="table-scroll">
+  <div
+    v-else
+    class="table-scroll"
+    role="region"
+    aria-label="安全事件列表"
+    tabindex="0"
+  >
     <table>
       <thead>
         <tr>

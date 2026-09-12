@@ -31,13 +31,14 @@ const errorMessage = computed(() =>
       {{ errorMessage || session.message.value }}
     </p>
     <button
-      class="primary"
+      class="primary pressable"
       :disabled="session.status.value === 'authenticating'"
       @click="session.signInPasskey"
     >
       使用 Passkey 登录
     </button>
     <button
+      class="pressable"
       :disabled="session.status.value === 'authenticating'"
       @click="session.signIn"
     >

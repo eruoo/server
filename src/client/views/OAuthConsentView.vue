@@ -86,9 +86,19 @@ async function consent(accept: boolean) {
         }}。可随时在“已授权应用”中撤销离线授权。
       </p>
       <p role="alert">{{ message }}</p>
-      <button :disabled="busy || !client" @click="consent(true)">
+      <button
+        class="pressable"
+        :disabled="busy || !client"
+        @click="consent(true)"
+      >
         允许授权</button
-      ><button :disabled="busy || !client" @click="consent(false)">拒绝</button>
+      ><button
+        class="pressable"
+        :disabled="busy || !client"
+        @click="consent(false)"
+      >
+        拒绝
+      </button>
     </section></SessionBoundary
   >
 </template>
