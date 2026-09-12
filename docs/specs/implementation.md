@@ -241,7 +241,7 @@ owner 更新导出 Secret 后，个人 Token verify 返回 Active，并确认该
 
 30 个 JWE 请求均携带缓存 Cookie，且没有重新下发缓存；远端响应不直接暴露逐请求 D1 次数，不能仅据此写成远端零 I/O。当前代码的本地原生 workerd/D1 回归另行通过 2 文件、10 项测试，覆盖 JWE 零 I/O、滑动续期、过期会话、数据库故障 503，以及首请求阻塞时约 5 秒返回 504、相邻请求独立完成。没有将本地故障注入写成真实 D1 服务故障。
 
-warm TTFB 未达到 acceptance §4 的 100ms 门槛，五轮闲置首次请求也都超过 600ms 目标。网络已有约 200ms 基线，D1 调用另外存在等待及 CPU 峰值，第二次闲置请求的平台 wall time 本身也达到 786ms；不能只归因于其中一项，也不以减去 health 的数值冒充应用 TTFB。性能仍未通过，后续地区与尾延迟优化需按该门槛复测。
+warm TTFB 未达到当时 acceptance §4 的 100ms 门槛，五轮闲置首次请求也都超过当时 600ms 目标。网络已有约 200ms 基线，D1 调用另外存在等待及 CPU 峰值，第二次闲置请求的平台 wall time 本身也达到 786ms；不能只归因于其中一项，也不以减去 health 的数值冒充应用 TTFB。本轮按原门槛未通过；后续 owner 确认的新目标与地区复测另见 §4.11，不改写本轮判定。
 
 **发布与回退。** 从受保护 main 的 `7f9713ab8593fe54a90c76d72b3ad6190d758f4c` 发布 staging；相对原 staging 的 `640b8da00958a36ebdcff9a804e9ec5a2454144b` 仅修改实施记录，应用代码、配置及 migration 相同。[CI 34511372587](https://github.com/eruoo/server/actions/runs/34511372587) 与 [staging 发布 34598345340](https://github.com/eruoo/server/actions/runs/34598345340) 均成功。CI job 为 218 秒，部署 job 为 36 秒，合计执行 254 秒（4 分 14 秒）；不含排队或 owner 等待，也不是连续实时时长。总执行时间在约 5 分钟目标内，但 CI 单阶段超过 3 分钟参考，单次样本不足以证明最近五次发布达标。
 
@@ -261,15 +261,84 @@ warm TTFB 未达到 acceptance §4 的 100ms 门槛，五轮闲置首次请求�
 
 现在迁移前与发布后都读取当前 deployment，要求单一版本承载 100% 流量，再从该版本的 `resources.bindings` 核对数据库归属、RELEASE_SHA 和其余必要 binding。HTTP health 必须命中同一个已核对版本。最新上传的 `settings` 只用于部署所需 Secret 名称及已声明 migration 摘要的保守检查，不能提供活动数据库的归属证明；目标库中的迁移记录仍独立校验。
 
-四项回归分别覆盖“最新上传配置指向目标非空库、活动版本却指向其他库”、“上传 SHA 正确但活动 SHA 过旧”、“上传 DB 正确但活动 DB 错误”及“活动版本混合分流”。实际先在原实现运行：四项均错误地执行到部署成功，18 项既有对照通过；修复后 22 项发布脚本测试全部通过，脚本测试合计 6 文件、58 项通过。该修复不改变应用运行时、认证或 migration；§4.9 的真实发布使用修复前脚本，不作为新脚本已完成远端发布的证据。
+四项回归分别覆盖“最新上传配置指向目标非空库、活动版本却指向其他库”、“上传 SHA 正确但活动 SHA 过旧”、“上传 DB 正确但活动 DB 错误”及“活动版本混合分流”。实际先在原实现运行：四项均错误地执行到部署成功，18 项既有对照通过；修复后 22 项发布脚本测试全部通过，脚本测试合计 6 文件、58 项通过。该修复不改变应用运行时、认证或 migration；§4.9 的真实发布使用修复前脚本，新脚本的远端发布结果见 §4.11。
 
-## 5. 尚未完成的外部验收
+### 4.11 2026-09-12 三地代理与 staging 收尾
 
-Cloudflare 与 GitHub 接线、首次 staging migration/应用上传/Workflow 注册和 cron 已按 §4.1–§4.3 执行。以下结果仍需在实际授权环境取得，不能由本地测试替代：
+owner 确认 [acceptance §4](acceptance.md#4-性能与真实环境验收) 的新性能目标，并授权最新 main 的 staging 发布、临时 OAuth grant 验收及文档提交；本次没有生产发布授权。测试来自江苏无锡，经现有订阅的 SG、JP、US 节点，由隔离的 loopback 代理发出 HTTP/1.1 请求；原代理配置不变，不代表大陆直连、全部代理节点或浏览器页面交互 SLO。
 
-- production 首次发布及其 runtime secret 的实际有效性；staging 新导出 Token、完整备份和隔离恢复已在 §4.8 通过。
-- 远端端到端 code→refresh→revoke，需要另行明确授权测试 grant；真实 owner GitHub 与 Passkey 登录已通过。
-- §4.9 的 warm 与闲置首次请求性能未达标，仍需按实际使用地区优化、复测；常规发布阶段耗时尚未积累五次样本。不能把请求成功等同于性能通过。
+**部署选择。** 前一轮在同应用 SHA `640b8da` 下完成 Default 与 Smart 两组，各 195 个请求全部 200；每地区含 30 次 JWE、10 次 D1、5 次独立闲置首次请求。以下为客户端 TTFB，单位 ms；n=10 的 p95 等于 max：
+
+| 节点 | Default / Smart JWE p95 | Default / Smart D1 p95 | Default / Smart 闲置首次 max |
+| ---- | ----------------------- | ---------------------- | ---------------------------- |
+| SG   | 148.263 / 253.648       | 275.205 / 402.420      | 1243.308 / 1209.562          |
+| JP   | 298.990 / 279.937       | 1207.011 / 319.767     | 962.180 / 1102.278           |
+| US   | 326.375 / 305.861       | 809.856 / 2529.488     | 1772.453 / 1491.759          |
+
+该顺序对照没有控制全部连接和路由波动，不能证明 Smart 普遍更慢。固定连接的补测没有完成有效的双侧配对；其中 Smart 的 SG 缓存请求一次等待响应头 10,011ms 超时，无 CF-Ray，根因未定位。最终恢复 Default，保留 SIN 主库、读副本关闭；没有迁移数据或新增运行开关。Default 的 JP 1207ms 尾延迟继续保留，未用新门槛改写为通过。原两组平台记录分别取得 183/195 与 195/195，已取得记录均 outcome=ok；缺失的 12 条不能补记为已核验。
+
+**最新发布。** 受保护 main 的 `a0a47366bbb93487d34a239f198584cebc9376b8` 使用 [CI 34600875945](https://github.com/eruoo/server/actions/runs/34600875945) 的原 staging 产物，由 [发布 34660336481](https://github.com/eruoo/server/actions/runs/34660336481) 成功部署。CI 的 301 项测试及两个环境构建通过，check job 178 秒、deploy job 37 秒，合计执行 215 秒；不含两次任务之间的等待，不代表已积累五次常规样本。发布阶段没有重复测试或构建，没有新增 migration。
+
+活动 version 为 `51e28d2e-8da6-416d-addf-366944b45867`，deployment 为 `11f8c29f-74c5-458d-99dc-950b9da68668`；100% 流量、活动 binding 的 SHA、health 与 Default Placement 均读回一致。这次实际执行了 §4.10 修复后的发布脚本。相对 `640b8da`，变更仅为文档及发布脚本/测试，应用、依赖、配置和 migration 未变。
+
+**OAuth。** 使用最长一小时的独立 owner 测试 Session，通过现有静态 client 完成真实 staging PKCE code→token→UserInfo→refresh→窗口内等价重放→旧 refresh 撤销 family→successor 返回 `400 invalid_grant`。实际 access token 配错误 hint 仍返回 `unsupported_token_type`；撤销 refresh 后既有 JWT 的 UserInfo 仍为 200，符合协议声明的最长一小时有效窗口。正式闭环 10 个 HTTP 请求均符合预期；这不是 Desktop App 联调，也不替代已完成的真实 GitHub/Passkey 登录。
+
+探针的前两次 authorize 把库支持的 `200 {redirect,url}` 错当成必须 302 而中止，尚未兑换 grant；原生库按 fetch 请求头选择 JSON 跳转。探针改为接受并严格核验两种合法跳转形式后通过，未修改应用代码。两次未消费 code、正式 grant 的 refresh/access 行及 tombstone、四个临时 Session 均按精确关联清理并读回无残留，保留真实 owner 数据及审计。
+
+**新版本性能。** 每地区预先固定 30 次 JWE 和 30 次 D1，不重试失败请求、不混入首连；JWE 组在缓存寿命内完成，逐条核验缓存发送且未被更换。TTFB p50 / p95 / max，单位 ms：
+
+| 节点 | warm JWE（n=30）            | warm D1（n=30）             |
+| ---- | --------------------------- | --------------------------- |
+| SG   | 123.446 / 177.493 / 186.788 | 139.537 / 165.748 / 224.007 |
+| JP   | 117.917 / 148.188 / 216.322 | 201.019 / 315.098 / 389.934 |
+| US   | 216.179 / 242.785 / 306.997 | 398.034 / 479.798 / 506.604 |
+
+SG 另做 10 对新连接请求：首次 D1 的 p50/p95/max 为 571.717/844.603/844.603ms，随后 JWE 为 138.569/162.035/162.035ms，20/20 成功。正式性能采样及 health 共 224 个请求全部 200、无超时；含 OAuth 的 234 个请求逐个按 CF-Ray 核心 ID、探针标记和精确 version 关联平台日志，234/234 outcome=ok、无异常及 exceededCpu/exceededResources。全体 CPU p50/p95/max 为 13/73/206ms，wall time 为 28/210/446ms；高 CPU 样本保留，不声称低于免费 10ms。远端未直接测得 D1 I/O 次数，零 I/O 依据仍为当前代码原生 workerd/D1 测试及对应 CI。
+
+本轮三地 warm 达到已确认目标；JP 原有尾延迟及 SG 旧 Smart 超时本次未复现，不能称根因已修复。闲置专项引用同运行时代码的 Default 五轮：SG/JP/US 的 p50/p95/max 分别为 1059.906/1243.308/1243.308、927.007/962.180/962.180、1192.278/1772.453/1772.453ms，15 次均在新目标内；本次没有重新执行五轮闲置，历史原门槛失败仍有效。
+
+**生产准备。** 同 SHA 的 production 原产物已下载，139 个文件摘要验证通过；只有 `0001_foundation.sql` 一项应用 migration，SHA-256 为 `e59e58d06fab0ae9f5c4bdbcfe01402e5b523e162fa7b2b4e9d2ed8d39c2b0ae`。只读检查确认目标库尚无应用表、生产 cron 为空、五个必要 runtime Secret 名称存在；R2 仍私有，保留现有 30 天删除规则。没有验证生产 Secret 值实际可用，也没有写入生产数据库。精确资源 ID 仍以 `wrangler.jsonc` 为唯一配置来源。
+
+生产首次执行会初始化 schema/发布记录、更新既有 Worker 与 Workflow，并启用规格中的两个 cron。当前旧生产 version `d41e2778-cff7-43bd-a0e5-6d0008813a3d` 未验证与新 schema 兼容，不能作为已验收的 v2 代码回退目标。首次发布失败后先读回实际版本与迁移状态、保留数据库，再决定修复或重发；不自动回退数据库或旧 Secret。生产 deployment 始终为 `9c2d02eb-ba62-4eba-975b-7adb5b4a055d`，本次未改变。
+
+脱敏观察与方法保存在本地忽略目录 `.output/region-placement-2026-09-11/`、`.output/staging-closeout-2026-09-12/`；临时代理与日志订阅已停止。这些不是日常运行依赖，原始凭证与日志不进入 Git。
+
+### 4.12 2026-09-12 首次 production 发布与验收
+
+owner 在查看精确候选与首次发布影响后回复 `go`，授权发布 `a0a47366bbb93487d34a239f198584cebc9376b8`、初始化生产空库、更新既有 Worker/Workflow、启用两项 cron，并验证真实登录和备份。本节覆盖 §4.11 当时尚未授权、尚未发布生产的状态；不扩大为其他版本发布、凭证轮换或资源删除授权。
+
+**发布完成。** [production Actions 34664734368](https://github.com/eruoo/server/actions/runs/34664734368) 成功使用 [CI 34600875945](https://github.com/eruoo/server/actions/runs/34600875945) 的原 production 产物。发布前确认执行者为 owner、main 仍为目标 SHA，且目标 D1 无应用表。只有 `0001_foundation.sql` 被初始化，migration ledger、发布记录的目标库与摘要均读回通过，外键错误为 0。发布阶段没有重复构建或测试；CI check 178 秒 + production deploy 41 秒，合计执行 219 秒（3 分 39 秒），不含排队或两次任务之间的等待，也不代表最近五次常规样本全部达标。
+
+生产入口为 `https://auth.eruoo.me`，Worker version `b15d69a3-9cd0-478d-9513-57d5e73ced88`、deployment `d06a31b6-e391-4ca8-8090-99f14069469d` 已读回，单一版本承载 100% 流量。活动版本的 SHA、全部 binding 描述和两项 cron 与已验证发布配置一致；Default Placement 与关闭读副本均已确认，本次 D1 查询实际由 APAC/HKG 处理。精确资源名与 ID 仍引用 `wrangler.jsonc`，没有删除 Worker、重命名资源或再次轮换 Secret。staging 仍为 §4.11 版本。
+
+**生产备份通过。** 首次原生 Workflow 实例 `database-backup-v1-20260912-first-production-a0a4736` 于 01:27:02.814–01:27:12.740 UTC 完成，耗时约 9.93 秒；各执行步骤一次成功，终态 `complete`、健康状态 `ok`、失败码为空。原生 R2 HEAD 确认 SQL 对象 13,669 bytes、11 个 metadata 字段及源 Worker version 匹配，账号页可读取最近成功时间。此次实际验证了生产 export Secret 与导出到 R2 的完整路径；没有下载 SQL 或重复隔离恢复，恢复依据仍为 §4.8。该快照生成在首次成功登录之前，不能用它证明新注册身份已进入备份；后续由每日调度生成新快照。
+
+**GitHub 登录通过，首个失败仍保留。** 首次浏览器 `POST /api/auth/sign-in/social` 在 01:27:06.564 UTC 返回 503，平台 wall time 285ms、无 Cookie、无原始异常或应用日志。它处于开始导出与首次轮询完成之间；[operations §4.1](operations.md#41-目标与保留) 所述 D1 导出阻塞是最可能原因，但缺少该请求的底层错误，不能记为根因已确认或代码已修复。导出完成后的受控登录入口探针为 200；浏览器一次重试的入口为 200、GitHub 回调为 302，随后正常进入管理台。只读数据库核验为唯一 owner GitHub 账号、一条有效身份关联，`github_login/success` 审计已落库；账号页与备份状态读取通过。Secret 实际可用不再仅依据名称推断。
+
+**生产 Passkey 通过。** owner 按日常本机浏览器验收步骤确认完成注册、退出并用 Passkey 重新登录。02:11 UTC 只读复核确认生产 owner 名下有 1 个 Passkey，`passkey_created/success` 与后续 `passkey_login/success` 审计分别为 02:08:16.885 和 02:08:41.018 UTC；两次 HTTP 状态均为 200，均关联到正确 owner。已有有效 owner Session，外键错误为 0，当前 production deployment、版本和全部 binding 描述保持不变。此项依据本人设备验证反馈与持久审计、凭证及会话读回完成，没有使用 staging 凭证、重放设备操作或读取凭证值。脱敏回执为下述证据目录的 `passkey-verification.json`。
+
+生产首次发布、GitHub/Passkey 登录与备份验收已完成。生产多地区性能未重新采样，§4.11 的 staging 结果不转记为生产实测；下节保留其余验证限制。
+
+首次发布的实时日志订阅结束前，采集到 15 条目标版本 invocation，均 outcome=ok、无平台异常，其中仍包含上述 HTTP 503，不能将平台 outcome 等同于业务成功。日志订阅已停止，这 15 条不包含随后 owner 的本机浏览器 Passkey 验证。执行回执及脱敏请求证据保存在本地忽略目录 `.output/production-release-2026-09-12/`；原始 tail 日志仅在本机以 0600 权限保存，不进入 Git。这些文件不是运行依赖。
+
+### 4.13 2026-09-12 staging 导出与登录对照
+
+owner 授权收尾文档、核验首次自动调度并定点排查 §4.12 的登录 503。在已验收的 staging 版本上连续执行两轮“导出前 → full SQL export active → 导出完成”对照，直接调用与备份 Workflow 相同的 D1 export API；没有下载 SQL、写入 R2、创建新 Workflow 实例或修改应用代码、配置、Secret。开始前确认没有活动备份实例及未到期 lease，使用固定 5 秒轮询并等待既有 export 完成。
+
+每个阶段并发请求同一个登录入口、D1 REST 的 `SELECT 1`、无 Cookie 的 `get-session` 与 `health`。两轮导出前四项均为 200；导出期间两轮登录均为 503，D1 直接查询均为 500 / API code 7500，同时两个不依赖凭证数据库读取的对照仍为 200，匿名 Session 均为 null。第一轮导出结束后四项恢复 200。第二轮结束后数据库与两个只读对照恢复 200，但登录因连续探针触发原生 429；保留该失败，不能将两轮都写成完整通过。118 秒后独立核对登录入口为 200 且合法 GitHub 跳转已生成，没有再次启动 export。锁定库的核心 `/sign-in*` 规则为 3/10 秒，区别于通用 100/60 秒配置，详见 [operations §2](operations.md#2-限流与成本边界)。
+
+18 个 Worker 请求均按 CF-Ray、探针标记和精确版本关联到原生 tail，全部平台 outcome=ok、无异常；两条 HTTP 503 的平台 wall time 分别为 254/212ms，均无应用错误日志。118 秒后的恢复请求未采集到这组实时 tail，单独保留 HTTP 与清理回执，不补计为平台已关联。最初探针在启动 export 前被平台以 403 / code 1010 拒绝；同一 health 使用明确的诊断 User-Agent 和 curl 均为 200，改用诊断标识后才开始正式对照。该探针入口问题不归为应用 503。
+
+这次控制变量实测确认：D1 完整导出会使依赖数据库的登录入口短暂失败，登录入口在导出结束、限流窗口结束后恢复，应用版本和配置保持不变。生产首次失败的发生阶段、响应和耗时与此一致，但原请求缺少底层错误，不能补造逐请求异常证据。继续采用已确定的凌晨备份与有界轮询，不增加自动登录重试或更换认证架构；本次没有修复应用代码，也不声称导出期间零中断。
+
+三条正式对照及一条补充恢复请求生成的临时 OAuth state 均按返回的精确 identifier 清理，四条删除后读回零残留；未兑换 GitHub code、创建 Session 或 grant。外键检查为 0，staging/production 的 deployment 均未变。脱敏结果、方法和平台关联记录保存在本地忽略目录 `.output/production-closeout-2026-09-12/staging-export-login/`；实时 tail 已停止，私有选择器与原始日志不进入 Git。首次自动调度的核验已安排在北京时间 2026-09-13 04:10，届时分别核对 03:00 备份和 04:00 清理的实际执行证据；安排完成不等于任务已经执行。
+
+## 5. 后续验证与已知限制
+
+Cloudflare 与 GitHub 接线、staging 验收及 production 首次发布、真实登录和备份已按上述记录完成。以下限制与后续范围仍保留，不能由本地测试替代：
+
+- §4.13 已通过对照确认 D1 导出期间登录会短暂返回 503；生产原始请求缺少底层错误的追溯限制仍保留，不将其写成代码已修复。首次自动备份与清理已配置并安排核验，实际调度结果仍待取得。
+- §4.11 的 Default 三地 warm 达到新目标，同代码闲置样本满足新目标；旧 JP 尾延迟和 Smart SG 超时未定位，后续若再次出现须按请求与平台证据排查，不能报告为已修复。常规发布阶段耗时尚未积累五次样本，不代表所有代理节点或生产性能已验证。
 - Workflow 中断与代码回退已在 §4.9 完成所列场景；大对象提交竞争与长时限的所有窗口未穷尽。成功导出/上传、隔离库导入、凭证清理及新信任验证已在 §4.8 通过。
 - Desktop App、Rust 安全存储、客户端打包与跨端联调：按 owner 最新决定延期，不属于本次 Web 交付。
 
