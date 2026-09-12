@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { ApiReference } from "@scalar/api-reference"
-import { onMounted, onUnmounted, shallowRef } from "vue"
+import { inject, onMounted, onUnmounted, shallowRef } from "vue"
 
 import "@scalar/api-reference/style.css"
+import "../../styles/api-reference.css"
 import { useSession } from "../../composables/session"
+import { darkThemeKey } from "../../composables/theme"
 import { requestJson } from "../../lib/http"
 const session = useSession()
+const isDark = inject(darkThemeKey)
 const content = shallowRef<string>()
 const message = shallowRef("")
 const busy = shallowRef(false)
@@ -22,6 +25,8 @@ const configuration: NonNullable<
   showDeveloperTools: "never",
   isEditable: false,
   withDefaultFonts: false,
+  theme: "none",
+  hideDarkModeToggle: true,
 }
 async function load() {
   if (busy.value) return
@@ -54,7 +59,11 @@ onUnmounted(() => {
   <h1>API 文档</h1>
   <p v-if="busy" role="status">正在读取契约…</p>
   <p v-if="message" role="alert">
-    {{ message }} <button @click="load">重试</button>
+    {{ message }} <button class="pressable" @click="load">重试</button>
   </p>
-  <ApiReference v-if="content" :configuration="{ ...configuration, content }" />
+  <div v-if="content" class="api-reference">
+    <ApiReference
+      :configuration="{ ...configuration, content, darkMode: isDark }"
+    />
+  </div>
 </template>

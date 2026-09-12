@@ -42,7 +42,7 @@ onUnmounted(() => controller?.abort())
   <section class="panel" aria-labelledby="backup-heading">
     <h2 id="backup-heading">数据库备份</h2>
     <p>每天自动备份，保留 30 天。</p>
-    <button :disabled="busy" @click="refresh">
+    <button class="pressable" :disabled="busy" @click="refresh">
       {{ busy ? "正在读取…" : data ? "刷新备份状态" : "查看备份状态" }}
     </button>
     <p role="status">{{ message }}</p>

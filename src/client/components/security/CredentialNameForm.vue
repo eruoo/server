@@ -17,7 +17,7 @@ function submit() {
         maxlength="100"
         placeholder="例如：我的电脑"
         :disabled="busy" /></label
-    ><button class="primary" :disabled="busy || !name.trim()">
+    ><button class="primary pressable" :disabled="busy || !name.trim()">
       {{ label }}
     </button>
   </form>

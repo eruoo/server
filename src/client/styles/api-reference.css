@@ -1,0 +1,75 @@
+/* Scalar resolves dependent variables at :root and also teleports UI to body. */
+:root,
+.light-mode,
+.dark-mode {
+  --scalar-font: var(--font-sans);
+  --scalar-font-code: var(--font-mono);
+  --scalar-radius: var(--radius-control);
+  --scalar-radius-max: var(--radius-card);
+  --scalar-border-width: var(--border-width-control);
+  --scalar-background-1: var(--surface-panel);
+  --scalar-background-2: var(--surface-elevated);
+  --scalar-background-3: var(--surface-subtle);
+  --scalar-background-accent: var(--accent-soft);
+  --scalar-color-1: var(--text-primary);
+  --scalar-color-2: var(--text-secondary);
+  --scalar-color-3: var(--text-muted);
+  --scalar-color-accent: var(--text-accent);
+  --scalar-link-color: var(--text-accent);
+  --scalar-link-color-hover: var(--text-primary);
+  --scalar-color-blue: var(--text-accent);
+  --scalar-color-purple: var(--text-accent);
+  --scalar-color-green: color-mix(
+    in srgb,
+    var(--status-success) 50%,
+    var(--text-primary)
+  );
+  --scalar-color-red: color-mix(
+    in srgb,
+    var(--status-danger) 50%,
+    var(--text-primary)
+  );
+  --scalar-color-orange: var(--scalar-color-red);
+  --scalar-color-yellow: color-mix(
+    in srgb,
+    var(--status-warning) 50%,
+    var(--text-primary)
+  );
+  --scalar-border-color: var(--border-default);
+  --scalar-button-1: var(--accent-primary);
+  --scalar-button-1-hover: var(--accent-primary-hover);
+  --scalar-button-1-color: var(--accent-contrast);
+  --scalar-shadow-1: var(--shadow-card);
+  --scalar-shadow-2: var(--shadow-panel);
+  --scalar-sidebar-background-1: var(--surface-panel);
+  --scalar-sidebar-color-1: var(--text-primary);
+  --scalar-sidebar-color-2: var(--text-secondary);
+  --scalar-sidebar-border-color: var(--border-default);
+  --scalar-sidebar-item-hover-color: var(--text-primary);
+  --scalar-sidebar-item-hover-background: var(--surface-subtle);
+  --scalar-sidebar-color-active: var(--accent-contrast);
+  --scalar-sidebar-item-active-background: var(--accent-primary);
+  --scalar-sidebar-indent-border: var(--border-subtle);
+  --scalar-sidebar-search-background: var(--surface-elevated);
+  --scalar-sidebar-search-color: var(--text-muted);
+  --scalar-sidebar-search-border-color: var(--border-default);
+}
+
+.light-mode,
+.dark-mode {
+  color-scheme: inherit;
+}
+
+@layer scalar-base {
+  /* Embedded code examples inherit the host scheme instead of forcing dark. */
+  .light-mode .dark-mode {
+    color-scheme: inherit !important;
+  }
+}
+
+.api-reference {
+  border: var(--border-width-surface) solid var(--border-default);
+  border-radius: var(--radius-card);
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-panel);
+}

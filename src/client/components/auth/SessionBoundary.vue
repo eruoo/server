@@ -11,8 +11,14 @@ const pending = computed(() =>
 <template>
   <div v-if="session.message.value" class="notice" role="alert">
     {{ session.message.value }}
-    <button @click="session.refresh(true)">重试检查</button>
-    <button v-if="session.data.value" @click="session.signOut">重试退出</button>
+    <button class="pressable" @click="session.refresh(true)">重试检查</button>
+    <button
+      class="pressable"
+      v-if="session.data.value"
+      @click="session.signOut"
+    >
+      重试退出
+    </button>
   </div>
   <p v-if="session.status.value === 'checking'" role="status">
     正在确认登录状态…
@@ -27,7 +33,11 @@ const pending = computed(() =>
   <section v-else-if="session.status.value === 'anonymous'" class="panel">
     <h2>请先登录</h2>
     <p>使用 Passkey 或 GitHub 访问管理控制台。</p>
-    <button @click="session.signInPasskey">使用 Passkey 登录</button>
-    <button class="primary" @click="session.signIn">使用 GitHub 登录</button>
+    <button class="pressable" @click="session.signInPasskey">
+      使用 Passkey 登录
+    </button>
+    <button class="primary pressable" @click="session.signIn">
+      使用 GitHub 登录
+    </button>
   </section>
 </template>

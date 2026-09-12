@@ -29,12 +29,17 @@ onMounted(list.load)
       {{ list.message.value }}
     </p>
     <button
+      class="pressable"
       v-if="list.needsReauthentication.value"
       @click="session.signInPasskey"
     >
       使用 Passkey 重新验证
     </button>
-    <button v-if="list.needsReauthentication.value" @click="session.signIn">
+    <button
+      class="pressable"
+      v-if="list.needsReauthentication.value"
+      @click="session.signIn"
+    >
       使用 GitHub 重新验证
     </button>
     <PasskeyList
@@ -43,6 +48,8 @@ onMounted(list.load)
       @rename="(id, name) => list.mutate(() => renamePasskey(id, name))"
       @remove="(id) => list.mutate(() => removePasskey(id))"
     />
-    <button :disabled="list.busy.value" @click="list.load">刷新列表</button>
+    <button class="pressable" :disabled="list.busy.value" @click="list.load">
+      刷新列表
+    </button>
   </section>
 </template>

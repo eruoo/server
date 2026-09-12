@@ -29,8 +29,11 @@ onMounted(list.load)
     <p>撤销会停止离线续期。已经签发的访问凭证最多还能使用 1 小时。</p>
     <p role="status">{{ list.message.value }}</p>
     <template v-if="list.needsReauthentication.value"
-      ><button @click="session.signInPasskey">使用 Passkey 重新验证</button
-      ><button @click="session.signIn">使用 GitHub 重新验证</button></template
+      ><button class="pressable" @click="session.signInPasskey">
+        使用 Passkey 重新验证</button
+      ><button class="pressable" @click="session.signIn">
+        使用 GitHub 重新验证
+      </button></template
     >
     <ul class="credential-list">
       <li v-for="app in list.items.value" :key="app.clientId">
@@ -51,6 +54,8 @@ onMounted(list.load)
         />
       </li>
     </ul>
-    <button :disabled="list.busy.value" @click="list.load">刷新列表</button>
+    <button class="pressable" :disabled="list.busy.value" @click="list.load">
+      刷新列表
+    </button>
   </section>
 </template>

@@ -20,7 +20,7 @@ const emit = defineEmits<{ confirm: [] }>()
 <template>
   <DialogRoot>
     <DialogTrigger as-child
-      ><button :disabled="busy" class="danger">
+      ><button :disabled="busy" class="danger pressable">
         {{ actionLabel ?? "删除" }}
       </button></DialogTrigger
     >
@@ -31,9 +31,14 @@ const emit = defineEmits<{ confirm: [] }>()
         <DialogTitle>{{ title }}</DialogTitle
         ><DialogDescription>{{ description }}</DialogDescription>
         <div class="actions">
-          <DialogClose as-child><button>取消</button></DialogClose
+          <DialogClose as-child
+            ><button class="pressable">取消</button></DialogClose
           ><DialogClose as-child
-            ><button class="danger" :disabled="busy" @click="emit('confirm')">
+            ><button
+              class="danger pressable"
+              :disabled="busy"
+              @click="emit('confirm')"
+            >
               确认{{ actionLabel ?? "删除" }}
             </button></DialogClose
           >
