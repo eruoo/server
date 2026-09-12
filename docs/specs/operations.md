@@ -46,6 +46,12 @@
 
 SPA assets fallback 只处理页面导航；`/api/*`、`/.well-known/*`、`/problems/*`、`/health` 由 Worker 优先处理，API 404 不返回 HTML。哈希静态资源可长期 immutable；HTML、身份响应和私有 API 禁止公共缓存。CSP、HSTS（生产）、nosniff、frame-ancestors 和 Referrer-Policy 由一个入口策略管理；动态响应由 Worker 设置响应头；直出的 SPA/静态资源由 `public/_headers` 设置对应策略。文档及 Vue/对话框需要内联 style，因此 HTML 的 style-src 允许 unsafe-inline，script-src 仍仅 self，不允许内联脚本；JSON 接口不需要该样式例外。
 
+### 1.3 多地区代理访问
+
+当前采用 Worker 默认 Placement，仓库不设置 `placement`，保留现有 D1 主库并关闭读副本；不因代理切换而创建多套 Worker 或迁移数据库。默认模式在接收请求附近执行；启用 D1 读副本还需要应用接入 Sessions API，不能只切平台开关就声称已就近读取。平台语义见 [Placement](https://developers.cloudflare.com/workers/configuration/placement/) 与 [D1 read replication](https://developers.cloudflare.com/d1/best-practices/read-replication/)。
+
+这一选择依据当前三地代理实测，没有证明 Smart Placement 在所有负载下都更慢。保留请求级认证初始化、短期 JWE 和主库权威检查，避免为一次尾延迟增加跨地区状态协调。变更 Placement 或读副本前，须按 [acceptance §4](acceptance.md#4-性能与真实环境验收) 对相同运行时重新测量，并验证撤销一致性；现有结果及限制见 [实施记录 §4.11](implementation.md#411-2026-09-12-三地代理与-staging-收尾)。
+
 ## 2. 限流与成本边界
 
 以 operation ID 作为稳定 key，禁止使用任意 URL/path/query 构造无限基数的数据库桶。连接 IP 只取平台可信头；本地无可信 IP 使用测试值，不信任外部自报的 forwarded-for。
@@ -201,7 +207,7 @@ BETTER_AUTH_SECRETS 轮换先加入新主版本并保留仍被 D1 密文引用�
 
 ### 6.2 时间预算与检查频率
 
-常规变更的执行时间目标：检查和构建 3 分钟，下载产物、必要 migration、部署与冒烟 2 分钟，合计 5 分钟左右。初次运行样本见[实施记录](implementation.md#45-2026-09-10-真实登录与-workflow-边界验收)，尚未积累五次记录；目标不含 runner 排队、owner 操作等待、首次资源接线或重型专项验收。CI/发布任务各设 10 分钟上限，超时结束并报告阶段；若写入已开始，按结果未知处理，不能自动重跑。上限不是达到目标的证据。
+常规变更的执行时间目标：检查和构建 3 分钟，下载产物、必要 migration、部署与冒烟 2 分钟，合计 5 分钟左右。初次运行样本见[实施记录 §4.5](implementation.md#45-2026-09-10-真实登录与-workflow-边界验收)，最新样本见 [§4.11](implementation.md#411-2026-09-12-三地代理与-staging-收尾)，尚未积累五次记录；目标不含 runner 排队、owner 操作等待、首次资源接线或重型专项验收。CI/发布任务各设 10 分钟上限，超时结束并报告阶段；若写入已开始，按结果未知处理，不能自动重跑。上限不是达到目标的证据。
 
 | 检查                                                                        | 执行频率                                                                |
 | --------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
