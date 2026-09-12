@@ -56,9 +56,10 @@ test("Web management and complete Passkey registration/login/logout", async ({
   await page.getByRole("button", { name: "确认撤销", exact: true }).click()
   await expect(page.getByLabel("完整密钥")).toHaveCount(0)
   await expect(page.locator(".credential-list li")).toHaveCount(0)
-  await page.getByRole("link", { name: "账号", exact: true }).click()
-  await page.getByRole("button", { name: "查看备份状态" }).click()
+  await page.getByRole("button", { name: "备份状态", exact: true }).click()
+  await expect(page.getByRole("dialog", { name: "数据库备份" })).toBeVisible()
   await expect(page.getByText("尚无备份记录。")).toBeVisible()
+  await page.getByRole("button", { name: "关闭", exact: true }).click()
   const consentQuery = new URLSearchParams({
     client_id: "eruoo-desktop",
     scope: "openid offline_access",
@@ -90,18 +91,19 @@ test("Web management and complete Passkey registration/login/logout", async ({
   const consentStarted = page.waitForRequest("**/api/auth/oauth2/consent")
   await page.getByRole("button", { name: "允许授权", exact: true }).click()
   await consentStarted
-  await page.getByRole("link", { name: "账号", exact: true }).click()
-  await expect(page.getByRole("button", { name: "退出当前登录" })).toBeVisible()
-  await expect(page).toHaveURL(/\/account$/)
+  await page.getByRole("link", { name: "Passkey", exact: true }).click()
+  await expect(page.getByRole("button", { name: "账号菜单" })).toBeVisible()
+  await expect(page).toHaveURL(/\/security\/passkeys$/)
   finishConsent()
   await delivered
-  await expect(page.getByRole("button", { name: "退出当前登录" })).toBeVisible()
-  await expect(page).toHaveURL(/\/account$/)
+  await expect(page.getByRole("button", { name: "账号菜单" })).toBeVisible()
+  await expect(page).toHaveURL(/\/security\/passkeys$/)
   await page.unroute("**/api/auth/oauth2/consent")
-  await page.getByRole("button", { name: "退出当前登录" }).click()
+  await page.getByRole("button", { name: "账号菜单" }).click()
+  await page.getByRole("menuitem", { name: "退出登录", exact: true }).click()
   await expect(page.getByRole("heading", { name: "请先登录" })).toBeVisible()
   await page.getByRole("button", { name: "使用 Passkey 登录" }).click()
-  await expect(page.getByRole("button", { name: "退出当前登录" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "账号菜单" })).toBeVisible()
   await page.getByRole("link", { name: "API 文档", exact: true }).click()
   await expect(
     page.getByRole("heading", { name: "API 文档", exact: true }),
@@ -121,8 +123,9 @@ test("Web management and complete Passkey registration/login/logout", async ({
     path: "test-results/web-management.png",
     fullPage: true,
   })
-  await page.getByRole("link", { name: "账号", exact: true }).click()
-  await page.getByRole("button", { name: "退出当前登录" }).click()
+  await page.getByRole("link", { name: "Passkey", exact: true }).click()
+  await page.getByRole("button", { name: "账号菜单" }).click()
+  await page.getByRole("menuitem", { name: "退出登录", exact: true }).click()
   await expect(page.getByRole("heading", { name: "请先登录" })).toBeVisible()
   await page.route(/^http:\/\/127\.0\.0\.1:49152\/oauth\/callback/, (route) =>
     route.fulfill({
@@ -161,8 +164,8 @@ test("Web management and complete Passkey registration/login/logout", async ({
   )
   await page.getByRole("button", { name: "使用 Passkey 登录" }).click()
   await passkeyStarted
-  await page.getByRole("link", { name: "账号", exact: true }).click()
-  await expect(page).toHaveURL(/\/account$/)
+  await page.getByRole("link", { name: "Passkey", exact: true }).click()
+  await expect(page).toHaveURL(/\/security\/passkeys$/)
   const passkeyFinished = page.waitForResponse(
     "**/api/auth/passkey/verify-authentication",
   )
@@ -177,7 +180,7 @@ test("Web management and complete Passkey registration/login/logout", async ({
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
       }),
   )
-  await expect(page).toHaveURL(/\/account$/)
+  await expect(page).toHaveURL(/\/security\/passkeys$/)
   await expect(page.getByRole("heading", { name: "请先登录" })).toBeVisible()
   await page.unroute("**/api/auth/passkey/verify-authentication")
   await context.clearCookies()
@@ -198,8 +201,185 @@ test("anonymous deep links never mount protected controls", async ({
   await page.goto("/security/api-keys")
   await expect(page.getByRole("heading", { name: "请先登录" })).toBeVisible()
   await expect(page.getByRole("button", { name: "创建密钥" })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "账号菜单" })).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: "备份状态", exact: true }),
+  ).toHaveCount(0)
+  const appearance = page.getByRole("button", { name: /^外观：/ })
+  await expect(appearance).toHaveCount(1)
+  await expect(appearance).toBeVisible()
+  await appearance.click()
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light")
+  await appearance.click()
+  await expect(page.locator("html")).toHaveClass(/dark/)
   await page.setViewportSize({ width: 375, height: 812 })
   await expect(page.locator("body")).toHaveJSProperty("scrollWidth", 375)
+})
+
+test("global controls preserve appearance preferences and gate backup access", async ({
+  page,
+}) => {
+  await page.route("**/api/auth/get-session", (route) =>
+    route.fulfill({
+      json: {
+        user: { id: "owner", name: "测试账号", email: "owner@example.invalid" },
+        session: { id: "session", userId: "owner" },
+      },
+    }),
+  )
+  await page.route("**/api/auth/passkey/list-user-passkeys", (route) =>
+    route.fulfill({ json: [] }),
+  )
+  let backupReads = 0
+  let expired = false
+  await page.route("**/api/security/backup-status", (route) => {
+    backupReads++
+    return route.fulfill(
+      expired
+        ? {
+            status: 401,
+            json: {
+              type: "https://auth.eruoo.me/problems/authentication-required",
+              status: 401,
+            },
+          }
+        : {
+            json: {
+              status: "never-run",
+              errorCode: null,
+              lastAttemptAt: null,
+              lastSuccessAt: null,
+            },
+          },
+    )
+  })
+  await page.emulateMedia({ colorScheme: "light" })
+  await page.setViewportSize({ width: 320, height: 812 })
+  await page.goto("/account")
+  await expect(page).toHaveURL(/\/security\/passkeys$/)
+  await expect(
+    page.getByRole("heading", { name: "Passkey", exact: true }),
+  ).toBeVisible()
+  await expect(
+    page
+      .getByRole("navigation")
+      .getByRole("link", { name: "账号", exact: true }),
+  ).toHaveCount(0)
+  await expect(page.locator("body")).toHaveJSProperty("scrollWidth", 320)
+  expect(backupReads).toBe(0)
+
+  const account = page.getByRole("button", { name: "账号菜单" })
+  await account.click()
+  await expect(page.getByRole("menu", { name: "账号菜单" })).toContainText(
+    "owner@example.invalid",
+  )
+  await expect(
+    page.getByRole("menuitem", { name: "退出登录", exact: true }),
+  ).toBeVisible()
+  await page.keyboard.press("Escape")
+  await expect(account).toBeFocused()
+
+  const appearance = page.getByRole("button", { name: /^外观：/ })
+  await expect(appearance).toHaveCount(1)
+  await expect(appearance).toHaveAttribute(
+    "aria-label",
+    "外观：跟随系统；切换为浅色",
+  )
+  await appearance.focus()
+  await page.keyboard.press("Enter")
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light")
+  await expect(page.locator("html")).not.toHaveClass(/dark/)
+  await expect(appearance).toHaveAttribute(
+    "aria-label",
+    "外观：浅色；切换为深色",
+  )
+  await page.keyboard.press("Space")
+  await expect(page.locator("html")).toHaveClass(/dark/)
+  await expect(appearance).toHaveAttribute(
+    "aria-label",
+    "外观：深色；切换为跟随系统",
+  )
+  await expect(appearance).toBeFocused()
+  await expect(page.getByRole("menu", { name: "外观设置" })).toHaveCount(0)
+  await page.reload()
+  await expect(page.locator("html")).toHaveClass(/dark/)
+  await expect(appearance).toHaveAttribute(
+    "aria-label",
+    "外观：深色；切换为跟随系统",
+  )
+  await appearance.click()
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "system")
+  await expect(page.locator("html")).not.toHaveClass(/dark/)
+  await page.emulateMedia({ colorScheme: "dark" })
+  await expect(page.locator("html")).toHaveClass(/dark/)
+  await appearance.click()
+  await expect(page.locator("html")).not.toHaveClass(/dark/)
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light")
+
+  const backup = page.getByRole("button", { name: "备份状态", exact: true })
+  await backup.click()
+  const dialog = page.getByRole("dialog", { name: "数据库备份" })
+  await expect(dialog).toContainText("尚无备份记录。")
+  expect(backupReads).toBe(1)
+  await dialog
+    .getByRole("button", { name: "刷新备份状态", exact: true })
+    .click()
+  await expect.poll(() => backupReads).toBe(2)
+  await page.keyboard.press("Escape")
+  await expect(dialog).toHaveCount(0)
+  await expect(backup).toBeFocused()
+  await backup.click()
+  await expect(dialog).toContainText("尚无备份记录。")
+  expect(backupReads).toBe(3)
+  expired = true
+  await dialog
+    .getByRole("button", { name: "刷新备份状态", exact: true })
+    .click()
+  await expect(dialog).toHaveCount(0)
+  await expect(account).toHaveCount(0)
+  await expect(backup).toHaveCount(0)
+  await expect(page.getByRole("heading", { name: "请先登录" })).toBeVisible()
+  await expect(appearance).toBeVisible()
+})
+
+test("account menu keeps failed sign-out visible and allows retry outside protected pages", async ({
+  page,
+}) => {
+  await page.route("**/api/auth/get-session", (route) =>
+    route.fulfill({
+      json: {
+        user: { id: "owner", name: "测试账号", email: "owner@example.invalid" },
+        session: { id: "session", userId: "owner" },
+      },
+    }),
+  )
+  let finish!: () => void
+  const pending = new Promise<void>((resolve) => (finish = resolve))
+  let attempts = 0
+  await page.route("**/api/auth/sign-out", async (route) => {
+    attempts++
+    if (attempts === 1) {
+      await pending
+      await route.fulfill({ status: 500, json: { message: "Unavailable" } })
+    } else await route.fulfill({ json: { success: true } })
+  })
+  await page.goto("/not-found")
+  await page.getByRole("button", { name: "账号菜单" }).click()
+  const menu = page.getByRole("menu", { name: "账号菜单" })
+  await menu.getByRole("menuitem", { name: "退出登录", exact: true }).click()
+  await expect(
+    menu.getByRole("menuitem", { name: "正在退出…", exact: true }),
+  ).toBeDisabled()
+  finish()
+  await expect(menu.getByRole("alert")).toHaveText("未确认退出，请重试退出。")
+  await expect(menu).toContainText("owner@example.invalid")
+  await menu.getByRole("menuitem", { name: "退出登录", exact: true }).click()
+  await expect(menu).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "账号菜单" })).toHaveCount(0)
+  await expect(
+    page.getByRole("heading", { name: "页面不存在", exact: true }),
+  ).toBeVisible()
+  expect(attempts).toBe(2)
 })
 
 for (const outcome of ["success", "invalid_signature"] as const) {
@@ -232,8 +412,8 @@ for (const outcome of ["success", "invalid_signature"] as const) {
     const started = page.waitForRequest("**/api/auth/sign-in/social")
     await page.getByRole("button", { name: "使用 GitHub 登录" }).click()
     await started
-    await page.getByRole("link", { name: "账号", exact: true }).click()
-    await expect(page).toHaveURL(/\/account$/)
+    await page.getByRole("link", { name: "Passkey", exact: true }).click()
+    await expect(page).toHaveURL(/\/security\/passkeys$/)
     const completed = page.waitForResponse("**/api/auth/sign-in/social")
     finish()
     await (await completed).finished()
@@ -243,7 +423,7 @@ for (const outcome of ["success", "invalid_signature"] as const) {
           requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
         }),
     )
-    await expect(page).toHaveURL(/\/account$/)
+    await expect(page).toHaveURL(/\/security\/passkeys$/)
     await expect(page.getByRole("heading", { name: "请先登录" })).toBeVisible()
     await expect(
       page.getByRole("button", { name: "使用 GitHub 登录" }),

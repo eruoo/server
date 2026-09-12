@@ -46,10 +46,14 @@ it.each([
         .trigger("click")
       await started
       if (leave) {
-        await wrapper.get('a[href="/account"]').trigger("click")
-        await flushPromises()
+        await wrapper.get('a[href="/security/passkeys"]').trigger("click")
       }
-      expect(router.currentRoute.value.path).toBe(leave ? "/account" : "/login")
+      await vi.waitFor(() =>
+        expect(router.currentRoute.value.path).toBe(
+          leave ? "/security/passkeys" : "/login",
+        ),
+      )
+      await flushPromises()
       if (outcome === "network_failure") fail(new Error("Network unavailable"))
       else
         finish(
@@ -90,10 +94,17 @@ it("keeps the shared Session check alive when the route changes", async () => {
   let finish!: (response: Response) => void
   const fetch = vi
     .spyOn(globalThis, "fetch")
-    .mockImplementation(() => new Promise((resolve) => (finish = resolve)))
+    .mockImplementation((input) =>
+      String(input).includes("/get-session")
+        ? new Promise((resolve) => (finish = resolve))
+        : Promise.resolve(Response.json([])),
+    )
   const wrapper = mount(App, { global: { plugins: [router] } })
   try {
-    await wrapper.get('a[href="/account"]').trigger("click")
+    await wrapper.get('a[href="/security/passkeys"]').trigger("click")
+    await vi.waitFor(() =>
+      expect(router.currentRoute.value.path).toBe("/security/passkeys"),
+    )
     await flushPromises()
     finish(
       Response.json({
@@ -102,10 +113,14 @@ it("keeps the shared Session check alive when the route changes", async () => {
       }),
     )
     await flushPromises()
-    expect(router.currentRoute.value.path).toBe("/account")
-    expect(wrapper.text()).toContain("owner@example.invalid")
-    expect(wrapper.text()).toContain("退出当前登录")
-    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(router.currentRoute.value.path).toBe("/security/passkeys")
+    expect(wrapper.find('[aria-label="账号菜单"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain("请先登录")
+    expect(
+      fetch.mock.calls.filter(([input]) =>
+        String(input).includes("/get-session"),
+      ),
+    ).toHaveLength(1)
   } finally {
     wrapper.unmount()
   }

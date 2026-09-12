@@ -1,7 +1,7 @@
 import { computed, onMounted, onUnmounted, shallowRef, watch } from "vue"
 import type { ComputedRef, InjectionKey } from "vue"
 
-type ThemePreference = "system" | "light" | "dark"
+export type ThemePreference = "system" | "light" | "dark"
 
 export const darkThemeKey: InjectionKey<ComputedRef<boolean>> =
   Symbol("darkTheme")

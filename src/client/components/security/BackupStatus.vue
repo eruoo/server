@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, shallowRef } from "vue"
+import { computed, onMounted, onUnmounted, shallowRef } from "vue"
 
 import type { DatabaseBackupStatus } from "../../../shared/backup"
 import { useSession } from "../../composables/session"
@@ -15,7 +15,7 @@ const stale = computed(
     Date.now() - data.value.lastSuccessAt > 26 * 60 * 60 * 1000,
 )
 async function refresh() {
-  if (busy.value) return
+  if (busy.value || session.status.value !== "authenticated") return
   const handleCredentialFailure = session.captureCredentialFailureHandler()
   busy.value = true
   message.value = ""
@@ -36,14 +36,18 @@ async function refresh() {
     if (!current.signal.aborted) busy.value = false
   }
 }
+onMounted(refresh)
 onUnmounted(() => controller?.abort())
 </script>
 <template>
-  <section class="panel" aria-labelledby="backup-heading">
-    <h2 id="backup-heading">数据库备份</h2>
-    <p>每天自动备份，保留 30 天。</p>
-    <button class="pressable" :disabled="busy" @click="refresh">
-      {{ busy ? "正在读取…" : data ? "刷新备份状态" : "查看备份状态" }}
+  <div class="backup-status" :aria-busy="busy">
+    <button
+      type="button"
+      class="pressable"
+      :disabled="busy || session.status.value !== 'authenticated'"
+      @click="refresh"
+    >
+      {{ busy ? "正在读取…" : "刷新备份状态" }}
     </button>
     <p role="status">{{ message }}</p>
     <template v-if="data">
@@ -58,5 +62,5 @@ onUnmounted(() => controller?.abort())
         最近成功：{{ new Date(data.lastSuccessAt).toLocaleString() }}
       </p>
     </template>
-  </section>
+  </div>
 </template>
