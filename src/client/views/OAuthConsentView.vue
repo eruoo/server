@@ -32,7 +32,11 @@ onUnmounted(() => {
   generation++
 })
 watch(
-  () => route.fullPath,
+  [
+    () => route.fullPath,
+    () => session.data.value?.session.id,
+    () => session.status.value === "signing-out",
+  ],
   () => {
     generation++
     busy.value = false

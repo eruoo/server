@@ -1,6 +1,5 @@
 import { createRouter, createWebHistory } from "vue-router"
 
-import HomeView from "./views/HomeView.vue"
 import LoginView from "./views/LoginView.vue"
 export const router = createRouter({
   history: createWebHistory(),
@@ -19,7 +18,7 @@ export const router = createRouter({
       component: () => import("./views/ApiKeysView.vue"),
     },
     { path: "/", redirect: "/security/passkeys" },
-    { path: "/account", component: HomeView },
+    { path: "/account", redirect: "/security/passkeys" },
     {
       path: "/security/passkeys",
       component: () => import("./views/PasskeysView.vue"),
