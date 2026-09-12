@@ -105,6 +105,8 @@ SPA assets fallback 只处理页面导航；`/api/*`、`/.well-known/*`、`/prob
 
 使用官方路径 D1 REST full SQL export → signed URL 流 → 私有 R2；不做增量备份、压缩、multipart、数据库镜像或跨账号复制。Cloudflare Secret 不在快照内，必须由 owner 的凭证管理流程另行保管；缺失解密 secret 可能使快照部分状态不可用。[官方备份示例](https://developers.cloudflare.com/workflows/examples/backup-d1/)。
 
+完整导出期间 D1 会暂时无法处理查询，因此依赖数据库的登录、会话读取和管理操作可能短暂失败；每天 03:00 的调度用于避开常用时段，不能保证备份期间无中断。导出验收与真实登录验收顺序执行，先确认 export 结束再验证身份流程；失败请求不自动重放有副作用的操作。持续轮询也用于避免导出无谓阻塞数据库，不能将 Workflow 的整体完成耗时当成准确停服时间。[D1 Export API](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/export/)。
+
 Time Travel 是平台短期原地恢复能力；当前 Free 文档为 7 天、Paid 为 30 天。由于既有恢复原则要求新建隔离 D1，它不作为标准自动恢复路径，也不能替代独立快照。[D1 limits](https://developers.cloudflare.com/d1/platform/limits/)。
 
 ### 4.2 六步流程
