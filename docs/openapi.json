@@ -53,6 +53,9 @@
           "type": {
             "type": "string",
             "enum": [
+              "ai_authorization_cancelled",
+              "ai_authorization_completed",
+              "ai_authorization_started",
               "api_key_created",
               "api_key_expired",
               "api_key_rejected",
@@ -781,6 +784,9 @@
             "schema": {
               "type": "string",
               "enum": [
+                "ai_authorization_cancelled",
+                "ai_authorization_completed",
+                "ai_authorization_started",
                 "api_key_created",
                 "api_key_expired",
                 "api_key_rejected",
