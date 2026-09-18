@@ -245,6 +245,8 @@ AI 创建必须携带非空、无重复的 `modelIds`，服务端只接受当前
 
 请求字段首版允许：model、input、instructions、stream、store、reasoning、text、tools、tool_choice、parallel_tool_calls、include。每个字段继续按模型能力与连接器支持范围校验，未知或不支持字段返回 422，不静默删除。
 
+PR 4（2026-09-19）实现时落定的精确子集边界（校验器 `src/worker/ai/responses-request.ts`，OpenAPI 随 PR 7 注册）：instructions 仅接受字符串；input_image 仅接受 data URL（PNG/JPEG/WebP、base64 须良构）且不接受 `detail`；消息角色为 system/developer/user/assistant；input 项为 message、function_call、function_call_output 与 reasoning 回放项（id/summary/encrypted_content 透传）；reasoning 仅接受 effort；text.format 仅接受 json_schema（name/schema/strict）；tool_choice 仅接受 auto、none 与指定函数对象；include 仅接受 reasoning.encrypted_content；SDK 常见附带字段（temperature、max_output_tokens、metadata、top_p 等）与其他未知字段一律 422。
+
 - input 支持文本、多轮消息、内联 PNG/JPEG/WebP 图片，以及已声明函数工具的输入输出；图片计入总请求大小。
 - 图片不由 eruoo 落盘，首版不增加远程图片抓取或文件上传 API。
 - stream 默认为 true；false 时由服务端有界读取上游事件并返回终态 response 对象。
@@ -514,6 +516,7 @@ API Key 仍在现有凭证管理入口创建和撤销，按 status、AI 用途�
 - 参考 classifier 将 legacy 刷新码视为任何状态下的终局；本实现仅在 400 上解析错误码，非 400 响应携带 legacy 码按结果不明处理（终局行为一致，仅 reason 标签更保守）。
 - 认证交换后的响应若既无 access 也无 refresh token，按协议失败（结果不明）处理。
 - 凭证包长度上限（access token ≤2048、refresh token ≤512 字符）为应用侧约束；真实令牌长度**待实测**，超限会在首次使用时报不可读并要求重新授权。
+- 流内终局失败分类按 CLIProxyAPI 7bbfeaf 固定参考实现：`error` 事件的错误体位于 `error`（或顶层），`response.failed` 位于 `response.error`；`error.type=usage_limit_reached` 携带 `resets_at`/`resets_in_seconds` 判为额度不足并仅在验证通过时转发重试提示；`invalid_api_key`/`unauthorized`/`authentication_error` 判为需重新授权；限流、容量、上下文超限与其余受控错误判为上游不可用；真实错误正文一律不透出。分类码集合**待实测**确认。
 - 上游对非第一方 originator/User-Agent、FedRAMP 工作区（`x-openai-internal-codex-residency`、FedRAMP 边缘）的行为未实现、未验证；首版目标账号非 FedRAMP。
 - discovery 文档的 token_endpoint 为 `{issuer}/api/accounts/oauth/token`，与 codex-rs 固定使用的 `{issuer}/oauth/token` 不同；连接器按固定参考实现，不使用通用 discovery 端点。
 

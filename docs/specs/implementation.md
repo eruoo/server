@@ -360,6 +360,16 @@ owner 授权收尾文档、核验首次自动调度并定点排查 §4.12 的登
 
 验证（本地，workerd + 本地 D1、合成 JWKS/令牌与受控 fetch 夹具）：`tests/worker/ai-codex-authorization.test.ts` 27 项与 `tests/worker/ai-credential-refresh.test.ts` 28 项（共 55 项，含复审新增的刷新分类器两项）——正常授权（含固定 client/端点/重定向断言）、拒绝、取消、过期、多标签单检查、退出/旧 Session、错误账号/工作区、迟到交换（断开/版本竞争）、密文篡改、AAD 错配、keyring 轮换（旧读新写）、并发刷新 busy（Retry-After）、刷新各类失败窗口（未发出/invalid_grant/401/5xx/传输/超时/claim 过期/落库竞争/断开竞争）、合并语义、模型发现全部状态与重新授权门槛、阶段预算耗尽零外呼、正式入口 404。既有测试全部通过，`pnpm run check` 全量通过。未验证：真实上游授权/刷新/模型发现、`AI_CREDENTIAL_KEYS` 真实轮换、staging 联调。
 
+### 4.16 2026-09-19 PR 4：Responses 子集与有界 SSE/JSON 协议（本地实现）
+
+按本轮 owner 授权的 PR 4 切片交付 Responses 调用协议的请求子集与共用响应解析，网络调用编排（transport 接线）留给 PR 5；AI 正式路由仍不注册，`/api/ai/*` 继续在实际根装配 404。
+
+- 请求校验（`src/worker/ai/responses-request.ts`）：严格子集 schema（§6.2 精确边界见 ai-service.md PR 4 落定记录）——支持文本、内联 PNG/JPEG/WebP data URL 图片、多轮消息、函数工具定义与结果、reasoning 回放项、结构化输出（json_schema）与推理 effort；未知或不支持字段（含 temperature/max_output_tokens/metadata/top_p、远程图片 URL、`detail`、reasoning.summary、json_object、tool_choice "required" 等）逐字段 422，不静默删除；schema 为 zod 声明，PR 7 直接复用于 OpenAPI。
+- 共用协议（`src/worker/ai/responses-protocol.ts`）：增量 SSE 解析（TextDecoder 流式跨 UTF-8/跨行/跨事件分块重组、CRLF、多 data 行、注释与 id/retry 忽略、单事件 4 MiB 上限）；JSON 与 SSE 共用同一终态解析——按 output_index 有界收集 `response.output_item.done`，终态 output 为空时按序替换、非空时按 item id/call id/output index 补缺项并为同索引终态项补齐缺失 id，同索引不同项即冲突报协议错误，delta 永不参与补全，补全后重查 4 MiB；completed/incomplete/failed/error/EOF 无终态分别处理；流内失败按固定参考分类（额度不足+校验后重试提示 / 需重新授权 / 上游不可用 / 协议错误），上游错误正文不透出；累计上游读取 8 MiB；AbortSignal 中止返回 aborted。
+- 下游写出（`src/worker/ai/responses-sse.ts`）：单写者顺序写出的有界缓冲 ReadableStream（高水位 64 KiB，背压传播到上游读取循环，慢消费者不产生无界缓冲）；15 秒注释心跳仅在缓冲清空时发送、背压时跳过、终态后停止并计入 8 MiB 传输预算；超预算帧不写出并以单一脱敏 `event: error` Problem 收尾（允许小额度超限携带终态错误）；消费者取消后写出为无操作；Problem 注册表新增 §6.3 六个 AI 类型。
+- 复审修复（独立 review 两轮）：第一轮——背压下到期待心跳不再自旋（心跳等待缓冲排空的 drain 通知，至多一个挂起；预算不再容纳心跳时永久停发）；预算近耗尽时终态错误事件仍以有界小额度超限送达（此前会被静默丢弃）；单事件与终态上限改为按 UTF-8 字节计（含未闭合事件的增量计数）；心跳写入计入预算；终态 output 非数组按协议失败；终态早于 EOF 时释放上游读取；测试补充真实多字节切分点。第二轮（复审复核第一轮修复后）——修正增量字节计数对跨块拆分行的重复计数（此前一个 3 MiB 合法事件分 8 块送达会被误判超限，已补回归测试）；近耗尽回归测试改为精确帧长填充至剩余额度小于终态错误帧（此前留有 58 KiB 余量，旧缺陷形态下也能通过）；校验器文档纠正 zod 4 对未知顶层字段合并为单一条目的描述；移除无引用的 responsesSupportedImageMediaTypes 导出。复审同时确认：自旋修复的所有路径（含预算拒绝与 drain 竞争）均阻塞于真实状态变更、pendingRead 不丢失不重复消费；终态错误有界超限仅限单个错误帧、数据帧仍严格受预算约束。
+- 验证：`tests/worker/ai-responses-protocol.test.ts` 39 项——字段接受/拒绝矩阵、任意分块（逐字节推送、真实多字节切分）、多 data 行/CRLF/注释、4 MiB 单事件与 8 MiB 累计边界、补全/缺项/id 补齐/冲突/孤儿项/非数组拒绝、delta 忽略、completed/incomplete/usage、额度（resets_at/resets_in_seconds/非法值）、认证/限流/容量/未知分类与正文不泄露、EOF/不可解析/中止、背压传播、心跳（含管道集成、背压等待不自旋、终态后停止）、慢消费者取消、传输预算收尾错误与近耗尽送达（精确帧长填充）、跨块拆分行计数一次、JSON/SSE 等价终态。`pnpm run check` 全链通过。未验证：真实上游事件流（分类码集合按固定参考实现，标注待实测）；transport 接线与路由在 PR 5/7。
+
 ## 5. 后续验证与已知限制
 
 Cloudflare 与 GitHub 接线、staging 验收及 production 首次发布、真实登录和备份已按上述记录完成。以下限制与后续范围仍保留，不能由本地测试替代：
@@ -368,6 +378,6 @@ Cloudflare 与 GitHub 接线、staging 验收及 production 首次发布、真�
 - §4.11 的 Default 三地 warm 达到新目标，同代码闲置样本满足新目标；旧 JP 尾延迟和 Smart SG 超时未定位，后续若再次出现须按请求与平台证据排查，不能报告为已修复。常规发布阶段耗时尚未积累五次样本，不代表所有代理节点或生产性能已验证。
 - Workflow 中断与代码回退已在 §4.9 完成所列场景；大对象提交竞争与长时限的所有窗口未穷尽。成功导出/上传、隔离库导入、凭证清理及新信任验证已在 §4.8 通过。
 - Desktop App、Rust 安全存储、客户端打包与跨端联调：按 owner 最新决定延期，不属于本次 Web 交付。
-- AI 状态存储切片（§4.14）交付持久状态边界；PR 3（§4.15，2026-09-19）补齐 Codex 连接器、凭证加密、设备授权编排、凭证刷新与模型发现，并经本地合成验证。AI HTTP 路由、AI Key 配置档与管理界面仍未注册；真实设备授权、令牌刷新、模型发现与 `AI_CREDENTIAL_KEYS` 真实轮换未执行，连接器固定契约中标注“待实测”的项（audience 形态、默认有效期、非第一方 originator 待遇、FedRAMP）不得视为已确认。含 AI 表的远端迁移与隔离恢复演练在后续切片按当次授权执行。
+- AI 状态存储切片（§4.14）交付持久状态边界；PR 3（§4.15）补齐 Codex 连接器、凭证加密、设备授权编排、凭证刷新与模型发现；PR 4（§4.16，2026-09-19）补齐 Responses 请求子集与共用 SSE/JSON 协议解析，均经本地合成验证。AI HTTP 路由、AI Key 配置档与管理界面仍未注册；真实设备授权、令牌刷新、模型发现、`AI_CREDENTIAL_KEYS` 真实轮换与真实上游事件流未执行，连接器固定契约中标注“待实测”的项（audience 形态、默认有效期、非第一方 originator 待遇、FedRAMP、流内错误分类码集合、令牌长度）不得视为已确认。含 AI 表的远端迁移与隔离恢复演练在后续切片按当次授权执行。
 
 恢复规划器只输出可审核计划；恢复、secret 轮换、资源删除及正式部署仍需当次具体授权。Git 提交和 PR 合并与这些平台操作分别记录，不代表远端发布或验收已经完成。
