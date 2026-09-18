@@ -9,3 +9,11 @@ export const API_KEY_STATUS_PERMISSION = "status:read"
 export const API_KEY_DEFAULT_PERMISSIONS = {
   status: ["read"],
 } as const
+
+/**
+ * 应用侧 API Key 配置档。当前只开放 default（status 用途）；
+ * AI 档由后续切片引入，网关在此之前拒绝未知档，不依赖插件回退。
+ */
+export const API_KEY_DEFAULT_CONFIG_ID = "default"
+/** 创建请求的用途选择器；省略或 status 映射到 default 档。 */
+export const API_KEY_STATUS_PURPOSE = "status"

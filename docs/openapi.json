@@ -430,6 +430,339 @@
           "revokedRefreshTokenCount"
         ],
         "additionalProperties": false
+      },
+      "CreatedApiKey": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "configId": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "referenceId": {
+            "type": "string"
+          },
+          "lastRefillAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastRequest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {}
+          },
+          "permissions": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "rateLimitEnabled": {
+            "type": "boolean"
+          },
+          "rateLimitMax": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "rateLimitTimeWindow": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "remaining": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "refillAmount": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "refillInterval": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "requestCount": {
+            "type": "number"
+          },
+          "key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "configId",
+          "name",
+          "start",
+          "prefix",
+          "enabled",
+          "expiresAt",
+          "createdAt",
+          "updatedAt",
+          "referenceId",
+          "lastRefillAt",
+          "lastRequest",
+          "metadata",
+          "permissions",
+          "rateLimitEnabled",
+          "rateLimitMax",
+          "rateLimitTimeWindow",
+          "remaining",
+          "refillAmount",
+          "refillInterval",
+          "requestCount",
+          "key"
+        ]
+      },
+      "ApiKeyPluginError": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "ApiKeyList": {
+        "type": "object",
+        "properties": {
+          "apiKeys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiKey"
+            }
+          },
+          "total": {
+            "type": "number"
+          },
+          "limit": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "offset": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "apiKeys",
+          "total"
+        ]
+      },
+      "ApiKey": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "configId": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "referenceId": {
+            "type": "string"
+          },
+          "lastRefillAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastRequest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {}
+          },
+          "permissions": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "rateLimitEnabled": {
+            "type": "boolean"
+          },
+          "rateLimitMax": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "rateLimitTimeWindow": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "remaining": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "refillAmount": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "refillInterval": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "requestCount": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "configId",
+          "name",
+          "start",
+          "prefix",
+          "enabled",
+          "expiresAt",
+          "createdAt",
+          "updatedAt",
+          "referenceId",
+          "lastRefillAt",
+          "lastRequest",
+          "metadata",
+          "permissions",
+          "rateLimitEnabled",
+          "rateLimitMax",
+          "rateLimitTimeWindow",
+          "remaining",
+          "refillAmount",
+          "refillInterval",
+          "requestCount"
+        ]
+      },
+      "ApiKeyDeletion": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success"
+        ]
       }
     },
     "parameters": {}
@@ -682,6 +1015,328 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/api-key/create": {
+      "post": {
+        "operationId": "createApiKey",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Display name of the API key."
+                  },
+                  "expiresIn": {
+                    "type": "integer",
+                    "minimum": 86400,
+                    "maximum": 31536000,
+                    "description": "Lifetime in seconds, between 1 and 365 days."
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "enum": [
+                      "status"
+                    ],
+                    "description": "Usage selector. Omitted or `status` maps to the default profile; other usages are not open yet."
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "API key created for the default profile; the raw key is returned only here",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedApiKey"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected as an application Problem or returned by the plugin as a native error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyPluginError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/api-key/list": {
+      "get": {
+        "operationId": "listApiKeys",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "default"
+              ],
+              "description": "API key configuration profile."
+            },
+            "required": false,
+            "description": "API key configuration profile.",
+            "name": "configId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owner API keys inside one configuration profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected as an application Problem or returned by the plugin as a native error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyPluginError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/api-key/get": {
+      "get": {
+        "operationId": "getApiKey",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "API key ID."
+            },
+            "required": true,
+            "description": "API key ID.",
+            "name": "keyId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "default"
+              ],
+              "description": "API key configuration profile."
+            },
+            "required": false,
+            "description": "API key configuration profile.",
+            "name": "configId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owner API key inside one configuration profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKey"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected as an application Problem or returned by the plugin as a native error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyPluginError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/api-key/update": {
+      "post": {
+        "operationId": "updateApiKey",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "keyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "API key ID."
+                  },
+                  "configId": {
+                    "type": "string",
+                    "enum": [
+                      "default"
+                    ],
+                    "description": "API key configuration profile."
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Display name of the API key."
+                  }
+                },
+                "required": [
+                  "keyId",
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "API key renamed inside one configuration profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKey"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected as an application Problem or returned by the plugin as a native error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyPluginError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/api-key/delete": {
+      "post": {
+        "operationId": "deleteApiKey",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "keyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "API key ID."
+                  },
+                  "configId": {
+                    "type": "string",
+                    "enum": [
+                      "default"
+                    ],
+                    "description": "API key configuration profile."
+                  }
+                },
+                "required": [
+                  "keyId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "API key revoked, or already absent from the requested profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyDeletion"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected as an application Problem or returned by the plugin as a native error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyPluginError"
                 }
               }
             }

@@ -12,6 +12,11 @@ import {
   OAUTH_REFRESH_TOKEN_MAX_TTL_SECONDS,
 } from "../shared/oauth"
 import { boundedGitHubTransport } from "./auth/github-transport"
+import {
+  AUTH_BASE_PATH,
+  AUTH_RATE_LIMIT_MAX_REQUESTS,
+  AUTH_RATE_LIMIT_WINDOW_SECONDS,
+} from "./auth/persistent-rate-limit"
 import { OAUTH_ACCESS_TOKEN_JWKS_OPTIONS } from "./oauth/access-token"
 import { persistSigningKey } from "./oauth/signing-keys"
 
@@ -133,7 +138,7 @@ export function createAuthOptions(
   }
   return {
     appName: "eruoo",
-    basePath: "/api/auth",
+    basePath: AUTH_BASE_PATH,
     baseURL: config.appOrigin,
     database,
     logger: { disabled: true },
@@ -211,8 +216,8 @@ export function createAuthOptions(
       },
       enabled: true,
       storage: "database",
-      window: 60,
-      max: 100,
+      window: AUTH_RATE_LIMIT_WINDOW_SECONDS,
+      max: AUTH_RATE_LIMIT_MAX_REQUESTS,
     },
     advanced: {
       database: {

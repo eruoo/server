@@ -2,6 +2,10 @@ import { OpenAPIHono } from "@hono/zod-openapi"
 
 import { assertAuditSecret, scheduleAuditEvent } from "./audit"
 import type { AuditEventType } from "./audit"
+import {
+  handleApiKeyManagementRequest,
+  isApiKeyManagementOperation,
+} from "./auth/api-key-management"
 import { limitAuthEntry } from "./auth/entry-limit"
 import { authOperations, loginErrors } from "./auth/routes"
 import { getRequestAuth, readOwnerSession } from "./auth/session"
@@ -145,33 +149,9 @@ app.all("/api/auth/*", async (c) => {
         return principal
       }
     }
-    if (
-      path === "/api/auth/api-key/create" ||
-      path === "/api/auth/api-key/update"
-    ) {
-      let body: unknown
-      try {
-        body = await request.clone().json()
-      } catch {
-        return problem("invalid-request", requestId)
-      }
-      if (typeof body !== "object" || body === null || Array.isArray(body))
-        return problem("validation-failed", requestId)
-      const allowedFields = path.endsWith("/update")
-        ? ["keyId", "name"]
-        : ["name", "expiresIn"]
-      if (Object.keys(body).some((field) => !allowedFields.includes(field)))
-        return problem("validation-failed", requestId)
-      if (
-        "expiresIn" in body &&
-        (typeof body.expiresIn !== "number" ||
-          !Number.isInteger(body.expiresIn) ||
-          body.expiresIn < 86400 ||
-          body.expiresIn > 365 * 86400)
-      )
-        return problem("api-key-expiration-required", requestId)
-    }
-    const response = await getRequestAuth(c).handler(request)
+    const response = isApiKeyManagementOperation(c.req.method, path)
+      ? await handleApiKeyManagementRequest(c)
+      : await getRequestAuth(c).handler(request)
     const events: Record<string, AuditEventType> = {
       "/api/auth/api-key/create": "api_key_created",
       "/api/auth/api-key/update": "api_key_updated",

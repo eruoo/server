@@ -56,14 +56,17 @@ SPA assets fallback 只处理页面导航；`/api/*`、`/.well-known/*`、`/prob
 
 以 operation ID 作为稳定 key，禁止使用任意 URL/path/query 构造无限基数的数据库桶。连接 IP 只取平台可信头；本地无可信 IP 使用测试值，不信任外部自报的 forwarded-for。
 
-| 流量                                             | 粗入口策略                                             | 持久策略                                                                                     |
-| ------------------------------------------------ | ------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
-| 已登记的交互认证与 token operation               | `AUTH_RATE_LIMITER`，每 operation + IP 10/60 秒        | Better Auth 通用策略显式设置 `rateLimit: { window: 60, max: 100 }`；保留核心与插件的专用规则 |
-| `GET /api/status` 携带 x-api-key                 | 独立 `API_KEY_RATE_LIMITER`，每 operation + IP 5/60 秒 | 每 key 计数由架构规格定义                                                                    |
-| get-session、静态响应、未知/禁用路径、非支持方法 | 不做数据库限流计数                                     | 无                                                                                           |
-| 内部 Cron/Workflow                               | 不经过 HTTP 限流                                       | 维护任务自身的批次、重试、容量预算                                                           |
+| 流量                                                     | 粗入口策略                                             | 持久策略                                                                                           |
+| -------------------------------------------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| 已登记的交互认证与 token operation                       | `AUTH_RATE_LIMITER`，每 operation + IP 10/60 秒        | Better Auth 通用策略显式设置 `rateLimit: { window: 60, max: 100 }`；保留核心与插件的专用规则       |
+| API Key 管理网关（`/api/auth/api-key/*` 五个 operation） | mutation 沿用 `AUTH_RATE_LIMITER`；list/get 无粗入口   | 应用网关按已登记 operation + 可信 IP 消费同一个 `rateLimit` 表，100/60 秒，与原生 handler 共享桶键 |
+| `GET /api/status` 携带 x-api-key                         | 独立 `API_KEY_RATE_LIMITER`，每 operation + IP 5/60 秒 | 每 key 计数由架构规格定义                                                                          |
+| get-session、静态响应、未知/禁用路径、非支持方法         | 不做数据库限流计数                                     | 无                                                                                                 |
+| 内部 Cron/Workflow                                       | 不经过 HTTP 限流                                       | 维护任务自身的批次、重试、容量预算                                                                 |
 
 认证粗入口沿用既有生产阈值。Better Auth 持久限流则是目标变更：原审查基线的 `src/worker/auth.ts` 未设置 window/max；当前实现已显式设置 60/100 并关闭 `/get-session` 计数。锁定的 1.7.2 通用默认值为 `window: 10, max: 100`；项目将通用窗口设为 60 秒，作为 location 局部入口限制之外的保护。核心与插件的专用规则仍优先适用，不能把通用 100/60 秒当成所有端点的有效阈值：当前 `/sign-in/social` 使用核心 `/sign-in*` 的 3/10 秒规则，连续请求可能触发 429。实现保留 `enabled: true`、`storage: "database"` 和 `/get-session: false`；本次补充的是现有规则说明，没有调整阈值。实际观察见 [实施记录 §4.13](implementation.md#413-2026-09-12-staging-导出与登录对照)。
+
+API Key 管理网关调用 `auth.api.*` 服务端 API，不再经过 Better Auth router 的 onRequest 计数，因此网关自身在同一个 `rateLimit` 表上按已登记 operation 与可信 IP 消费同一策略（100/60 秒），桶键与 `normalizePathname(url, basePath)` 对齐。客户端 IP 复用库公开的 `getIP` 与同一 options：只读配置允许的 `cf-connecting-ip`、只接受单值有效地址、IPv4 映射地址还原为 IPv4、IPv6 按默认 /64 归并、无法解析时回退共享桶，因此和原生 handler 共享同一持久桶；计数异常返回 503，不放行未计数的请求。桶基数由已登记 operation 与可信 IP 决定，不使用原始 URL 或 query。
 
 限流 binding 异常或 5 秒内未返回时 503，不继续高成本认证；API Key status 在入口限流通过后只使用请求剩余的 5 秒读预算，迟到 limiter 结果不能重新启动认证；429 返回合适的 Retry-After，不追加 D1 拒绝审计。未知路径直接 404。多个 limiter 不串行检查同一个 operation。
 

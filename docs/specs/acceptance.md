@@ -175,7 +175,7 @@ Desktop 延后实施；后续客户端切片将 A7/A8 扩展为 [协议规格 §
 | R4   | API Key 原生管理；自有 `GET /api/status`；私有 Scalar/OpenAPI                                            | API Key 管理、API 文档                                      |
 | R5   | OAuth/OIDC、JWKS 与发现端点、静态 client/resource、family 撤销；自有授权列表 GET 与按 client 撤销 DELETE | 已授权应用、必要的 consent/continue；Desktop 登录与退出暂缓 |
 
-上述五个自有 API 的累计数量应为 R1=0、R2=1、R3=2、R4=3、R5=5；原生 Auth、health、文档交付和 metadata 不计入。现存 OpenAPI 的五个 operation 是完整目标字段快照，不要求 R1 提前注册它们；生成器接管后仅输出已注册的自有 API，R4 首次开放文档应为三个，R5 才为五个。尚未开放的 OAuth discovery 不得宣告可用能力。
+上述五个自有 API 的累计数量应为 R1=0、R2=1、R3=2、R4=3、R5=5；原生 Auth、health、文档交付和 metadata 不计入。现存 OpenAPI 的五个 operation 是完整目标字段快照，不要求 R1 提前注册它们；生成器接管后仅输出已注册的契约，R4 首次开放文档应为三个，R5 才为五个。API Key 管理网关的五个 `/api/auth/api-key/*` 契约随 R4 进入生成文档，但不计入自有 API 数量（见 [协议规格 §2.2](protocol-contract.md#22-身份端点base-path-apiauth)）。尚未开放的 OAuth discovery 不得宣告可用能力。
 
 每片验收包含“已启用成功、未启用拒绝”：直接请求未来片的接口不能执行 handler 或触发 Auth/D1，前端深链不能挂载未来片面板。相关表、插件、binding、secret 和维护规则只随能力加入；R3 的清理仅覆盖当时已有数据类型，R5 再加入 OAuth 清理。页面范围、实际路由注册、生成文档与部署所需配置必须一致。恢复规划器同样按当前 schema 的实际表集清除安全状态，不要求 R3 创建尚未启用的 OAuth/API Key 表。
 
