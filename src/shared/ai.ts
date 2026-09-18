@@ -106,6 +106,13 @@ export const AI_AUTHORIZATION_SESSION_MAX_TTL_MS = 15 * 60 * 1000
 /** Poll intervals never fall below 1 second. */
 export const AI_AUTHORIZATION_POLL_MIN_INTERVAL_MS = 1_000
 
+/**
+ * Default device-authorization poll interval when the upstream omits it or
+ * sends an unparseable value. The fixed Codex contract returns the interval as
+ * a string; OpenCode's connector treats 5 seconds as the default floor.
+ */
+export const AI_AUTHORIZATION_POLL_DEFAULT_INTERVAL_MS = 5_000
+
 /** A poll claim coordinates one upstream status check per poll request. */
 export const AI_AUTHORIZATION_POLL_CLAIM_TTL_MS = 30_000
 
@@ -114,6 +121,33 @@ export const AI_CREDENTIAL_REFRESH_CLAIM_TTL_MS = 30_000
 
 /** Access tokens are refreshed 60 seconds before they expire. */
 export const AI_CREDENTIAL_REFRESH_LEAD_MS = 60_000
+
+/**
+ * Refresh network budget, response body included. It is always truncated by
+ * the invoking stage's remaining budget when that is smaller.
+ */
+export const AI_CREDENTIAL_REFRESH_NETWORK_BUDGET_MS = 10_000
+
+/**
+ * The credential package (access and refresh token plus the retained account
+ * identity) is stored as one AES-256-GCM ciphertext. Application code caps
+ * the serialized envelope at 4096 characters to keep the stored value
+ * bounded; the envelope validator and every storage write enforce the same
+ * bound before persisting.
+ */
+export const AI_CREDENTIAL_CIPHERTEXT_MAX_LENGTH = 4096
+
+/** Single upstream HTTP call during owner-facing AI management operations. */
+export const AI_MANAGEMENT_UPSTREAM_SINGLE_CALL_MS = 10_000
+
+/** Combined upstream HTTP budget for one owner-facing management operation. */
+export const AI_MANAGEMENT_UPSTREAM_TOTAL_MS = 20_000
+
+/** Stage budget for authorization start, poll, and model refresh requests. */
+export const AI_MANAGEMENT_STAGE_BUDGET_MS = 30_000
+
+/** The recent-authentication window anchor for credential commit rechecks. */
+export const AI_RECENT_AUTHORIZATION_WINDOW_MS = 900_000
 
 /** Service-wide and per-key in-flight invocation slots. */
 export const AI_MAX_IN_FLIGHT_INVOCATIONS = 2

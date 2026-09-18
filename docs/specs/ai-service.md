@@ -2,7 +2,7 @@
 
 日期：2026-09-15
 
-状态：设计来源；存储、维护与恢复切片已实施（2026-09-18，见 [实施记录](implementation.md)），AI HTTP、AI Key 配置档、管理界面与上游连接器尚未开放，AI 服务不可用
+状态：设计来源；存储、维护与恢复切片已实施（2026-09-18，见 [实施记录](implementation.md)），Codex 连接器、凭证加密、设备授权编排、凭证刷新与模型发现已实现并完成本地合成验证（2026-09-19，见 [实施记录 §4.15](implementation.md)），AI HTTP 路由、AI Key 配置档与管理界面尚未开放，AI 服务不可用
 
 首版上游：Codex OAuth
 
@@ -487,6 +487,36 @@ API Key 仍在现有凭证管理入口创建和撤销，按 status、AI 用途�
 - [CLIProxyAPI Codex 流处理，7bbfeaf](https://github.com/router-for-me/CLIProxyAPI/blob/7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b/internal/runtime/executor/codex_executor_stream.go)：参考协议转换与运行处理的分离，以及失败/缺失终态的显式识别。
 - [CLIProxyAPI 输出补全测试，同一版本](https://github.com/router-for-me/CLIProxyAPI/blob/7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b/internal/runtime/executor/codex_executor_stream_output_test.go)：参考已完成输出项与终态 output 缺失的兼容处理；合成测试不替代目标 Codex 环境实测。
 
+### 连接器固定契约（PR 3 实施时逐项核对，2026-09-19）
+
+以下来自固定参考源码的逐项核对，已按此实现 `src/worker/ai/codex-connector.ts`；标注"待实测"的项仍需真实设备授权/刷新验证，不能宣称已兼容：
+
+| 项              | 固定值/行为                                                                                                                                                                                                                                                                                                 | 来源                                                     |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| issuer          | `https://auth.openai.com`                                                                                                                                                                                                                                                                                   | codex-rs `DEFAULT_ISSUER`                                |
+| client id       | `app_EMoamEEZ73f0CkXaXp7hrann`                                                                                                                                                                                                                                                                              | codex-rs `CLIENT_ID`                                     |
+| 设备验证页      | `{issuer}/codex/device`                                                                                                                                                                                                                                                                                     | codex-rs                                                 |
+| usercode 请求   | POST `{issuer}/api/accounts/deviceauth/usercode`，JSON `{client_id}`；响应 `{device_auth_id, user_code, interval(字符串)}`                                                                                                                                                                                  | codex-rs / OpenCode                                      |
+| 轮询间隔        | interval 按字符串解析；无法解析默认 5 秒；可解析数值钳制到 ≥1 秒                                                                                                                                                                                                                                            | 设计 §5.1                                                |
+| 设备令牌轮询    | POST `{issuer}/api/accounts/deviceauth/token`，JSON `{device_auth_id, user_code}`；2xx 返回 `{authorization_code, code_challenge, code_verifier}`（code_verifier 由上游下发）；403/404=未决；其他 HTTP=终局拒绝                                                                                             | codex-rs                                                 |
+| 授权码交换      | POST `{issuer}/oauth/token`，form-urlencoded `grant_type=authorization_code`，`redirect_uri={issuer}/deviceauth/callback`；响应三令牌必填                                                                                                                                                                   | codex-rs                                                 |
+| 刷新            | POST `{issuer}/oauth/token`，JSON `{client_id, grant_type:"refresh_token", refresh_token}`；响应三字段均可选，按合并语义处理；400 `invalid_grant`（含 legacy `refresh_token_expired/reused/invalidated` 码与嵌套形态）与 401 为确定终局；其余 400 码参考实现按 Transient 重试，本服务不重放、按结果不明处理 | codex-rs manager.rs                                      |
+| 模型目录        | GET `https://chatgpt.com/backend-api/codex/models?client_version=…`，Bearer + `chatgpt-account-id`；响应 `{models:[{slug, display_name, supported_reasoning_levels, supported_in_api, visibility, …}]}`                                                                                                     | codex-rs models 端点                                     |
+| JWKS            | `https://auth.openai.com/.well-known/jwks.json`（2026-09-19 实测返回 RS256 密钥；按次获取，不跨请求缓存）                                                                                                                                                                                                   | OIDC discovery 实测                                      |
+| ID token claims | `https://api.openai.com/auth.{chatgpt_user_id, chatgpt_account_id, chatgpt_plan_type}`、`email`、`exp`                                                                                                                                                                                                      | codex-rs token_data.rs                                   |
+| 上游标识头      | `originator: eruoo`、`user-agent: eruoo/1`（第三方 originator 为参考模式：OpenCode 发送 `opencode`）                                                                                                                                                                                                        | OpenCode；eruoo 非第一方 originator 是否被区别对待待实测 |
+| 访问令牌有效期  | 优先 `expires_in`，其次 access token `exp` claim（JWT），缺失时默认 3600 秒                                                                                                                                                                                                                                 | OpenCode `expires_in ?? 3600`；**默认值待实测**          |
+
+实施取舍（已实现、待真实授权复核）：
+
+- ID token 验签按 RS256 + issuer + audience=固定 client id + exp 严格执行；audience 断言值为 OAuth 标准语义，**真实 id_token 的 aud 形态待实测**。
+- 刷新不重验 id_token（codex-rs 同样只解析不验签）；账号绑定以授权时验签结果为准。
+- 参考 classifier 将 legacy 刷新码视为任何状态下的终局；本实现仅在 400 上解析错误码，非 400 响应携带 legacy 码按结果不明处理（终局行为一致，仅 reason 标签更保守）。
+- 认证交换后的响应若既无 access 也无 refresh token，按协议失败（结果不明）处理。
+- 凭证包长度上限（access token ≤2048、refresh token ≤512 字符）为应用侧约束；真实令牌长度**待实测**，超限会在首次使用时报不可读并要求重新授权。
+- 上游对非第一方 originator/User-Agent、FedRAMP 工作区（`x-openai-internal-codex-residency`、FedRAMP 边缘）的行为未实现、未验证；首版目标账号非 FedRAMP。
+- discovery 文档的 token_endpoint 为 `{issuer}/api/accounts/oauth/token`，与 codex-rs 固定使用的 `{issuer}/oauth/token` 不同；连接器按固定参考实现，不使用通用 discovery 端点。
+
 ### 已有验证记录与证据边界
 
 - 当前仓库为单 Worker、D1 和已有 API Key 管理；尚无 AI 接口和上游连接存储。
@@ -495,5 +525,6 @@ API Key 仍在现有凭证管理入口创建和撤销，按 status、AI 用途�
 - 已阅读三个项目的固定源码快照。
 - 尚未执行真实设备授权、令牌刷新、模型发现、模型调用、Worker staging 联调或容量测试。
 - 本次修订核对了 API Key 插件服务端字段、configId 行为、请求体默认上限、恢复清理授权和发布数量断言；只更新设计文档，不修改应用代码，不执行部署。
+- PR 3（2026-09-19）按上表逐项核对固定源码并完成本地合成验证（见实施记录 §4.15）；真实授权、刷新与模型发现仍未执行。
 
 实施验收另记录连接器源码版本、Worker 发布版本与环境、脱敏后的请求方法/URL/非敏感参数、执行时间及受控结果。复现命令从环境读取测试 Key，不保存真实凭证、设备码或完整生成内容；探测路径可达与真实授权、刷新、模型能力验证分别记账。

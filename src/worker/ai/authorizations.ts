@@ -399,11 +399,17 @@ export async function cancelAiAuthorizationSession(
  * Statement 2 saves the credential package and advances that same
  * connection's version, gated on the fresh completion id and the bound
  * version from the session row.
+ * Statement 3 deletes the connection's model snapshot rows under the same
+ * gates, expressed against the post-update state (the connection's version is
+ * the bound version plus one after statement 2): a reauthorization opens a
+ * new credential epoch and the old catalog must not survive it as if it were
+ * still discovered. The deletion matches 0..N rows (the composite model key
+ * allows one row per upstream model) and is idempotent.
  *
- * Both statements therefore succeed or fail together: without the fresh
- * completion id from statement 1, statement 2 matches no row, and when
+ * All statements therefore succeed or fail together: without the fresh
+ * completion id from statement 1, statements 2 and 3 match no rows, and when
  * statement 1 succeeds its guards guarantee statement 2's conditions. The
- * post-batch assertion turns any divergence into a loud invariant failure.
+ * post-batch assertions turn any divergence into a loud invariant failure.
  */
 export async function completeAiAuthorization(
   database: D1Database,
@@ -444,6 +450,8 @@ export async function completeAiAuthorization(
   )
   requireEpochMilliseconds(input.now, "The AI authorization completion time")
 
+  const completedSessionSelector = `SELECT "connectionId" FROM "ai_authorization_sessions"
+       WHERE "id" = ?5 AND "status" = 'completed' AND "completionId" = ?6`
   const results = await database.batch<unknown>([
     database
       .prepare(
@@ -487,10 +495,7 @@ export async function completeAiAuthorization(
              "refreshClaimId" = NULL,
              "refreshClaimExpiresAt" = NULL,
              "updatedAt" = ?4
-         WHERE "id" = (
-             SELECT "connectionId" FROM "ai_authorization_sessions"
-             WHERE "id" = ?5 AND "status" = 'completed' AND "completionId" = ?6
-           )
+         WHERE "id" = (${completedSessionSelector})
            AND "credentialVersion" = (
              SELECT "connectionCredentialVersion"
              FROM "ai_authorization_sessions"
@@ -505,8 +510,26 @@ export async function completeAiAuthorization(
         input.sessionId,
         input.completionId,
       ),
+    database
+      .prepare(
+        `DELETE FROM "ai_models"
+         WHERE EXISTS (
+           SELECT 1 FROM "ai_connections" AS "connection"
+           WHERE "connection"."id" = "ai_models"."connectionId"
+             AND "connection"."id" = (
+               SELECT "connectionId" FROM "ai_authorization_sessions"
+               WHERE "id" = ?1 AND "status" = 'completed' AND "completionId" = ?2
+             )
+             AND "connection"."credentialVersion" = (
+               SELECT "connectionCredentialVersion" + 1
+               FROM "ai_authorization_sessions"
+               WHERE "id" = ?1 AND "status" = 'completed' AND "completionId" = ?2
+             )
+         )`,
+      )
+      .bind(input.sessionId, input.completionId),
   ])
-  if (results.length !== 2) {
+  if (results.length !== 3) {
     throw new TypeError("The AI authorization completion result is invalid.")
   }
 
