@@ -7,6 +7,41 @@ interface ProblemTypeDefinition {
 }
 
 export const problemTypeRegistry = {
+  "ai-concurrency-exceeded": {
+    description:
+      "The AI service or this API key already holds its maximum in-flight invocations; retry after checking current usage.",
+    status: 429,
+    title: "AI concurrency exceeded",
+  },
+  "ai-credential-busy": {
+    description:
+      "Another request is currently refreshing the upstream credential for this connection; retry after the indicated delay.",
+    status: 503,
+    title: "AI credential busy",
+  },
+  "ai-reauthorization-required": {
+    description:
+      "The upstream authorization for this connection is no longer usable; the owner must reauthorize before further AI calls.",
+    status: 503,
+    title: "AI reauthorization required",
+  },
+  "ai-upstream-protocol-error": {
+    description:
+      "The upstream response violated the supported AI protocol and cannot be completed.",
+    status: 502,
+    title: "AI upstream protocol error",
+  },
+  "ai-upstream-quota-exceeded": {
+    description:
+      "The upstream account's usage limit is exhausted; retry after the indicated delay.",
+    status: 429,
+    title: "AI upstream quota exceeded",
+  },
+  "ai-upstream-unavailable": {
+    description: "The upstream AI service is currently unavailable.",
+    status: 503,
+    title: "AI upstream unavailable",
+  },
   "api-key-expiration-required": {
     description:
       "An API key expiration is missing, permanent, or exceeds the permitted lifetime.",

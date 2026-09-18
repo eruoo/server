@@ -149,6 +149,15 @@ export const AI_MANAGEMENT_STAGE_BUDGET_MS = 30_000
 /** The recent-authentication window anchor for credential commit rechecks. */
 export const AI_RECENT_AUTHORIZATION_WINDOW_MS = 900_000
 
+/** One upstream SSE event or a JSON terminal payload is capped at 4 MiB. */
+export const AI_RESPONSES_SINGLE_EVENT_MAX_BYTES = 4 * 1_048_576
+
+/** Cumulative upstream SSE reads and downstream SSE transfers are capped at 8 MiB each. */
+export const AI_RESPONSES_STREAM_MAX_BYTES = 8 * 1_048_576
+
+/** Downstream SSE comment heartbeat interval once the stream goes quiet. */
+export const AI_SSE_HEARTBEAT_INTERVAL_MS = 15_000
+
 /** Service-wide and per-key in-flight invocation slots. */
 export const AI_MAX_IN_FLIGHT_INVOCATIONS = 2
 export const AI_MAX_IN_FLIGHT_INVOCATIONS_PER_KEY = 1
