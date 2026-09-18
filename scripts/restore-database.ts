@@ -65,7 +65,10 @@ if (sql.md5 !== descriptor.etag) {
 const plan = {
   externalOperationsPerformed: false,
   generatedSql: {
-    credentialScrub: createCredentialScrubSql(sql.hasDeploymentReceipt),
+    credentialScrub: createCredentialScrubSql({
+      hasAiApplicationTables: sql.hasAiApplicationTables,
+      hasDeploymentReceipt: sql.hasDeploymentReceipt,
+    }),
     targetMigrationReceipt: createMigrationReceiptSql(
       target.databaseId,
       Object.fromEntries(
@@ -77,12 +80,15 @@ const plan = {
     ),
   },
   migrationState: sql.migration,
+  // The order matches the local semantic validation in inspectBackupSql: the
+  // snapshot is imported as-is, scrubbed on its ORIGINAL schema, verified, and
+  // only then are missing repository migrations applied forward.
   nextAuthorizedSteps: [
     "Create the named isolated empty D1 and verify its ID differs from production.",
     "Import the validated raw SQL snapshot into only that isolated D1.",
-    "Apply repository migrations forward from the restored d1_migrations ledger.",
-    "Run credentialScrub against the isolated D1, then validate all credentials and audit rows are absent.",
-    "After applying all repository migrations and validating the scrub, record targetMigrationReceipt for this isolated database only.",
+    "Run credentialScrub against the isolated D1 on the snapshot's original schema, then validate that credentials, authorizations, and audit rows are absent.",
+    "Apply repository migrations forward from the restored d1_migrations ledger, then re-verify the full target schema against the migration manifest.",
+    "After the scrub and forward migrations are verified, record targetMigrationReceipt for this isolated database only.",
     "Regenerate Ed25519 and RS256 JWKS in the isolated environment and run authentication smoke tests.",
     "Write database_restore_completed only after validation; switching the production binding requires separate authorization.",
   ],

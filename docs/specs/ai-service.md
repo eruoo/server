@@ -2,7 +2,7 @@
 
 日期：2026-09-15
 
-状态：设计草案，尚未实施
+状态：设计来源；存储、维护与恢复切片已实施（2026-09-18，见 [实施记录](implementation.md)），AI HTTP、AI Key 配置档、管理界面与上游连接器尚未开放，AI 服务不可用
 
 首版上游：Codex OAuth
 
@@ -10,7 +10,7 @@
 
 本文从 eruoo/server 的长期职责出发设计，适用于多个应用、CLI 和自动化。本文中的 Codex OAuth 指：owner 使用 ChatGPT/Codex 账号授权，eruoo 保存和刷新上游令牌，再代受控调用者请求 Codex 模型。它与“客户端通过 eruoo OAuth 登录”是两条独立的授权链。
 
-本文是拟议 AI 能力的唯一设计来源。现行身份、OAuth/OIDC、备份与发布规则仍由 [architecture.md](architecture.md)、[protocol-contract.md](protocol-contract.md)、[operations.md](operations.md) 维护；本稿不表示代码或线上能力已经具备。
+本文是拟议 AI 能力的唯一设计来源。现行身份、OAuth/OIDC、备份与发布规则仍由 [architecture.md](architecture.md)、[protocol-contract.md](protocol-contract.md)、[operations.md](operations.md) 维护；存储、维护与恢复切片已按本文实施，其余部分（HTTP、Key 配置档、连接器与界面）尚未实施，也不代表线上能力已经具备。
 
 ## 1. 目标与推荐方向
 

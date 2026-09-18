@@ -86,7 +86,7 @@ API Key 管理网关调用 `auth.api.*` 服务端 API，不再经过 Better Auth
 - 审计写入瞬时失败不回滚已完成操作；输出脱敏 `audit_write_failed` 与 requestId。该设计允许少量审计丢失，不宣称审计与所有库 mutation 跨表原子。
 - 查询保留 180 天，cursor 按 `(occurredAt DESC,id DESC)` 排他推进，默认 50/上限 100，绑定 type/outcome/from/to；输入变化使旧 cursor 失效，禁止 offsets 扫全表。
 - 每天 04:00 Asia/Shanghai 清理，Cron 为 `0 20 * * *`。审计正常物理保留约 181 天；失败会延长物理保留，查询仍过滤到 180 天。
-- 同一次清理处理过期 verification、rateLimit 行以及 [OAuth 清理边界](protocol-contract.md#45-oauth-清理边界)。每批最多 500 行、每类最多 10 批；超过批次留待下一天并记录 backlog，禁止提高定时频率隐性补偿。
+- 同一次清理处理过期 verification、rateLimit 行、[OAuth 清理边界](protocol-contract.md#45-oauth-清理边界)以及 AI 到期状态：过期的设备授权会话（含其加密设备授权数据）与超过 30 天保留边界的调用元数据；30 天边界集中维护于 AI 策略，内部读取与清理共用，过期 reservation 不再占名额但仍在保留期内时不删除。每批最多 500 行、每类最多 10 批；超过批次留待下一天并记录 backlog，禁止提高定时频率隐性补偿。
 - 该 Cron 不删除 Session（包括已过期行）、Passkey、用户或其他未到期凭证；Session 的正常过期处理与退出仍由 Better Auth 负责。删除 Session 会使 OAuth token 的 sessionId 按既有外键置空，不能以清理浏览器 Session 代替按 client/family 撤销应用授权。
 - 条件带固定 scheduledTime，旧/重复 Cron 可幂等执行。内部清理不需要 owner Session，也不走公网 API。
 
@@ -169,12 +169,15 @@ bucket 保持私有，禁用 r2.dev、自定义域名、浏览器 CORS 和下载
 
 恢复是一个人工发起的运维事务，不能由“最新备份失败”自动触发。只导入新建的 `eruoo-server-restore-*` 空 D1；禁止覆盖生产 D1。
 
+统一顺序：原始快照校验 → 隔离导入 → 在原 schema 上清理并验证 → 向前应用缺失迁移 → 完整核验 → 为目标隔离库生成新 migration receipt → 重建信任。清理始终发生在快照的原始 schema 上，早于任何向前迁移；本地语义校验、恢复 CLI 输出与测试表达同一顺序。
+
 1. **本地计划**：输入可信 R2 HEAD 描述与 SQL 文件，检查 format/size/ETag/metadata；以受限制 SQLite 执行 dump，验证 schema、外键和 migration ledger 为仓库的精确前缀。输出源快照、目标版本、清理范围、切换与回退步骤。
-2. **建立目标并导入**：执行时获得明确授权，创建隔离 D1，导入完整 SQL，再应用尚未执行的向前 migration；target ID 必须不同于生产。
-3. **清除可复活的安全状态**：删除 Session、verification、Passkey、API Key、OAuth token/consent/tombstone、限流、旧 JWKS、维护 lease/health 和快照内审计；保留 GitHub owner 关联但清空 provider tokens；静态 client/resource 按当前清单恢复。若存在 `deployment_migrations`，同时清除其源库记录；规划器严格验证这张运维表的 schema，不把它当作任意附加表放行。
-4. **建立新信任**：向前 migration 与清理核验完成后，执行规划器输出的 `targetMigrationReceipt`，记录目标 D1 ID 与当前 migration 摘要；不能沿用源库发布记录。生成新 Ed25519/RS256 key，不保留旧公钥宽限；验证 owner bootstrap、凭证清理与业务数据，最后记录 `database_restore_completed`。
-5. **切换**：停止旧生产维护任务并核实，确认没有并发导出/写入后切新 binding；owner 重新登录、注册 Passkey、创建 API Key，Desktop 重新授权。
-6. **保留回退信息**：不删除原 D1；切换前可直接放弃新库。切换后如已有新写入，不能无条件切回旧库丢弃数据，需先停止写入并评估差异。
+2. **建立目标并导入**：执行时获得明确授权，创建隔离 D1 并导入完整 SQL；target ID 必须不同于生产。导入后不先应用向前 migration。
+3. **在原始 schema 上清理并验证**：删除 Session、verification、Passkey、API Key、OAuth token/consent/tombstone、限流、旧 JWKS、维护 lease/health 和快照内审计；保留 GitHub owner 关联但清空 provider tokens；静态 client/resource 按当前清单恢复。快照含 AI 表时，同时删除授权会话及其加密设备授权数据，清空连接上的上游凭证与刷新 claim、推进连接版本并进入需重新授权状态，把在途调用记为 unknown；连接配置、终态调用历史与模型快照参考保留，旧模型快照在重新授权并成功发现前不可用。若存在 `deployment_migrations`，同时清除其源库记录；规划器严格验证这张运维表的 schema，不把它当作任意附加表放行。清理 SQL、authorizer 与清理后断言按已验证的原始表集生成：仅含 0001 的快照不执行 AI 表语句。
+4. **向前迁移与完整核验**：清理验证通过后，应用尚未执行的向前 migration，并对目标库重新执行完整 schema 核验。
+5. **建立新信任**：向前 migration 与清理核验完成后，执行规划器输出的 `targetMigrationReceipt`，记录目标 D1 ID 与当前 migration 摘要；不能沿用源库发布记录。生成新 Ed25519/RS256 key，不保留旧公钥宽限；验证 owner bootstrap、凭证清理与业务数据，最后记录 `database_restore_completed`。
+6. **切换**：停止旧生产维护任务并核实，确认没有并发导出/写入后切新 binding；owner 重新登录、注册 Passkey、创建 API Key，Desktop 重新授权。
+7. **保留回退信息**：不删除原 D1；切换前可直接放弃新库。切换后如已有新写入，不能无条件切回旧库丢弃数据，需先停止写入并评估差异。
 
 规划器无 `--execute`、默认不访问网络；目标是验证可信自有快照，不提供通用 SQL 管理台。SQLite 禁止 extension loading，authorizer 拒绝 ATTACH/外部文件、危险 PRAGMA、virtual table、trigger/view 与未知结构；schema 与 ledger 逐项校验，不能只用 SQL 文本正则判断。生产 migration 同样禁止 D1 export 不支持的 virtual table。
 
