@@ -1,5 +1,6 @@
 import type { OpenAPIHono } from "@hono/zod-openapi"
 
+import { registerApiKeyManagementContract } from "../auth/api-key-management"
 import type { AppBindings } from "../http/types"
 import { registerApiDocumentation } from "./api-documentation"
 import { registerAuditRoute } from "./audit"
@@ -11,5 +12,6 @@ export function registerApplicationRoutes(app: OpenAPIHono<AppBindings>) {
   registerStatusRoute(app)
   registerBackupStatusRoute(app)
   registerOAuthAuthorizations(app)
+  registerApiKeyManagementContract(app)
   registerApiDocumentation(app)
 }

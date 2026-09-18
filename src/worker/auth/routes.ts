@@ -18,6 +18,10 @@ export const authOperations = new Map<
     "GET /api/auth/api-key/list",
     { read: true, limited: false, owner: "session" },
   ],
+  [
+    "GET /api/auth/api-key/get",
+    { read: true, limited: false, owner: "session" },
+  ],
   ["POST /api/auth/sign-in/social", { read: false, limited: true }],
   ["GET /api/auth/callback/github", { read: false, limited: true }],
   ["GET /api/auth/get-session", { read: true, limited: false }],

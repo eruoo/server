@@ -168,15 +168,19 @@ Better Auth 是 Session Cookie、JWE、登录 ceremony 和持久 Session 的唯�
 
 使用独立的 `@better-auth/api-key` 插件，`enableSessionForAPIKeys=false`，只有 `x-api-key` 入口。哈希存 D1，原始值仅在创建响应返回一次。
 
-| 项       | 规则                                                                            |
-| -------- | ------------------------------------------------------------------------------- |
-| 用途     | 一把 key 对应一个脚本/调用方；不用于登录、内部 Cron 或凭证管理                  |
-| 期限     | 默认 180 天，最长 365 天，禁止永久 key；SPA 默认创建 180 天                     |
-| 权限     | 首期服务端固定 `status:read`；HTTP 不接受 permissions，禁止 wildcard 和权限更新 |
-| 限流     | 每把 key 60/60 秒，同步凭证计数；入口粗限流见运维规格                           |
-| 到期提示 | 剩余有效期在 (0, 14 天] 且最终为 2xx 时，返回 UTC RFC3339 `API-Key-Expires-At`  |
-| mutation | 创建、命名更新、撤销均要求 recent owner Session；不能通过 key 管理另一把 key    |
-| 删除重试 | 以资源归属校验后的不存在作为幂等完成；不能借此忽略身份失败                      |
+| 项       | 规则                                                                                                                                                                                                       |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 用途     | 一把 key 对应一个脚本/调用方；不用于登录、内部 Cron 或凭证管理                                                                                                                                             |
+| 期限     | 默认 180 天，最长 365 天，禁止永久 key；SPA 默认创建 180 天                                                                                                                                                |
+| 权限     | 首期服务端固定 `status:read`；HTTP 不接受 permissions，禁止 wildcard 和权限更新                                                                                                                            |
+| 限流     | 每把 key 60/60 秒，同步凭证计数；入口粗限流见运维规格                                                                                                                                                      |
+| 到期提示 | 剩余有效期在 (0, 14 天] 且最终为 2xx 时，返回 UTC RFC3339 `API-Key-Expires-At`                                                                                                                             |
+| mutation | 创建、命名更新、撤销均要求 recent owner Session；不能通过 key 管理另一把 key                                                                                                                               |
+| 网关     | 应用网关校验 owner/recent-auth、Origin、凭证载体、字段与配置档后调用插件服务端 API；`create`/`update` 不携带浏览器 headers/request，`userId` 只取已验证 owner；`list`/`get`/`delete` 保留插件 Session 校验 |
+| 配置档   | 当前只开放 default（`purpose` 省略或 `status`）；`configId` 缺省显式补 `default`，未知值拒绝；`create` 不接受 `configId`；`get` 的 `keyId` 映射插件 query `id`；key 不能切换配置档                         |
+| 删除重试 | 以资源归属校验后的不存在作为幂等完成；跨 owner 或跨档现存资源拒绝；归属预查后发生并发撤销且确认资源确实不存在时同样幂等完成，不能借此忽略身份失败或依赖异常                                                |
+| 网关限流 | 五个管理 operation 由网关按已登记 operation 与可信 IP 消费 100/60 秒持久桶，与原生 handler 共享桶键；429 带 Retry-After，不写拒绝审计，计数依赖异常返回 503                                                |
+| 歧义输入 | mutation 原始 JSON 的顶层重复字段（含转义后同名）与重复 query 参数按 400 拒绝，不执行 Key 变更                                                                                                             |
 
 依赖失败必须抛出可区分的服务错误，不允许插件把数据库异常吞成 invalid key。旧 patch 只在目标版本的对应行为测试仍失败时移植；不把整个旧补丁集默认带回。
 
