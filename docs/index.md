@@ -1,5 +1,9 @@
 # 文档导航
 
+## AI 服务架构草案
+
+- [ai-service.md](specs/ai-service.md)：面向多个应用的通用 AI 接入、凭证管理与调用架构；首版 Codex OAuth。设计草案，尚未实施，不改变现行身份与发布规则。
+
 ## 完整架构规格（2026-09-09，服务端与 Web 已实施，平台验收另列）
 
 - [architecture.md](specs/architecture.md) — 总入口：产品范围、模块、认证、前端和数据；含已收敛需求选择与新旧规则差异
