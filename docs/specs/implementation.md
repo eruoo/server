@@ -4,14 +4,15 @@
 
 ## 1. 已实现能力
 
-| 范围         | 实现                                                                                                                                                                         |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 认证         | 请求级 Better Auth；GitHub owner 准入；原生 Session 滚动续期与 JWE；独立 recent-auth；精确入口、粗限流、依赖故障响应；GitHub 每个 HTTP 请求及正文可取消时限                  |
-| Web          | 唯一 Session 控制器；Passkey 注册/登录/重认证/命名/删除；API Key 创建/一次性查看/命名/撤销；已授权应用；审计筛选/游标分页；备份状态；私有 Scalar/OpenAPI；系统/浅色/深色外观 |
-| API Key      | 独立插件、哈希存储、有限有效期、owner 与权限检查、两级限流；数据库故障返回 503；不产生 Session                                                                               |
-| OAuth 服务端 | 静态 client/resource、PKCE、Code/refresh/revoke、OIDC/JWKS、严格 UserInfo 验签；family tombstone、幂等重试、并发撤销；浏览器登录 continuation；管理端整应用撤销              |
-| 数据保护     | 每日 full SQL export Workflow、租约与有限重试、R2 容量预算及对象校验、单调备份状态；有界清理保留 Session；离线恢复规划器和凭证清理计划                                       |
-| 交付         | 生成五个自有 API 的 OpenAPI；同 SHA 两环境独立构建与摘要清单；Actions 手动消费产物、迁移前检查、部署后读回与冒烟                                                             |
+| 范围         | 实现                                                                                                                                                                                                                                                                          |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 认证         | 请求级 Better Auth；GitHub owner 准入；原生 Session 滚动续期与 JWE；独立 recent-auth；精确入口、粗限流、依赖故障响应；GitHub 每个 HTTP 请求及正文可取消时限                                                                                                                   |
+| Web          | 唯一 Session 控制器；Passkey 注册/登录/重认证/命名/删除；API Key 创建/一次性查看/命名/撤销；已授权应用；审计筛选/游标分页；备份状态；私有 Scalar/OpenAPI；系统/浅色/深色外观                                                                                                  |
+| API Key      | 独立插件、哈希存储、有限有效期、owner 与权限检查、两级限流；数据库故障返回 503；不产生 Session                                                                                                                                                                                |
+| OAuth 服务端 | 静态 client/resource、PKCE、Code/refresh/revoke、OIDC/JWKS、严格 UserInfo 验签；family tombstone、幂等重试、并发撤销；浏览器登录 continuation；管理端整应用撤销                                                                                                               |
+| 数据保护     | 每日 full SQL export Workflow、租约与有限重试、R2 容量预算及对象校验、单调备份状态；有界清理保留 Session；离线恢复规划器和凭证清理计划                                                                                                                                        |
+| AI 状态存储  | 0002 迁移的四张 AI 应用表；连接生命周期、设备授权会话与原子完成、有界刷新 claim 与不确定状态处理、版本约束模型快照、并发 reservation 与 unknown 语义、每日有界清理；恢复规划器按原始表集生成 AI 清理并统一“先清理后迁移”顺序。AI HTTP、Key 配置档、管理界面与上游连接器未开放 |
+| 交付         | 生成五个自有 API 的 OpenAPI；同 SHA 两环境独立构建与摘要清单；Actions 手动消费产物、迁移前检查、部署后读回与冒烟                                                                                                                                                              |
 
 沿用完整 `0001_foundation.sql`，安装版本的全部认证字段已经过实际 schema 检查；新库应用同一份基线。无需为了“从零”再次重写可用 schema。首次实现阶段未修改远端资源；随后按 owner 当次授权完成了 §4.1 的空库准备，当前配置使用新的数据库 ID。
 
@@ -333,6 +334,19 @@ owner 授权收尾文档、核验首次自动调度并定点排查 §4.12 的登
 
 三条正式对照及一条补充恢复请求生成的临时 OAuth state 均按返回的精确 identifier 清理，四条删除后读回零残留；未兑换 GitHub code、创建 Session 或 grant。外键检查为 0，staging/production 的 deployment 均未变。脱敏结果、方法和平台关联记录保存在本地忽略目录 `.output/production-closeout-2026-09-12/staging-export-login/`；实时 tail 已停止，私有选择器与原始日志不进入 Git。首次自动调度的核验已安排在北京时间 2026-09-13 04:10，届时分别核对 03:00 备份和 04:00 清理的实际执行证据；安排完成不等于任务已经执行。
 
+### 4.14 2026-09-18 AI 状态存储切片（本地实现）
+
+按 owner 指定的切分，先合入 AI 状态存储、有界清理与安全恢复，AI HTTP、AI Key 配置档、管理页面与上游连接器不随本切片开放（范围调整记录见 [acceptance §5.2](acceptance.md#52-各切片开放的能力)）。本次为本地代码与验证交付：未提交、未推送、未创建 PR、未迁移任何远端数据库、未部署。
+
+- 迁移：新增 `migrations/0002_ai_service.sql`（`ai_connections`、`ai_authorization_sessions`、`ai_models`、`ai_invocations` 四张应用表及索引），`0001_foundation.sql` 未改动；`src/worker/db/schema.ts` 同步 Drizzle 声明。API Key 与权限继续使用原生插件表。
+- 存储操作（`src/worker/ai/`、`src/shared/ai.ts`）：连接创建/更新/断开/删除（slug 唯一且不可变、删除后重建新 UUID）；授权会话绑定 owner/Session/连接版本，poll claim 单赢家；授权完成与连接凭证更新在同一 D1 batch 内以互补 guard 实现全有或全无提交，并断言 `meta.changes` 一致；刷新 claim 获得后过期即转入需重新授权（不重用可能已轮换的凭证）；模型快照按凭证版本条件整体替换；reservation 用单条条件 INSERT 同时检查全局 2 /单 Key 1 在途名额，满额零写入、不等待，lease 为 deadline+30 秒；无终态记录在 lease 过期后读作 unknown，缺失 usage 不补零。D1 是唯一跨请求事实来源，不使用模块级 Promise，不复用 maintenance_lease。
+- 清理：`cleanupExpiredAiState` 接入既有 `0 20 * * *` 调度，删除到期授权会话（含加密设备授权数据）与超过 30 天保留边界的调用元数据；边界 `createAiInvocationRetentionCutoff` 集中于 `src/shared/ai.ts` 供读取与清理共用；每类最多 10 批 × 500 行，超额记录脱敏 backlog。未新增 Cron、未改备份调度。
+- 恢复：`inspectBackupSql` 按已验证原始表集生成清理 SQL、authorizer 与断言——仅 0001 的快照不执行 AI 表语句；含 AI 表的快照删除授权会话、清空凭证与刷新 claim、推进连接版本进入需重新授权、把在途调用记为 unknown（endedAt=leaseExpiresAt），保留连接配置、终态历史与模型快照。恢复顺序统一为“隔离导入 → 原始 schema 上清理验证 → 向前迁移 → 完整核验 → receipt → 重建信任”，CLI `nextAuthorizedSteps` 与本地语义校验同步修正（此前 CLI 指示先迁移）。导入 authorizer 的函数白名单因 `ai_connections` slug CHECK 增加纯函数 `length`/`glob`，其余拒绝不变。
+
+复审修复（2026-09-18 同日）：授权完成移除独立 connectionId 入参，目标连接只能由会话绑定派生，条件失配时两张表零写入（不再依赖 batch 后断言兜底）；刷新 claim 与 poll claim 改为 `UPDATE ... RETURNING` 单语句原子快照，消除“写后另读”窗口（授权会话创建同样改为 `INSERT ... SELECT ... RETURNING`）；刷新提交增加 claim 有效期条件，恰好到期即拒绝并归类为 `refresh-claim-expired`，过期结果不再写入新凭证；单条调用读取接入共享 30 天保留边界。以上修复不新增表或迁移。
+
+验证（本地，workerd + 本地 D1、合成数据）：`tests/worker/ai-state.test.ts` 23 项——迁移与 schema 约束、slug 规则、并发唯一 slug、poll/刷新 claim 单赢家、取消/断开/删除/owner Session 撤销后的迟到提交拒绝、完成 batch 故障回滚（合成 trigger）、并发 reservation 不超限、满额零插入、lease 过期 unknown、30 天读取/清理共用边界、500/10 批上限与 backlog、调度失败传播、索引使用计划，以及复审回归：同版本邻近连接不被越权完成、版本推进后无部分提交、claim 交错（首个语句后注入重授权/取消）仍返回本次认领快照、claim 到期前/恰好到期/到期后提交、单条读取保留边界；`scripts/restore-database.test.ts` 29 项——0001 与 0001+AI 两类快照 × 有无 deployment receipt、部分表集与旧 ledger 拒绝、AI 清理保留终态历史与模型参考、CLI 实际生成 SQL 可在原始 schema 执行且步骤顺序与本地校验一致。既有 worker 与脚本测试全部通过；`pnpm run check`、两环境 `build:release` 本地产物验证通过（来源标记 local，不作为 CI 正式发布记录）。未验证：真实上游授权/刷新/模型发现、staging 迁移与恢复演练、远端部署。
+
 ## 5. 后续验证与已知限制
 
 Cloudflare 与 GitHub 接线、staging 验收及 production 首次发布、真实登录和备份已按上述记录完成。以下限制与后续范围仍保留，不能由本地测试替代：
@@ -341,5 +355,6 @@ Cloudflare 与 GitHub 接线、staging 验收及 production 首次发布、真�
 - §4.11 的 Default 三地 warm 达到新目标，同代码闲置样本满足新目标；旧 JP 尾延迟和 Smart SG 超时未定位，后续若再次出现须按请求与平台证据排查，不能报告为已修复。常规发布阶段耗时尚未积累五次样本，不代表所有代理节点或生产性能已验证。
 - Workflow 中断与代码回退已在 §4.9 完成所列场景；大对象提交竞争与长时限的所有窗口未穷尽。成功导出/上传、隔离库导入、凭证清理及新信任验证已在 §4.8 通过。
 - Desktop App、Rust 安全存储、客户端打包与跨端联调：按 owner 最新决定延期，不属于本次 Web 交付。
+- AI 状态存储切片（§4.14）只交付持久状态边界：AI HTTP、AI Key 配置档、管理界面与上游连接器未注册，真实设备授权、令牌刷新、加密 Secret（AI_CREDENTIAL_KEYS）与模型发现未实现、未在 staging 验证；AI 表存在不代表 AI 服务可用。含 AI 表的远端迁移与隔离恢复演练在后续切片按当次授权执行。
 
 恢复规划器只输出可审核计划；恢复、secret 轮换、资源删除及正式部署仍需当次具体授权。Git 提交和 PR 合并与这些平台操作分别记录，不代表远端发布或验收已经完成。

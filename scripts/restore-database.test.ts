@@ -1,7 +1,10 @@
+import { execFile } from "node:child_process"
+import { createHash } from "node:crypto"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { DatabaseSync } from "node:sqlite"
+import { promisify } from "node:util"
 
 import { afterEach, describe, expect, it } from "vitest"
 
@@ -15,13 +18,22 @@ import {
   validateRestoreTarget,
 } from "./lib/restore-database"
 
+const execFileAsync = promisify(execFile)
 const temporaryDirectories: string[] = []
 const foundationSql = await readFile(
   path.resolve("migrations/0001_foundation.sql"),
   "utf8",
 )
+const aiServiceSql = await readFile(
+  path.resolve("migrations/0002_ai_service.sql"),
+  "utf8",
+)
 const repositoryMigrations = [
   { name: "0001_foundation.sql", sql: foundationSql },
+] as const
+const fullRepositoryMigrations = [
+  { name: "0001_foundation.sql", sql: foundationSql },
+  { name: "0002_ai_service.sql", sql: aiServiceSql },
 ] as const
 
 function descriptor() {
@@ -45,7 +57,11 @@ function descriptor() {
   }
 }
 
-async function createDump(extraSql = "", migrationSql?: string) {
+async function createDump(
+  extraSql = "",
+  migrationSql?: string,
+  additionalSchemaSql = "",
+) {
   return `
     PRAGMA defer_foreign_keys=TRUE;
     BEGIN TRANSACTION;
@@ -56,6 +72,7 @@ async function createDump(extraSql = "", migrationSql?: string) {
     );
     DELETE FROM "sqlite_sequence";
     ${foundationSql}
+    ${additionalSchemaSql}
     ${
       migrationSql ??
       'INSERT INTO "d1_migrations" ("id", "name", "applied_at") VALUES (1, \'0001_foundation.sql\', \'2026-08-23 00:00:00\');'
@@ -64,6 +81,40 @@ async function createDump(extraSql = "", migrationSql?: string) {
     COMMIT;
   `
 }
+
+const aiLedgerSql = `INSERT INTO "d1_migrations" ("id", "name", "applied_at") VALUES (1, '0001_foundation.sql', '2026-09-17 00:00:00');
+INSERT INTO "d1_migrations" ("id", "name", "applied_at") VALUES (2, '0002_ai_service.sql', '2026-09-18 00:00:00');`
+
+const connectedConnectionId = "33333333-3333-4333-8333-333333333330"
+const freshConnectionId = "33333333-3333-4333-8333-333333333331"
+const pendingSessionId = "44444444-4444-4444-8444-444444444440"
+const completedSessionId = "44444444-4444-4444-8444-444444444441"
+
+// One INSERT per row, matching the real D1 export statement shape.
+const aiConnectionSeedSql = `INSERT INTO "ai_connections" VALUES ('${connectedConnectionId}', 'codex-main', 'Codex main', 'openai-codex', 1, 'connected', 'account-50254496', 3, 'opaque-credential-package', 1800000100000, '55555555-5555-4555-8555-555555555550', 1800000050000, 1800000000000, 1800000000000);
+INSERT INTO "ai_connections" VALUES ('${freshConnectionId}', 'codex-archive', 'Codex archive', 'openai-codex', 0, 'never_authorized', NULL, 0, NULL, NULL, NULL, NULL, 1800000000000, 1800000000000);`
+
+const aiSessionSeedSql = `INSERT INTO "ai_authorization_sessions" VALUES ('${pendingSessionId}', '${connectedConnectionId}', 'owner', 'owner-session', 3, 'pending', 'opaque-device-grant', 1800018000000, 1800000100000, '66666666-6666-4666-8666-666666666660', 1800000400000, NULL, 1800000000000, 1800000000000);
+INSERT INTO "ai_authorization_sessions" VALUES ('${completedSessionId}', '${connectedConnectionId}', 'owner', 'owner-session', 2, 'completed', 'opaque-device-grant', 1800018000000, 1800000100000, '66666666-6666-4666-8666-666666666661', 1800000400000, '77777777-7777-4777-8777-777777777770', 1799990000000, 1799995000000);`
+
+const aiModelSeedSql = `INSERT INTO "ai_models" VALUES ('${connectedConnectionId}', 'gpt-6-astra', 'GPT-6 Astra', '{"text":true}', 3, 1800000000000);
+INSERT INTO "ai_models" VALUES ('${connectedConnectionId}', 'GPT-6-Astra', 'GPT-6 Astra exact id', '{"text":true}', 3, 1800000000000);`
+
+const aiInvocationSeedSql = `INSERT INTO "ai_invocations" VALUES ('88888888-8888-4888-8888-888888888880', 'key-1', '${connectedConnectionId}', 'gpt-6-astra', 1799990000000, 1799993000000, 1799993030000, 'reserved', NULL, NULL, NULL, NULL);
+INSERT INTO "ai_invocations" VALUES ('88888888-8888-4888-8888-888888888881', 'key-2', '${connectedConnectionId}', 'gpt-6-astra', 1799980000000, 1799983000000, 1799983030000, 'succeeded', 1799983000000, NULL, 'req_upstream_1', '{"input_tokens":12,"output_tokens":34}');`
+
+/**
+ * Realistic AI-era rows: a connected connection with credentials and a
+ * refresh claim, a fresh never-authorized connection, pending and completed
+ * authorization sessions, model snapshots, and both an in-flight and a
+ * terminal invocation.
+ */
+const aiSeedSql = [
+  aiConnectionSeedSql,
+  aiSessionSeedSql,
+  aiModelSeedSql,
+  aiInvocationSeedSql,
+].join("\n")
 
 async function writeSql(sql: string): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "eruoo-restore-test-"))
@@ -81,7 +132,8 @@ it("validates deployment receipt schema and removes its source binding during re
   const snapshot = await writeSql(sql)
   const inspection = await inspectBackupSql(snapshot, repositoryMigrations)
   expect(inspection.hasDeploymentReceipt).toBe(true)
-  expect(createCredentialScrubSql(true)).toContain(
+  expect(inspection.hasAiApplicationTables).toBe(false)
+  expect(createCredentialScrubSql({ hasDeploymentReceipt: true })).toContain(
     'DELETE FROM "deployment_migrations";',
   )
 })
@@ -271,6 +323,7 @@ describe("database restore planning", () => {
     expect(scrub).toContain("eruoo-desktop")
     expect(scrub).not.toMatch(/\b(?:BEGIN|COMMIT)\b/)
     expect(scrub).not.toContain("database_restore_completed")
+    expect(scrub).not.toContain("ai_")
 
     expect(
       createRestoreCompletedAuditSql({
@@ -320,4 +373,307 @@ describe("database restore planning", () => {
       database.close()
     }
   })
+})
+
+describe("AI-era restore planning", () => {
+  it.each([false, true])(
+    "validates an AI-era snapshot (deployment receipt: %s) and scrubs AI state on the original schema",
+    async (hasDeploymentReceipt) => {
+      const extraSql =
+        aiSeedSql +
+        (hasDeploymentReceipt
+          ? migrationReceiptTableSql +
+            `INSERT INTO deployment_migrations VALUES (1,'source-db','{}');`
+          : "")
+      const snapshot = await writeSql(
+        await createDump(extraSql, aiLedgerSql, aiServiceSql),
+      )
+
+      const inspection = await inspectBackupSql(
+        snapshot,
+        fullRepositoryMigrations,
+      )
+      expect(inspection.hasAiApplicationTables).toBe(true)
+      expect(inspection.hasDeploymentReceipt).toBe(hasDeploymentReceipt)
+      expect(inspection.migration).toMatchObject({
+        count: 2,
+        latestId: 2,
+        latestName: "0002_ai_service.sql",
+      })
+
+      const scrub = createCredentialScrubSql({
+        hasAiApplicationTables: true,
+        hasDeploymentReceipt: hasDeploymentReceipt,
+      })
+      expect(scrub).toContain('DELETE FROM "ai_authorization_sessions";')
+      expect(scrub).toContain(
+        `UPDATE "ai_connections" SET "credentialCiphertext" = NULL`,
+      )
+      expect(scrub).toContain(
+        `UPDATE "ai_invocations" SET "status" = 'unknown'`,
+      )
+      expect(scrub).not.toMatch(/\b(?:BEGIN|COMMIT)\b/)
+      expect(scrub).not.toContain("ai_models")
+      expect(scrub).not.toContain('DELETE FROM "ai_connections"')
+    },
+  )
+
+  it("keeps the AI scrub executable against the real AI schema and preserves reference data", async () => {
+    const database = new DatabaseSync(":memory:")
+    try {
+      database.exec(foundationSql)
+      database.exec(aiServiceSql)
+      database.exec(aiSeedSql)
+
+      database.exec(
+        `BEGIN IMMEDIATE;\n${createCredentialScrubSql({ hasAiApplicationTables: true })}\nCOMMIT;`,
+      )
+
+      expect(
+        database.prepare("SELECT * FROM ai_authorization_sessions").all(),
+      ).toEqual([])
+
+      expect(
+        database
+          .prepare(
+            "SELECT authorizationStatus, upstreamAccountId, credentialVersion, credentialCiphertext, credentialExpiresAt, refreshClaimId, refreshClaimExpiresAt FROM ai_connections WHERE id = ?",
+          )
+          .get(connectedConnectionId),
+      ).toEqual({
+        authorizationStatus: "reauthentication_required",
+        upstreamAccountId: "account-50254496",
+        credentialVersion: 4,
+        credentialCiphertext: null,
+        credentialExpiresAt: null,
+        refreshClaimId: null,
+        refreshClaimExpiresAt: null,
+      })
+
+      expect(
+        database
+          .prepare(
+            "SELECT authorizationStatus, credentialVersion FROM ai_connections WHERE id = ?",
+          )
+          .get(freshConnectionId),
+      ).toEqual({
+        authorizationStatus: "never_authorized",
+        credentialVersion: 0,
+      })
+
+      // Model snapshots survive only as reference data with their original
+      // snapshot version, which no longer matches the advanced connection.
+      expect(
+        database
+          .prepare(
+            "SELECT upstreamModelId, snapshotCredentialVersion FROM ai_models ORDER BY upstreamModelId",
+          )
+          .all(),
+      ).toEqual([
+        { upstreamModelId: "GPT-6-Astra", snapshotCredentialVersion: 3 },
+        { upstreamModelId: "gpt-6-astra", snapshotCredentialVersion: 3 },
+      ])
+
+      // The in-flight reservation becomes unknown at its lease boundary; the
+      // terminal record and its recorded usage are preserved as-is.
+      expect(
+        database
+          .prepare(
+            "SELECT status, endedAt, usage FROM ai_invocations WHERE requestId = '88888888-8888-4888-8888-888888888880'",
+          )
+          .get(),
+      ).toEqual({ status: "unknown", endedAt: 1799993030000, usage: null })
+      expect(
+        database
+          .prepare(
+            "SELECT status, endedAt, upstreamRequestId, usage FROM ai_invocations WHERE requestId = '88888888-8888-4888-8888-888888888881'",
+          )
+          .get(),
+      ).toEqual({
+        status: "succeeded",
+        endedAt: 1799983000000,
+        upstreamRequestId: "req_upstream_1",
+        usage: '{"input_tokens":12,"output_tokens":34}',
+      })
+    } finally {
+      database.close()
+    }
+  })
+
+  it.each([false, true])(
+    "keeps 0001-only snapshots valid against the full repository manifest without AI statements (deployment receipt: %s)",
+    async (hasDeploymentReceipt) => {
+      const extraSql = hasDeploymentReceipt
+        ? migrationReceiptTableSql +
+          `INSERT INTO deployment_migrations VALUES (1,'source-db','{}');`
+        : ""
+      const snapshot = await writeSql(await createDump(extraSql))
+
+      const inspection = await inspectBackupSql(
+        snapshot,
+        fullRepositoryMigrations,
+      )
+      expect(inspection.hasAiApplicationTables).toBe(false)
+      expect(inspection.migration).toMatchObject({
+        count: 1,
+        latestName: "0001_foundation.sql",
+      })
+
+      const scrub = createCredentialScrubSql({
+        hasAiApplicationTables: false,
+        hasDeploymentReceipt: inspection.hasDeploymentReceipt,
+      })
+      expect(scrub).not.toContain("ai_")
+      // The 0001-only scrub stays executable on the 0001 schema: running it
+      // with AI statements would fail on missing tables.
+      const database = new DatabaseSync(":memory:")
+      try {
+        database.exec(foundationSql)
+        if (inspection.hasDeploymentReceipt)
+          database.exec(migrationReceiptTableSql)
+        database.exec(`BEGIN IMMEDIATE;\n${scrub}\nCOMMIT;`)
+      } finally {
+        database.close()
+      }
+    },
+  )
+
+  it("rejects AI tables in a snapshot whose ledger claims only 0001", async () => {
+    const snapshot = await writeSql(
+      await createDump(aiSeedSql, undefined, aiServiceSql),
+    )
+    await expect(
+      inspectBackupSql(snapshot, fullRepositoryMigrations),
+    ).rejects.toThrow("isolated semantic restore validation")
+  })
+
+  it("rejects a partial AI table set despite a full migration ledger", async () => {
+    const schemaCutIndex = aiServiceSql.indexOf("-- Model catalog snapshots")
+    expect(schemaCutIndex).toBeGreaterThan(0)
+    const partialAiSchemaSql = aiServiceSql.slice(0, schemaCutIndex)
+    // Only seed rows for tables the partial schema actually defines, so the
+    // rejection comes from the schema-versus-ledger check itself.
+    const snapshot = await writeSql(
+      await createDump(
+        `${aiConnectionSeedSql}\n${aiSessionSeedSql}`,
+        aiLedgerSql,
+        partialAiSchemaSql,
+      ),
+    )
+    await expect(
+      inspectBackupSql(snapshot, fullRepositoryMigrations),
+    ).rejects.toThrow("isolated semantic restore validation")
+  })
+
+  it(
+    "the restore CLI validates an AI-era snapshot and orders scrub before forward migrations",
+    { timeout: 60_000 },
+    async () => {
+      const repositoryRoot = path.resolve(".")
+      const sql = await createDump(aiSeedSql, aiLedgerSql, aiServiceSql)
+      const directory = await mkdtemp(
+        path.join(os.tmpdir(), "eruoo-restore-cli-"),
+      )
+      temporaryDirectories.push(directory)
+
+      const object = createBackupObjectDescriptor({
+        createdAt: "2026-09-18T19:00:00.000Z",
+        exportBookmark: "bookmark-ai",
+        revision: {
+          id: "11111111-1111-4111-8111-111111111111",
+          tag: "production",
+          timestamp: "2026-09-18T18:55:00.000Z",
+        },
+        workflowInstanceId: "backup-instance-ai",
+      })
+      const snapshotPath = path.join(directory, path.basename(object.key))
+      await writeFile(snapshotPath, sql, "utf8")
+      const snapshotBytes = await readFile(snapshotPath)
+      const planDescriptor = {
+        ...object,
+        customMetadata: {
+          ...object.customMetadata,
+          contentLength: String(snapshotBytes.byteLength),
+        },
+        etag: createHash("md5").update(snapshotBytes).digest("hex"),
+        size: snapshotBytes.byteLength,
+        httpMetadata: { contentType: "application/sql" },
+        storageClass: "Standard",
+      }
+      const descriptorPath = path.join(directory, "descriptor.json")
+      await writeFile(descriptorPath, JSON.stringify(planDescriptor))
+
+      const { stdout } = await execFileAsync(
+        path.join(repositoryRoot, "node_modules", ".bin", "tsx"),
+        [
+          "scripts/restore-database.ts",
+          "--descriptor",
+          descriptorPath,
+          "--snapshot",
+          snapshotPath,
+          "--target-database-id",
+          "22222222-2222-4222-8222-222222222222",
+          "--target-database",
+          "eruoo-server-restore-20260918",
+          "--production-database-id",
+          "11111111-1111-4111-8111-111111111111",
+        ],
+        { cwd: repositoryRoot },
+      )
+
+      const plan = JSON.parse(stdout) as {
+        generatedSql: {
+          credentialScrub: string
+          targetMigrationReceipt: string
+        }
+        migrationState: { count: number; latestName: string }
+        nextAuthorizedSteps: string[]
+        status: string
+      }
+      expect(plan.status).toBe("validated-local-plan-only")
+      expect(plan.migrationState).toMatchObject({
+        count: 2,
+        latestName: "0002_ai_service.sql",
+      })
+      expect(plan.generatedSql.credentialScrub).toContain(
+        'DELETE FROM "ai_authorization_sessions";',
+      )
+      expect(plan.generatedSql.credentialScrub).not.toMatch(
+        /\b(?:BEGIN|COMMIT)\b/,
+      )
+      expect(plan.generatedSql.targetMigrationReceipt).toContain(
+        "0002_ai_service.sql",
+      )
+
+      // The plan's step order must match the local semantic validation:
+      // scrub on the original schema strictly before forward migrations.
+      const scrubStep = plan.nextAuthorizedSteps.findIndex((step) =>
+        step.includes("credentialScrub"),
+      )
+      const migrationStep = plan.nextAuthorizedSteps.findIndex((step) =>
+        step.includes("Apply repository migrations"),
+      )
+      expect(scrubStep).toBeGreaterThan(-1)
+      expect(migrationStep).toBeGreaterThan(-1)
+      expect(scrubStep).toBeLessThan(migrationStep)
+
+      // The generated scrub must be executable on the original snapshot
+      // schema (0001 + 0002, pre-migration), which is where the plan runs it.
+      const database = new DatabaseSync(":memory:")
+      try {
+        database.exec(foundationSql)
+        database.exec(aiServiceSql)
+        database.exec(aiSeedSql)
+        database.exec(
+          `BEGIN IMMEDIATE;\n${plan.generatedSql.credentialScrub}\nCOMMIT;`,
+        )
+        expect(
+          database
+            .prepare("SELECT 1 FROM ai_invocations WHERE status = 'reserved'")
+            .all(),
+        ).toEqual([])
+      } finally {
+        database.close()
+      }
+    },
+  )
 })

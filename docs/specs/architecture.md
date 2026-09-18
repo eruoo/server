@@ -253,13 +253,14 @@ Vue 3 + `<script setup lang="ts">` + Vue Router。一个 Session 控制器管理
 
 ## 7. 数据与迁移
 
-| 数据                                                                                           | 所有者                     | 变更边界                                                          |
-| ---------------------------------------------------------------------------------------------- | -------------------------- | ----------------------------------------------------------------- |
-| user/account/session/verification、Passkey、API Key、OAuth token/consent/client/resource、JWKS | Better Auth 与固定版本插件 | 原生 adapter；库 schema 生成结果做 drift 校验，应用不复制模型实现 |
-| OAuth family tombstone                                                                         | OAuth 撤销模块             | 与插件 token 状态通过 D1 原子 batch 和前后检查协作                |
-| security_audit_events                                                                          | 审计模块                   | 应用 schema；append + 有界清理                                    |
-| maintenance_lease、database_backup_health                                                      | 维护模块                   | 只供备份协调与终态，不建设通用任务表                              |
-| rateLimit                                                                                      | Better Auth 限流           | 只允许命中已登记 operation；不作为业务使用台账                    |
+| 数据                                                                                           | 所有者                                                  | 变更边界                                                                                                                                                                         |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| user/account/session/verification、Passkey、API Key、OAuth token/consent/client/resource、JWKS | Better Auth 与固定版本插件                              | 原生 adapter；库 schema 生成结果做 drift 校验，应用不复制模型实现                                                                                                                |
+| OAuth family tombstone                                                                         | OAuth 撤销模块                                          | 与插件 token 状态通过 D1 原子 batch 和前后检查协作                                                                                                                               |
+| security_audit_events                                                                          | 审计模块                                                | 应用 schema；append + 有界清理                                                                                                                                                   |
+| maintenance_lease、database_backup_health                                                      | 维护模块                                                | 只供备份协调与终态，不建设通用任务表                                                                                                                                             |
+| rateLimit                                                                                      | Better Auth 限流                                        | 只允许命中已登记 operation；不作为业务使用台账                                                                                                                                   |
+| ai_connections、ai_authorization_sessions、ai_models、ai_invocations                           | AI 存储模块（[AI 规格 §8](ai-service.md#8-存储与恢复)） | 应用 schema（0002 追加迁移）；凭证版本条件写、原子授权完成、有界刷新 claim、并发 reservation 与每日有界清理；表存在不代表 AI 服务已开放，AI HTTP、Key 配置档与上游连接器尚未注册 |
 
 应用字段用 epoch milliseconds；库表保留 adapter 日期表示，只在边界转换。API 时间单位不得混用；OAuth NumericDate 按协议。所有查询参数化，资源查询限定 owner，分页有上限，已有索引优先复用。
 

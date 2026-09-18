@@ -5,6 +5,7 @@ import { constants as sqliteConstants, DatabaseSync } from "node:sqlite"
 
 import { z } from "zod"
 
+import { AI_APPLICATION_TABLES } from "../../src/shared/ai"
 import {
   enabledOAuthClients,
   OAUTH_REFRESH_TOKEN_MAX_TTL_SECONDS,
@@ -80,6 +81,7 @@ export interface ValidatedBackupDescriptor {
 }
 
 export interface InspectedBackupSql {
+  hasAiApplicationTables: boolean
   hasDeploymentReceipt: boolean
   migration: {
     count: number
@@ -338,7 +340,12 @@ function createImportAuthorizer() {
           : sqliteConstants.SQLITE_DENY
       case sqliteConstants.SQLITE_FUNCTION:
         // D1 exports CR/LF text as nested replace(..., char(10|13)) calls.
-        return ["replace", "char"].includes(argument2?.toLowerCase() ?? "")
+        // length and glob are additionally required to evaluate the
+        // ai_connections slug format CHECK constraint while rows are
+        // inserted or scrubbed; both are deterministic scalar builtins.
+        return ["replace", "char", "length", "glob"].includes(
+          argument2?.toLowerCase() ?? "",
+        )
           ? sqliteConstants.SQLITE_OK
           : sqliteConstants.SQLITE_DENY
       default:
@@ -425,21 +432,44 @@ const scrubAccountColumns = new Set([
   "scope",
   "password",
 ])
+// AI scrubbing deletes only the temporary authorization sessions and updates
+// specific columns: DELETE is authorized per table, UPDATE per column.
+const aiScrubDeleteTables = new Set(["ai_authorization_sessions"])
+const aiConnectionScrubColumns = new Set([
+  "authorizationStatus",
+  "credentialCiphertext",
+  "credentialExpiresAt",
+  "credentialVersion",
+  "refreshClaimId",
+  "refreshClaimExpiresAt",
+])
+const aiInvocationScrubColumns = new Set(["status", "endedAt"])
 
 function isAllowedScrubUpdate(
   table: string | null,
   column: string | null,
+  hasAiApplicationTables: boolean,
 ): boolean {
   return (
     (table === "account" &&
       column !== null &&
       scrubAccountColumns.has(column)) ||
     ((table === "oauthAccessToken" || table === "oauthRefreshToken") &&
-      column === "sessionId")
+      column === "sessionId") ||
+    (hasAiApplicationTables &&
+      ((table === "ai_connections" &&
+        column !== null &&
+        aiConnectionScrubColumns.has(column)) ||
+        (table === "ai_invocations" &&
+          column !== null &&
+          aiInvocationScrubColumns.has(column))))
   )
 }
 
-function createScrubAuthorizer() {
+function createScrubAuthorizer(hasAiApplicationTables: boolean) {
+  const deleteTables = hasAiApplicationTables
+    ? new Set([...scrubDeleteTables, ...aiScrubDeleteTables])
+    : scrubDeleteTables
   return (
     actionCode: number,
     argument1: string | null,
@@ -452,7 +482,7 @@ function createScrubAuthorizer() {
       case sqliteConstants.SQLITE_DELETE:
         return isMainDatabase(databaseName) &&
           argument1 !== null &&
-          scrubDeleteTables.has(argument1)
+          deleteTables.has(argument1)
           ? sqliteConstants.SQLITE_OK
           : sqliteConstants.SQLITE_DENY
       case sqliteConstants.SQLITE_INSERT:
@@ -463,7 +493,7 @@ function createScrubAuthorizer() {
           : sqliteConstants.SQLITE_DENY
       case sqliteConstants.SQLITE_UPDATE:
         return isMainDatabase(databaseName) &&
-          isAllowedScrubUpdate(argument1, argument2)
+          isAllowedScrubUpdate(argument1, argument2, hasAiApplicationTables)
           ? sqliteConstants.SQLITE_OK
           : sqliteConstants.SQLITE_DENY
       case sqliteConstants.SQLITE_READ:
@@ -474,6 +504,13 @@ function createScrubAuthorizer() {
         return ["begin", "commit", "rollback"].includes(
           argument1?.toLowerCase() ?? "",
         )
+          ? sqliteConstants.SQLITE_OK
+          : sqliteConstants.SQLITE_DENY
+      case sqliteConstants.SQLITE_FUNCTION:
+        // length and glob evaluate the ai_connections slug CHECK constraint
+        // while the scrub updates those rows; both are deterministic builtins
+        // and nothing else is permitted during scrubbing.
+        return ["length", "glob"].includes(argument2?.toLowerCase() ?? "")
           ? sqliteConstants.SQLITE_OK
           : sqliteConstants.SQLITE_DENY
       default:
@@ -705,7 +742,10 @@ function assertRepositorySchema(
   }
 }
 
-function assertScrubbed(database: DatabaseSync): void {
+function assertScrubbed(
+  database: DatabaseSync,
+  hasAiApplicationTables: boolean,
+): void {
   if (
     queryAll(
       database,
@@ -766,6 +806,41 @@ function assertScrubbed(database: DatabaseSync): void {
     )
   ) {
     throw new Error("Credential scrub did not restore static OAuth links.")
+  }
+
+  if (hasAiApplicationTables) {
+    assertAiStateScrubbed(database)
+  }
+}
+
+/**
+ * A snapshot carrying the AI tables must never resurrect upstream
+ * authorizations: authorization sessions are gone, connections carry no
+ * credentials, claims, or connected status, and no invocation is still
+ * in flight. Model snapshots and terminal history stay as reference data.
+ */
+function assertAiStateScrubbed(database: DatabaseSync): void {
+  if (
+    queryAll(database, 'SELECT "id" FROM "ai_authorization_sessions" LIMIT 1')
+      .length
+  ) {
+    throw new Error("Credential scrub left AI authorization sessions behind.")
+  }
+  if (
+    queryAll(
+      database,
+      `SELECT "id" FROM "ai_connections" WHERE "authorizationStatus" = 'connected' OR "credentialCiphertext" IS NOT NULL OR "credentialExpiresAt" IS NOT NULL OR "refreshClaimId" IS NOT NULL OR "refreshClaimExpiresAt" IS NOT NULL LIMIT 1`,
+    ).length
+  ) {
+    throw new Error("Credential scrub left AI upstream credentials resumable.")
+  }
+  if (
+    queryAll(
+      database,
+      `SELECT "requestId" FROM "ai_invocations" WHERE "status" = 'reserved' LIMIT 1`,
+    ).length
+  ) {
+    throw new Error("Credential scrub left in-flight AI reservations behind.")
   }
 }
 
@@ -838,15 +913,27 @@ export async function inspectBackupSql(
       repositoryMigrations,
     )
     assertRepositorySchema(schema, repositoryMigrations, migration.count)
+    // The schema check above proved the table set exactly matches the applied
+    // migration prefix, so the AI tables are all present or all absent. The
+    // scrub SQL, authorizer, and assertions below are generated from this
+    // verified original table set: 0001-only snapshots never run AI
+    // statements, and AI-era snapshots must pass the AI scrub assertions.
+    const hasAiApplicationTables = AI_APPLICATION_TABLES.every((table) =>
+      tables.has(table),
+    )
 
-    database.setAuthorizer(createScrubAuthorizer())
+    database.setAuthorizer(createScrubAuthorizer(hasAiApplicationTables))
     database.exec(
-      `BEGIN IMMEDIATE;\n${createCredentialScrubSql(tables.has(migrationReceiptTable))}\nCOMMIT;`,
+      `BEGIN IMMEDIATE;\n${createCredentialScrubSql({
+        hasAiApplicationTables,
+        hasDeploymentReceipt: tables.has(migrationReceiptTable),
+      })}\nCOMMIT;`,
     )
     database.setAuthorizer(createReadOnlyAuthorizer())
-    assertScrubbed(database)
+    assertScrubbed(database, hasAiApplicationTables)
 
     return {
+      hasAiApplicationTables,
       hasDeploymentReceipt: tables.has(migrationReceiptTable),
       migration,
       md5: createHash("md5").update(bytes).digest("hex"),
@@ -881,7 +968,34 @@ function createStaticOAuthSeedSql(): string {
   return statements.join("\n")
 }
 
-export function createCredentialScrubSql(hasDeploymentReceipt = false): string {
+export interface CredentialScrubOptions {
+  /**
+   * True only when the verified snapshot schema contains the AI application
+   * tables. The AI statements then run on the original snapshot schema; a
+   * 0001-only snapshot never sees them.
+   */
+  hasAiApplicationTables?: boolean
+  hasDeploymentReceipt?: boolean
+}
+
+export function createCredentialScrubSql(
+  options: CredentialScrubOptions = {},
+): string {
+  const aiStatements = options.hasAiApplicationTables
+    ? [
+        // Pending device authorization sessions (and their encrypted device
+        // grants) are temporary state and never survive a restore.
+        'DELETE FROM "ai_authorization_sessions";',
+        // Connection configuration survives, but upstream credentials,
+        // refresh claims, and connected status are cleared and the credential
+        // version advances, so stale exchange or refresh results cannot
+        // revive the old authorization.
+        `UPDATE "ai_connections" SET "credentialCiphertext" = NULL, "credentialExpiresAt" = NULL, "refreshClaimId" = NULL, "refreshClaimExpiresAt" = NULL, "credentialVersion" = "credentialVersion" + 1, "authorizationStatus" = 'reauthentication_required' WHERE "credentialCiphertext" IS NOT NULL OR "refreshClaimId" IS NOT NULL;`,
+        // In-flight reservations become unknown at their lease boundary;
+        // terminal history and its recorded usage are preserved as-is.
+        `UPDATE "ai_invocations" SET "status" = 'unknown', "endedAt" = "leaseExpiresAt" WHERE "status" = 'reserved';`,
+      ]
+    : []
   return [
     'DELETE FROM "oauthAccessToken";',
     'DELETE FROM "oauthRefreshToken";',
@@ -901,7 +1015,10 @@ export function createCredentialScrubSql(hasDeploymentReceipt = false): string {
     'DELETE FROM "security_audit_events";',
     'DELETE FROM "maintenance_lease";',
     'DELETE FROM "database_backup_health";',
-    ...(hasDeploymentReceipt ? ['DELETE FROM "deployment_migrations";'] : []),
+    ...(options.hasDeploymentReceipt
+      ? ['DELETE FROM "deployment_migrations";']
+      : []),
+    ...aiStatements,
     createStaticOAuthSeedSql(),
   ].join("\n")
 }

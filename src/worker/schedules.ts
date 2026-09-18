@@ -1,3 +1,4 @@
+import { cleanupExpiredAiState } from "./ai/cleanup"
 import { cleanupExpiredOAuthTokenState } from "./oauth/cleanup"
 export async function cleanupExpiredRecords(
   database: D1Database,
@@ -49,6 +50,7 @@ export async function runScheduledMaintenance(
     try {
       await cleanupExpiredOAuthTokenState(env.DB, controller.scheduledTime)
       await cleanupExpiredRecords(env.DB, controller.scheduledTime)
+      await cleanupExpiredAiState(env.DB, controller.scheduledTime)
     } catch (error) {
       console.error({ event: "scheduled_cleanup_failed" })
       throw error
