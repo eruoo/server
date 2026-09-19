@@ -1,6 +1,7 @@
 import {
   AI_CREDENTIAL_REFRESH_LEAD_MS,
   AI_CREDENTIAL_REFRESH_NETWORK_BUDGET_MS,
+  type AiClock,
 } from "../../shared/ai"
 import {
   isDefinitiveCodexRefreshRejection,
@@ -58,11 +59,26 @@ export interface AiCredentialServiceContext {
   database: D1Database
   /** Deployment identity bound into every ciphertext's AAD. */
   environment: string
+  /**
+   * Wall clock for decisions taken after an asynchronous step. Defaults to
+   * `Date.now`; tests inject their own so a synthetic timeline stays
+   * consistent with the rows they seeded.
+   */
+  clock?: AiClock
 }
 
 export interface AiCredentialAccessRequest {
   connectionId: string
+  /** Absolute end of the credential stage; never moved by a refresh. */
   deadlineAt: number
+  /**
+   * The entry time of this stage: the reference for the state read at entry
+   * (the freshness decision and the claim's TTL start). Every decision made
+   * after an upstream call — claim and session expiry, the remaining budget,
+   * the values written by the final conditional writes — reads the context
+   * clock instead, so a slow upstream can neither extend the stage budget nor
+   * commit against an expired claim.
+   */
   now: number
   signal?: AbortSignal
   /** Shared stage budget; when absent the refresh uses its own 10-second cap. */
@@ -213,24 +229,49 @@ function deriveCredentialExpiry(input: {
   return input.previousExpiresAt
 }
 
-async function transitionToReauthentication(
+/**
+ * Clears the credential and requires reauthentication, bound to the credential
+ * version this attempt observed. A transition that lost to a concurrent writer
+ * (a reauthorization or another claim holder) must not clear the credentials
+ * that won, so the surviving state is read back and reported instead.
+ */
+async function requireReauthentication(
   context: AiCredentialServiceContext,
-  input: { connectionId: string; claimId?: string; now: number },
-): Promise<void> {
-  await markAiConnectionReauthenticationRequired(context.database, {
-    claimId: input.claimId,
+  input: {
+    connectionId: string
+    claimId?: string
+    observedCredentialVersion: number
+    now: number
+    reason: AiReauthenticationReason
+  },
+): Promise<AiCredentialAccessResult> {
+  const marked = await markAiConnectionReauthenticationRequired(
+    context.database,
+    {
+      claimId: input.claimId,
+      connectionId: input.connectionId,
+      now: input.now,
+      observedCredentialVersion: input.observedCredentialVersion,
+    },
+  )
+  if (marked.marked) {
+    return { status: "reauthentication-required", reason: input.reason }
+  }
+  return classifySurvivingCredentialState(context, {
     connectionId: input.connectionId,
     now: input.now,
   })
 }
 
-async function classifyAfterCommitLoss(
+/**
+ * The commit or the reauthentication transition lost to a concurrent writer or
+ * a state transition. Re-read the row and classify what actually happened;
+ * never retry the network call with the same possibly-consumed refresh token.
+ */
+async function classifySurvivingCredentialState(
   context: AiCredentialServiceContext,
   input: { connectionId: string; now: number },
 ): Promise<AiCredentialAccessResult> {
-  // The commit lost to a concurrent writer or a state transition. Re-read
-  // the row and classify what actually happened; never retry the network
-  // call with the same possibly-consumed refresh token.
   const connection = await getAiConnection(context.database, input.connectionId)
   if (connection === null) return { status: "connection-not-found" }
   if (
@@ -267,6 +308,10 @@ export async function accessCodexCredentials(
   context: AiCredentialServiceContext,
   request: AiCredentialAccessRequest,
 ): Promise<AiCredentialAccessResult> {
+  // Every decision taken after an await reads this clock, never the stage's
+  // entry time: a slow upstream must not be able to extend the stage budget or
+  // commit against an expired claim.
+  const clock = context.clock ?? Date.now
   const connection = await getAiConnection(
     context.database,
     request.connectionId,
@@ -285,14 +330,12 @@ export async function accessCodexCredentials(
   if (!stored.ok) {
     // The stored package cannot be decrypted or parsed: the credential is
     // unusable and no refresh can recover it. Transition terminally.
-    await transitionToReauthentication(context, {
+    return requireReauthentication(context, {
       connectionId: connection.id,
-      now: request.now,
-    })
-    return {
-      status: "reauthentication-required",
+      observedCredentialVersion: connection.credentialVersion,
+      now: clock(),
       reason: "ciphertext-unreadable",
-    }
+    })
   }
 
   if (
@@ -332,7 +375,7 @@ export async function accessCodexCredentials(
       claimed.refreshClaimExpiresAt === undefined ||
       claimed.refreshClaimExpiresAt === null
         ? 1_000
-        : Math.max(1_000, claimed.refreshClaimExpiresAt - request.now)
+        : Math.max(1_000, claimed.refreshClaimExpiresAt - clock())
     return { status: "credential-busy", retryAfterMs: remaining }
   }
 
@@ -340,18 +383,18 @@ export async function accessCodexCredentials(
   const claimedConnection = claimed.connection
   const claimedStored = await readStoredPackage(context, claimedConnection)
   if (!claimedStored.ok) {
-    await transitionToReauthentication(context, {
+    return requireReauthentication(context, {
       claimId,
       connectionId: claimedConnection.id,
-      now: request.now,
-    })
-    return {
-      status: "reauthentication-required",
+      observedCredentialVersion: claimedConnection.credentialVersion,
+      now: clock(),
       reason: "ciphertext-unreadable",
-    }
+    })
   }
 
-  const remainingBudget = request.deadlineAt - request.now
+  // The stage deadline is absolute; the remaining budget is measured against
+  // the current clock so time already spent cannot extend it.
+  const remainingBudget = request.deadlineAt - clock()
   if (remainingBudget <= 0) {
     // The refresh provably never reached the upstream: the budget was
     // exhausted before the fetch call. Release the claim and keep the
@@ -359,7 +402,7 @@ export async function accessCodexCredentials(
     await releaseAiCredentialRefreshClaim(context.database, {
       claimId,
       connectionId: claimedConnection.id,
-      now: request.now,
+      now: clock(),
     })
     return { status: "upstream-unavailable" }
   }
@@ -387,7 +430,7 @@ export async function accessCodexCredentials(
       await releaseAiCredentialRefreshClaim(context.database, {
         claimId,
         connectionId: claimedConnection.id,
-        now: request.now,
+        now: clock(),
       })
       return { status: "upstream-unavailable" }
     }
@@ -396,24 +439,23 @@ export async function accessCodexCredentials(
 
   if (!refreshResult.ok) {
     if (isDefinitiveCodexRefreshRejection(refreshResult.failure)) {
-      await transitionToReauthentication(context, {
+      return requireReauthentication(context, {
         claimId,
         connectionId: claimedConnection.id,
-        now: request.now,
+        observedCredentialVersion: claimedConnection.credentialVersion,
+        now: clock(),
+        reason: "invalid-grant",
       })
-      return { status: "reauthentication-required", reason: "invalid-grant" }
     }
     // The request was sent but its outcome is unprovable: the refresh token
     // may already have been rotated upstream. Never replay it.
-    await transitionToReauthentication(context, {
+    return requireReauthentication(context, {
       claimId,
       connectionId: claimedConnection.id,
-      now: request.now,
-    })
-    return {
-      status: "reauthentication-required",
+      observedCredentialVersion: claimedConnection.credentialVersion,
+      now: clock(),
       reason: "refresh-outcome-unknown",
-    }
+    })
   }
 
   const merged: AiStoredCredentialPackage = {
@@ -425,33 +467,32 @@ export async function accessCodexCredentials(
   }
   if (!refreshResult.value.accessToken && !refreshResult.value.refreshToken) {
     // Defensive: the connector already rejects token-less payloads.
-    await transitionToReauthentication(context, {
+    return requireReauthentication(context, {
       claimId,
       connectionId: claimedConnection.id,
-      now: request.now,
-    })
-    return {
-      status: "reauthentication-required",
+      observedCredentialVersion: claimedConnection.credentialVersion,
+      now: clock(),
       reason: "token-response-invalid",
-    }
+    })
   }
+  // The refreshed token was issued now, so its lifetime is measured from the
+  // current clock; the absolute stage deadline above is unaffected.
+  const refreshedAt = clock()
   const expiry = deriveCredentialExpiry({
     expiresIn: refreshResult.value.expiresIn,
     mergedAccessToken: merged.accessToken,
-    now: request.now,
+    now: refreshedAt,
     previousAccessToken: claimedStored.package.accessToken,
-    previousExpiresAt: claimedConnection.credentialExpiresAt ?? request.now,
+    previousExpiresAt: claimedConnection.credentialExpiresAt ?? refreshedAt,
   })
-  if (expiry === null || expiry <= request.now) {
-    await transitionToReauthentication(context, {
+  if (expiry === null || expiry <= refreshedAt) {
+    return requireReauthentication(context, {
       claimId,
       connectionId: claimedConnection.id,
-      now: request.now,
-    })
-    return {
-      status: "reauthentication-required",
+      observedCredentialVersion: claimedConnection.credentialVersion,
+      now: refreshedAt,
       reason: "token-response-invalid",
-    }
+    })
   }
 
   let mergedCiphertext: string
@@ -468,25 +509,26 @@ export async function accessCodexCredentials(
     )
   } catch (error) {
     if (error instanceof AiCredentialCipherError) {
-      await transitionToReauthentication(context, {
+      return requireReauthentication(context, {
         claimId,
         connectionId: claimedConnection.id,
-        now: request.now,
-      })
-      return {
-        status: "reauthentication-required",
+        observedCredentialVersion: claimedConnection.credentialVersion,
+        now: clock(),
         reason: "ciphertext-unreadable",
-      }
+      })
     }
     throw error
   }
 
+  // The commit's claim-expiry guard must be judged against the current clock:
+  // the refresh spent real time, and an expired claim makes the outcome
+  // uncertain rather than persisting a late result.
   const committed = await commitAiCredentialRefresh(context.database, {
     claimId,
     connectionId: claimedConnection.id,
     credentialCiphertext: mergedCiphertext,
     credentialExpiresAt: expiry,
-    now: request.now,
+    now: clock(),
     observedCredentialVersion: claimedConnection.credentialVersion,
   })
   if (committed.committed) {
@@ -505,19 +547,17 @@ export async function accessCodexCredentials(
   if (committed.reason === "refresh-claim-expired") {
     // The claim reached its expiry during the refresh: the outcome is
     // uncertain and the connection must go through reauthorization.
-    await transitionToReauthentication(context, {
+    return requireReauthentication(context, {
       claimId,
       connectionId: claimedConnection.id,
-      now: request.now,
-    })
-    return {
-      status: "reauthentication-required",
+      observedCredentialVersion: claimedConnection.credentialVersion,
+      now: clock(),
       reason: "refresh-claim-expired",
-    }
+    })
   }
-  return classifyAfterCommitLoss(context, {
+  return classifySurvivingCredentialState(context, {
     connectionId: claimedConnection.id,
-    now: request.now,
+    now: clock(),
   })
 }
 

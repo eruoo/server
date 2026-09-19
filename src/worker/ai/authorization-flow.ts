@@ -334,8 +334,9 @@ async function releasePollClaim(
 ): Promise<void> {
   await releaseAiAuthorizationPoll(context.database, {
     claimId: input.claimId,
-    // releaseAiAuthorizationPoll requires nextPollAt >= now; callers pass
-    // input.now for immediate retry or now + interval after a real check.
+    // releaseAiAuthorizationPoll requires nextPollAt >= now; callers pass the
+    // current time for an immediate retry or the current time plus the
+    // upstream interval after a real check.
     nextPollAt: Math.max(input.nextPollAt, input.now),
     now: input.now,
     sessionId: input.session.id,
@@ -355,6 +356,16 @@ async function cancelSession(
   })
 }
 
+/**
+ * Runs one bounded poll of a pending device authorization, including the
+ * single exchange when the upstream reports the grant authorized.
+ *
+ * Every decision taken after an await reads the current clock rather than the
+ * stage's entry time: the poll claim, the authorization session and the
+ * owner's recent authentication must all be judged at the moment of the write,
+ * so a slow upstream can never commit against an expired claim or a stale
+ * authentication window. The stage deadline itself stays absolute.
+ */
 export async function pollCodexAuthorization(
   context: AiAuthorizationFlowContext,
   input: {
@@ -363,10 +374,11 @@ export async function pollCodexAuthorization(
     ownerSessionId: string
   } & AiAuthorizationStageBudget,
 ): Promise<PollCodexAuthorizationResult> {
+  const clock = context.clock ?? Date.now
   const claimId = crypto.randomUUID()
   const claimed = await claimAiAuthorizationPoll(context.database, {
     claimId,
-    now: input.now,
+    now: clock(),
     ownerSessionId: input.ownerSessionId,
     ownerUserId: input.ownerUserId,
     sessionId: input.authorizationId,
@@ -408,8 +420,8 @@ export async function pollCodexAuthorization(
     // connection cannot be completed. Drop the claim for an immediate retry.
     await releasePollClaim(context, {
       claimId,
-      nextPollAt: input.now,
-      now: input.now,
+      nextPollAt: clock(),
+      now: clock(),
       session,
     })
     return { status: "connection-changed" }
@@ -431,7 +443,7 @@ export async function pollCodexAuthorization(
   const deviceGrant = await decryptDeviceGrant(context, session)
   if (deviceGrant === null) {
     // The stored grant is unreadable; the session can never complete.
-    await cancelSession(context, session, input.now)
+    await cancelSession(context, session, clock())
     emitCompletion("failure")
     return { status: "rejected" }
   }
@@ -448,8 +460,8 @@ export async function pollCodexAuthorization(
   if (!pollAttempt.ok) {
     await releasePollClaim(context, {
       claimId,
-      nextPollAt: input.now,
-      now: input.now,
+      nextPollAt: clock(),
+      now: clock(),
       session,
     })
     return { status: "upstream-unavailable" }
@@ -461,8 +473,8 @@ export async function pollCodexAuthorization(
       // retry after the interval, and report the transient failure.
       await releasePollClaim(context, {
         claimId,
-        nextPollAt: input.now + deviceGrant.intervalMs,
-        now: input.now,
+        nextPollAt: clock() + deviceGrant.intervalMs,
+        now: clock(),
         session,
       })
       return { status: "upstream-unavailable" }
@@ -470,21 +482,21 @@ export async function pollCodexAuthorization(
     // A protocol failure on a 2xx payload or any other HTTP outcome is
     // terminal for this authorization attempt per the fixed reference: the
     // grant was denied or invalidated upstream.
-    await cancelSession(context, session, input.now)
+    await cancelSession(context, session, clock())
     emitCompletion("failure")
     return { status: "rejected" }
   }
   if (pollResult.value.status === "pending") {
     await releasePollClaim(context, {
       claimId,
-      nextPollAt: input.now + deviceGrant.intervalMs,
-      now: input.now,
+      nextPollAt: clock() + deviceGrant.intervalMs,
+      now: clock(),
       session,
     })
     return {
       status: "pending",
       intervalMs: deviceGrant.intervalMs,
-      nextPollAt: input.now + deviceGrant.intervalMs,
+      nextPollAt: clock() + deviceGrant.intervalMs,
     }
   }
 
@@ -502,8 +514,8 @@ export async function pollCodexAuthorization(
     // reading the persistent state.
     await releasePollClaim(context, {
       claimId,
-      nextPollAt: input.now,
-      now: input.now,
+      nextPollAt: clock(),
+      now: clock(),
       session,
     })
     return { status: "upstream-unavailable" }
@@ -512,7 +524,7 @@ export async function pollCodexAuthorization(
   if (!exchanged.ok) {
     // The code is consumed or its exchange outcome is unknowable; this
     // authorization session can never complete. Cancel it terminally.
-    await cancelSession(context, session, input.now)
+    await cancelSession(context, session, clock())
     emitCompletion("failure")
     return { status: "rejected" }
   }
@@ -526,13 +538,13 @@ export async function pollCodexAuthorization(
   if (!verificationAttempt.ok) {
     // The code was consumed but the identity cannot be verified within this
     // stage; the authorization attempt terminally failed.
-    await cancelSession(context, session, input.now)
+    await cancelSession(context, session, clock())
     emitCompletion("failure")
     return { status: "rejected" }
   }
   const identity = verificationAttempt.value
   if (!identity.ok) {
-    await cancelSession(context, session, input.now)
+    await cancelSession(context, session, clock())
     emitCompletion("failure")
     return { status: "invalid-identity" }
   }
@@ -543,7 +555,7 @@ export async function pollCodexAuthorization(
   // does not block the repair — the workspace column still binds the match.
   const freshConnection = await getAiConnection(context.database, connection.id)
   if (freshConnection === null) {
-    await cancelSession(context, session, input.now)
+    await cancelSession(context, session, clock())
     emitCompletion("failure")
     return { status: "connection-changed" }
   }
@@ -551,7 +563,7 @@ export async function pollCodexAuthorization(
     freshConnection.upstreamAccountId !== null &&
     freshConnection.upstreamAccountId !== identity.value.chatgptAccountId
   ) {
-    await cancelSession(context, session, input.now)
+    await cancelSession(context, session, clock())
     emitCompletion("failure")
     return { status: "account-mismatch" }
   }
@@ -565,7 +577,7 @@ export async function pollCodexAuthorization(
       storedPackage.chatgptUserId !== null &&
       identity.value.chatgptUserId !== storedPackage.chatgptUserId
     ) {
-      await cancelSession(context, session, input.now)
+      await cancelSession(context, session, clock())
       emitCompletion("failure")
       return { status: "account-mismatch" }
     }
@@ -575,12 +587,12 @@ export async function pollCodexAuthorization(
   // authentication and not revoked, read fresh from D1. Earlier identity
   // checks in this request never substitute for this read.
   const authentication = await readOwnerSessionAuthenticationState(context, {
-    now: input.now,
+    now: clock(),
     ownerSessionId: session.ownerSessionId,
     ownerUserId: session.ownerUserId,
   })
   if (!authentication.present) {
-    await cancelSession(context, session, input.now)
+    await cancelSession(context, session, clock())
     emitCompletion("failure")
     return { status: "owner-session-revoked" }
   }
@@ -589,8 +601,8 @@ export async function pollCodexAuthorization(
     // may poll again while the grant is still live.
     await releasePollClaim(context, {
       claimId,
-      nextPollAt: input.now + deviceGrant.intervalMs,
-      now: input.now,
+      nextPollAt: clock() + deviceGrant.intervalMs,
+      now: clock(),
       session,
     })
     return { status: "recent-authentication-required" }
@@ -599,9 +611,9 @@ export async function pollCodexAuthorization(
   const completionId = crypto.randomUUID()
   const credentialExpiry =
     exchanged.value.expiresIn !== undefined
-      ? input.now + exchanged.value.expiresIn * 1_000
+      ? clock() + exchanged.value.expiresIn * 1_000
       : (readCodexAccessTokenExpiryMs(exchanged.value.accessToken) ??
-        input.now + AI_CREDENTIAL_DEFAULT_LIFETIME_MS)
+        clock() + AI_CREDENTIAL_DEFAULT_LIFETIME_MS)
   let credentialCiphertext: string
   try {
     const keyring = await parseAiCredentialKeyring(context.credentialKeys)
@@ -620,7 +632,7 @@ export async function pollCodexAuthorization(
       },
     )
   } catch {
-    await cancelSession(context, session, input.now)
+    await cancelSession(context, session, clock())
     emitCompletion("failure")
     return { status: "rejected" }
   }
@@ -630,7 +642,7 @@ export async function pollCodexAuthorization(
     completionId,
     credentialCiphertext,
     credentialExpiresAt: credentialExpiry,
-    now: input.now,
+    now: clock(),
     sessionId: session.id,
     upstreamAccountId: identity.value.chatgptAccountId,
   })

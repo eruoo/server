@@ -162,7 +162,8 @@ export async function acquireAiCredentialRefreshClaim(
     // An expired claim means the earlier refresh outcome is unknown. The
     // possibly rotated credential must not be reused: clear it and require
     // reauthorization, guarded so only one concurrent caller performs the
-    // transition.
+    // transition. The version guard binds the clear to the row this attempt
+    // read: a reauthorization that already landed keeps its credentials.
     const transitioned = await database
       .prepare(
         `UPDATE "ai_connections"
@@ -176,10 +177,16 @@ export async function acquireAiCredentialRefreshClaim(
          WHERE "id" = ?2
            AND "authorizationStatus" = 'connected'
            AND "credentialCiphertext" IS NOT NULL
+           AND "credentialVersion" = ?4
            AND "refreshClaimId" = ?3
            AND "refreshClaimExpiresAt" <= ?1`,
       )
-      .bind(input.now, input.connectionId, connection.refreshClaimId)
+      .bind(
+        input.now,
+        input.connectionId,
+        connection.refreshClaimId,
+        connection.credentialVersion,
+      )
       .run()
 
     if (readChanges(transitioned, "uncertain claim clearing") === 1) {
@@ -233,7 +240,15 @@ export async function releaseAiCredentialRefreshClaim(
 
 export type MarkAiConnectionReauthenticationResult =
   | { marked: true }
-  | { marked: false; reason: "connection-not-found" | "already-terminal" }
+  | {
+      marked: false
+      reason:
+        | "connection-not-found"
+        | "already-terminal"
+        | "credential-version-changed"
+        | "refresh-claim-held"
+        | "credential-state-changed"
+    }
 
 /**
  * Programmatically moves a connected connection into reauthentication
@@ -246,20 +261,36 @@ export type MarkAiConnectionReauthenticationResult =
  * authorization sessions — those die on their own version guard, and the
  * owner may be mid-reauthorization precisely because of this transition.
  *
- * When `claimId` is given the transition is restricted to that claim holder
- * (or a claim-free row), so it can never clear a concurrently acquired
- * holder's claim. The write is conditional on the connected state, so
- * repeated transitions do not double-advance the version.
+ * The write is bound to the credential version the caller observed and, when
+ * the caller holds a claim, to that exact claim: a failure that lost to a
+ * reauthorization or to another claim holder must never clear the credentials
+ * that won. The write is also conditional on the connected state, so repeated
+ * transitions do not double-advance the version.
+ *
+ * Unlike the refresh commit this transition does not test the claim's expiry:
+ * an expired claim is exactly one of the outcomes that must move the
+ * connection into reauthentication required.
  */
 export async function markAiConnectionReauthenticationRequired(
   database: D1Database,
-  input: { connectionId: string; claimId?: string; now: number },
+  input: {
+    connectionId: string
+    claimId?: string
+    observedCredentialVersion: number
+    now: number
+  },
 ): Promise<MarkAiConnectionReauthenticationResult> {
   if (!isAiServerIdentifier(input.connectionId)) {
     throw new RangeError("The AI connection id is invalid.")
   }
   if (input.claimId !== undefined && !isAiServerIdentifier(input.claimId)) {
     throw new RangeError("The AI credential refresh claim id is invalid.")
+  }
+  if (
+    !Number.isSafeInteger(input.observedCredentialVersion) ||
+    input.observedCredentialVersion < 0
+  ) {
+    throw new RangeError("The AI credential version is invalid.")
   }
   requireEpochMilliseconds(input.now, "The AI credential transition time")
 
@@ -275,22 +306,38 @@ export async function markAiConnectionReauthenticationRequired(
            "updatedAt" = ?3
        WHERE "id" = ?1
          AND "authorizationStatus" = 'connected'
-         AND (
-           ?2 IS NULL
-           OR "refreshClaimId" IS NULL
-           OR "refreshClaimId" = ?2
-         )`,
+         AND "credentialVersion" = ?4
+         AND ("refreshClaimId" IS NULL OR "refreshClaimId" = ?2)`,
     )
-    .bind(input.connectionId, input.claimId ?? null, input.now)
+    .bind(
+      input.connectionId,
+      input.claimId ?? null,
+      input.now,
+      input.observedCredentialVersion,
+    )
     .run()
 
-  const changes = readChanges(result, "reauthentication transition")
-  if (changes === 1) return { marked: true }
+  if (readChanges(result, "reauthentication transition") === 1) {
+    return { marked: true }
+  }
+
   const connection = await getAiConnection(database, input.connectionId)
   if (connection === null) {
     return { marked: false, reason: "connection-not-found" }
   }
-  return { marked: false, reason: "already-terminal" }
+  if (connection.authorizationStatus !== "connected") {
+    return { marked: false, reason: "already-terminal" }
+  }
+  if (connection.credentialVersion !== input.observedCredentialVersion) {
+    return { marked: false, reason: "credential-version-changed" }
+  }
+  if (
+    connection.refreshClaimId !== null &&
+    connection.refreshClaimId !== input.claimId
+  ) {
+    return { marked: false, reason: "refresh-claim-held" }
+  }
+  return { marked: false, reason: "credential-state-changed" }
 }
 
 /**
