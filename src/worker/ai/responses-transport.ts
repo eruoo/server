@@ -319,10 +319,23 @@ export async function invokeCodexResponses(
     stream: true,
   })
 
+  /** True once the absolute deadline has passed or the client is gone. */
+  const budgetGone = (): boolean =>
+    clientSignal?.aborted === true ||
+    deadlineController.signal.aborted ||
+    Date.now() >= effectiveDeadlineAt
+
   const callUpstream = async (
     accessToken: string,
     accountId: string | null,
   ) => {
+    // A call whose budget is already gone is never started: the remaining
+    // absolute budget and the client's cancellation are checked
+    // synchronously, before the fetch, so an expired deadline costs zero
+    // upstream requests.
+    if (budgetGone()) {
+      throw new Error("The upstream call was not started: its budget is gone.")
+    }
     const request = buildCodexResponsesRequest({
       accessToken,
       accountId,
@@ -374,8 +387,7 @@ export async function invokeCodexResponses(
       }
       // Pre-handshake timeouts use the existing Problem (request-timeout);
       // any other transport failure is upstream unavailability.
-      const timedOut =
-        deadlineController.signal.aborted || firstResponseTimedOut
+      const timedOut = budgetGone() || firstResponseTimedOut
       return fail(timedOut ? "request-timeout" : "ai-upstream-unavailable")
     }
 
@@ -399,8 +411,7 @@ export async function invokeCodexResponses(
             settled: Promise.resolve(),
           }
         }
-        const timedOut =
-          deadlineController.signal.aborted || firstResponseTimedOut
+        const timedOut = budgetGone() || firstResponseTimedOut
         return fail(timedOut ? "request-timeout" : "ai-upstream-unavailable")
       }
       if (replay.status === 401) {

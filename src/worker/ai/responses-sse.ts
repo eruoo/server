@@ -1,4 +1,5 @@
 import {
+  AI_RESPONSES_SINGLE_EVENT_MAX_BYTES,
   AI_RESPONSES_STREAM_MAX_BYTES,
   AI_SSE_HEARTBEAT_INTERVAL_MS,
 } from "../../shared/ai"
@@ -34,6 +35,14 @@ import {
 
 const SSE_HIGH_WATER_BYTES = 64 * 1_024
 
+/**
+ * Outcome of one write attempt: the frame was queued for delivery, refused by
+ * the transfer budget (the caller must terminate the stream with an error
+ * event), or dropped because delivery already ended — cancelled by the
+ * consumer or terminated by the total deadline.
+ */
+export type ResponsesWriteOutcome = "written" | "budget-exceeded" | "dropped"
+
 export class ResponsesSseWriter implements ResponsesHeartbeatSink {
   readonly stream: ReadableStream<Uint8Array>
   private controller: ReadableStreamDefaultController<Uint8Array> | null = null
@@ -45,6 +54,7 @@ export class ResponsesSseWriter implements ResponsesHeartbeatSink {
   private writtenBytes = 0
   private closed = false
   private cancelled = false
+  private terminated = false
   /** Set once the transfer budget can no longer admit a heartbeat. */
   private heartbeatsExhausted = false
   private lastWriteAt: number
@@ -119,7 +129,12 @@ export class ResponsesSseWriter implements ResponsesHeartbeatSink {
   }
 
   private wakeDrainWaiters(): void {
-    if (this.cancelled || this.closed || this.queue.length === 0) {
+    if (
+      this.cancelled ||
+      this.terminated ||
+      this.closed ||
+      this.queue.length === 0
+    ) {
       const waiters = this.drainWaiters.splice(0, this.drainWaiters.length)
       for (const wake of waiters) wake()
     }
@@ -132,7 +147,12 @@ export class ResponsesSseWriter implements ResponsesHeartbeatSink {
    * pending, and it is never queued.
    */
   waitForDrain(): Promise<void> {
-    if (this.cancelled || this.closed || this.queue.length === 0) {
+    if (
+      this.cancelled ||
+      this.terminated ||
+      this.closed ||
+      this.queue.length === 0
+    ) {
       return Promise.resolve()
     }
     return new Promise<void>((resolve) => {
@@ -146,15 +166,26 @@ export class ResponsesSseWriter implements ResponsesHeartbeatSink {
   }
 
   private wakeSpaceWaiters(): void {
-    if (this.cancelled || this.queuedBytes <= SSE_HIGH_WATER_BYTES) {
+    if (
+      this.cancelled ||
+      this.terminated ||
+      this.queuedBytes <= SSE_HIGH_WATER_BYTES
+    ) {
       const waiters = this.spaceWaiters.splice(0, this.spaceWaiters.length)
       for (const wake of waiters) wake()
     }
   }
 
-  /** Resolves once the buffer is below the high-water mark (or cancelled). */
+  /**
+   * Resolves once the buffer is below the high-water mark, or immediately once
+   * the consumer cancelled or the deadline terminated delivery.
+   */
   private async awaitSpace(): Promise<void> {
-    while (!this.cancelled && this.queuedBytes > SSE_HIGH_WATER_BYTES) {
+    while (
+      !this.cancelled &&
+      !this.terminated &&
+      this.queuedBytes > SSE_HIGH_WATER_BYTES
+    ) {
       await new Promise<void>((resolve) => {
         this.spaceWaiters.push(resolve)
       })
@@ -168,27 +199,30 @@ export class ResponsesSseWriter implements ResponsesHeartbeatSink {
   }
 
   /**
-   * Writes one event frame. Returns false when the frame would exceed the
-   * transfer budget — the frame is then not written and the caller must
-   * terminate the stream with an error event. Writes after close or
-   * consumer cancellation are no-ops that report success.
+   * Writes one event frame. Returns "budget-exceeded" when the frame would
+   * exceed the transfer budget — the frame is then not written and the caller
+   * must terminate the stream with an error event — and "dropped" once
+   * delivery ended (consumer cancellation or the total deadline).
    */
-  async writeEvent(event: string | null, data: string): Promise<boolean> {
-    if (this.closed || this.cancelled) return true
+  async writeEvent(
+    event: string | null,
+    data: string,
+  ): Promise<ResponsesWriteOutcome> {
+    if (this.closed || this.cancelled || this.terminated) return "dropped"
     const frame =
       event === null
         ? `data: ${data}\n\n`
         : `event: ${event}\ndata: ${data}\n\n`
     const bytes = new TextEncoder().encode(frame)
     if (this.writtenBytes + bytes.byteLength > AI_RESPONSES_STREAM_MAX_BYTES) {
-      return false
+      return "budget-exceeded"
     }
     await this.awaitSpace()
-    if (this.cancelled) return true
+    if (this.cancelled || this.terminated) return "dropped"
     this.writtenBytes += bytes.byteLength
     this.lastWriteAt = this.now()
     this.enqueueBytes(bytes)
-    return true
+    return "written"
   }
 
   /** Bytes written so far, heartbeats included. */
@@ -203,14 +237,15 @@ export class ResponsesSseWriter implements ResponsesHeartbeatSink {
    * failure anyway, and an explicit controlled error is the contract's
    * promise. Exactly-once use per stream.
    */
-  async writeTerminalError(data: string): Promise<void> {
-    if (this.closed || this.cancelled) return
+  async writeTerminalError(data: string): Promise<ResponsesWriteOutcome> {
+    if (this.closed || this.cancelled || this.terminated) return "dropped"
     const bytes = new TextEncoder().encode(`event: error\ndata: ${data}\n\n`)
     await this.awaitSpace()
-    if (this.cancelled) return
+    if (this.cancelled || this.terminated) return "dropped"
     this.writtenBytes += bytes.byteLength
     this.lastWriteAt = this.now()
     this.enqueueBytes(bytes)
+    return "written"
   }
 
   /** Whether the consumer cancelled the stream. */
@@ -218,23 +253,48 @@ export class ResponsesSseWriter implements ResponsesHeartbeatSink {
     return this.cancelled
   }
 
+  /** Whether the total deadline ended delivery. */
+  isTerminated(): boolean {
+    return this.terminated
+  }
+
+  /**
+   * Ends delivery for good: pending pull/space/drain waits resolve, the buffer
+   * is dropped and the stream closes, so a consumer that stopped reading can
+   * no longer hold the handler open. Frames already delivered stay delivered.
+   */
+  terminate(): void {
+    if (this.terminated || this.cancelled) return
+    this.terminated = true
+    this.queue.length = 0
+    this.queuedBytes = 0
+    this.closeController()
+  }
+
   heartbeatDelayMs(): number | null {
-    if (this.closed || this.cancelled || this.heartbeatsExhausted) return null
+    if (
+      this.closed ||
+      this.cancelled ||
+      this.terminated ||
+      this.heartbeatsExhausted
+    ) {
+      return null
+    }
     return Math.max(0, this.lastWriteAt + this.heartbeatIntervalMs - this.now())
   }
 
   /**
    * Sends the comment heartbeat when one is due. Under backpressure the
    * heartbeat is never queued: the call waits until the buffer drains (or
-   * the stream ends) and then sends at most this one heartbeat. Returns
-   * false when no heartbeat was sent.
+   * delivery ends) and then sends at most this one heartbeat. Returns false
+   * when no heartbeat was sent.
    */
   async sendHeartbeatIfDue(): Promise<boolean> {
-    if (this.closed || this.cancelled) return false
+    if (this.closed || this.cancelled || this.terminated) return false
     if (this.now() - this.lastWriteAt < this.heartbeatIntervalMs) return false
     if (this.queue.length > 0 || this.queuedBytes > 0) {
       await this.waitForDrain()
-      if (this.closed || this.cancelled) return false
+      if (this.closed || this.cancelled || this.terminated) return false
       if (this.queue.length > 0 || this.queuedBytes > 0) return false
     }
     const bytes = new TextEncoder().encode(": keepalive\n\n")
@@ -255,7 +315,7 @@ export class ResponsesSseWriter implements ResponsesHeartbeatSink {
    * observe the end of the stream. Idempotent; no-op after cancellation.
    */
   close(): void {
-    if (this.closed || this.cancelled) return
+    if (this.closed || this.cancelled || this.terminated) return
     this.closed = true
     if (this.queue.length === 0) {
       this.closeController()
@@ -271,6 +331,13 @@ export class ResponsesSseWriter implements ResponsesHeartbeatSink {
  * event, or a sanitized `error` event), and closes the stream. Returns the
  * resolved terminal for the invocation record; a cancelled consumer still
  * yields the true terminal, only the delivery is skipped.
+ *
+ * Delivery is bounded by the total deadline: an abort ends delivery (the
+ * writer stops accepting frames and closes the stream) so a consumer that
+ * stopped reading without cancelling cannot keep the handler, and therefore
+ * the outcome commit, waiting. The terminal frame is written only while the
+ * stream is still writable; otherwise the stream is terminated instead of
+ * waiting for space to send an error.
  */
 export async function runResponsesSsePipeline(input: {
   upstream: ReadableStream<Uint8Array>
@@ -283,61 +350,97 @@ export async function runResponsesSsePipeline(input: {
   deadlineSignal?: AbortSignal
 }): Promise<ResponsesTerminalResult> {
   const { writer } = input
-  const result = await consumeResponsesUpstream({
-    deadlineSignal: input.deadlineSignal,
-    heartbeatSink: writer,
-    noDataIntervalMs: input.noDataIntervalMs,
-    onEvent: async (frame) => {
-      const withinBudget = await writer.writeEvent(frame.event, frame.data)
-      if (!withinBudget) {
-        throw new ResponsesProtocolError(
-          "stream-oversize",
-          "The downstream SSE transfer exceeded its budget.",
-        )
-      }
-    },
-    signal: input.signal,
-    upstream: input.upstream,
-  })
+  const stopDelivery = (): void => writer.terminate()
+  input.deadlineSignal?.addEventListener("abort", stopDelivery, { once: true })
+  input.signal?.addEventListener("abort", stopDelivery, { once: true })
+  try {
+    const result = await consumeResponsesUpstream({
+      deadlineSignal: input.deadlineSignal,
+      heartbeatSink: writer,
+      noDataIntervalMs: input.noDataIntervalMs,
+      onEvent: async (frame) => {
+        const outcome = await writer.writeEvent(frame.event, frame.data)
+        if (outcome === "budget-exceeded") {
+          throw new ResponsesProtocolError(
+            "stream-oversize",
+            "The downstream SSE transfer exceeded its budget.",
+          )
+        }
+        // "dropped": delivery already ended. The consume loop stops at its
+        // next cancellation or deadline boundary and cancels the upstream.
+      },
+      signal: input.signal,
+      upstream: input.upstream,
+    })
 
-  const deliverable = !writer.isCancelled() && !input.signal?.aborted
-  if (result.kind === "completed" && deliverable) {
-    const withinBudget = await writer.writeEvent(
-      "response.completed",
-      JSON.stringify(result.response),
-    )
-    if (!withinBudget) {
-      await writeTerminalErrorEvent(
-        writer,
-        problem("ai-upstream-protocol-error", input.requestId),
-      )
-      writer.close()
-      return { kind: "protocol-failure", code: "stream-oversize" }
+    if (input.deadlineSignal?.aborted) {
+      // The total deadline ended the call while its terminal was still in
+      // flight: the invocation is a timeout, not a success.
+      writer.terminate()
+      return { kind: "failed", failure: { kind: "unavailable" } }
     }
-  } else if (result.kind === "incomplete" && deliverable) {
-    const withinBudget = await writer.writeEvent(
-      "response.incomplete",
-      JSON.stringify(result.response),
-    )
-    if (!withinBudget) {
-      await writeTerminalErrorEvent(
-        writer,
-        problem("ai-upstream-protocol-error", input.requestId),
-      )
-      writer.close()
-      return { kind: "protocol-failure", code: "stream-oversize" }
+    if (input.signal?.aborted) {
+      // The client is gone: the invocation records an unknown outcome instead
+      // of a success nobody received.
+      return { kind: "aborted" }
     }
-  } else if (result.kind === "failed" || result.kind === "protocol-failure") {
-    if (deliverable) {
-      const slug =
-        result.kind === "failed"
-          ? responsesFailureProblemSlug(result.failure.kind)
-          : responsesFailureProblemSlug(result.code)
-      await writeTerminalErrorEvent(writer, problem(slug, input.requestId))
+    const deliverable =
+      !writer.isCancelled() && !writer.isTerminated() && !input.signal?.aborted
+    if (
+      (result.kind === "completed" || result.kind === "incomplete") &&
+      deliverable
+    ) {
+      const type =
+        result.kind === "completed"
+          ? "response.completed"
+          : "response.incomplete"
+      const data = JSON.stringify({ response: result.response, type })
+      if (
+        new TextEncoder().encode(data).byteLength >
+        AI_RESPONSES_SINGLE_EVENT_MAX_BYTES
+      ) {
+        await writeTerminalErrorEvent(
+          writer,
+          problem("ai-upstream-protocol-error", input.requestId),
+        )
+        writer.close()
+        return { kind: "protocol-failure", code: "terminal-oversize" }
+      }
+      const writeOutcome = await writer.writeEvent(type, data)
+      if (writeOutcome === "dropped" && writer.isTerminated()) {
+        // The deadline ended delivery while the terminal frame was waiting for
+        // space: the consumer never received it, so the invocation is a
+        // timeout rather than a success. A consumer cancellation instead keeps
+        // the true terminal — only the delivery is suppressed.
+        return { kind: "failed", failure: { kind: "unavailable" } }
+      }
+      if (writeOutcome === "budget-exceeded") {
+        await writeTerminalErrorEvent(
+          writer,
+          problem("ai-upstream-protocol-error", input.requestId),
+        )
+        writer.close()
+        return { kind: "protocol-failure", code: "stream-oversize" }
+      }
+    } else if (result.kind === "failed" || result.kind === "protocol-failure") {
+      if (deliverable) {
+        const slug =
+          result.kind === "failed"
+            ? responsesFailureProblemSlug(result.failure.kind)
+            : responsesFailureProblemSlug(result.code)
+        // The error frame shares the terminal write path: if the deadline ends
+        // delivery while it waits for space, the stream closes without it and
+        // the caller sees an ended stream, which the contract treats as a
+        // failure — never an unbounded wait for space that may never come.
+        await writeTerminalErrorEvent(writer, problem(slug, input.requestId))
+      }
     }
+    writer.close()
+    return result
+  } finally {
+    input.deadlineSignal?.removeEventListener("abort", stopDelivery)
+    input.signal?.removeEventListener("abort", stopDelivery)
   }
-  writer.close()
-  return result
 }
 
 /**
