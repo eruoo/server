@@ -57,6 +57,8 @@ beforeEach(async () => {
 
 describe("AI management routes", () => {
   it("requires an owner session on every management route", async () => {
+    // Every registered §6.1 operation is covered, including the
+    // authorization and model-refresh entries.
     for (const [method, path] of [
       ["GET", "/api/ai/providers"],
       ["GET", "/api/ai/connections"],
@@ -67,9 +69,26 @@ describe("AI management routes", () => {
         "POST",
         "/api/ai/connections/11111111-1111-1111-1111-111111111111/disconnect",
       ],
+      [
+        "POST",
+        "/api/ai/connections/11111111-1111-1111-1111-111111111111/authorizations",
+      ],
+      ["GET", "/api/ai/authorizations/22222222-2222-2222-2222-222222222222"],
+      [
+        "POST",
+        "/api/ai/authorizations/22222222-2222-2222-2222-222222222222/poll",
+      ],
+      ["DELETE", "/api/ai/authorizations/22222222-2222-2222-2222-222222222222"],
+      [
+        "POST",
+        "/api/ai/connections/11111111-1111-1111-1111-111111111111/models/refresh",
+      ],
       ["GET", "/api/ai/invocations"],
     ] as const) {
-      const response = await call(path, { method })
+      const response = await call(path, {
+        method,
+        ...(method === "GET" ? {} : { body: {} }),
+      })
       expect(response.status, `${method} ${path}`).toBe(401)
     }
   })

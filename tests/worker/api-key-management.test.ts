@@ -994,6 +994,17 @@ it("creates an ai profile key with server-built model permissions", async () => 
       "openai/gpt-other",
     ],
   })
+  // §7 metadata: the profile and the number of granted models are recorded
+  // on the reused key audit event.
+  const audit = await env.DB.prepare(
+    "SELECT type, metadata FROM security_audit_events WHERE type='api_key_created'",
+  ).first<{ metadata: string; type: string }>()
+  expect(JSON.parse(audit?.metadata ?? "{}")).toMatchObject({
+    configId: "ai",
+    modelGrantCount: 2,
+    status: 200,
+  })
+
   // The ai key is invisible to the default profile and vice versa.
   const defaultList = await call("/api/auth/api-key/list?configId=default", {
     cookie: session.cookie,
