@@ -8,6 +8,7 @@ import {
 } from "../../shared/api-key"
 import { getAiConnection, getAiConnectionBySlug } from "./connections"
 import { listAiModels } from "./models"
+import type { ResponsesRequestBody } from "./responses-request"
 
 /**
  * AI key model authorization.
@@ -187,4 +188,45 @@ function parseCapabilities(raw: string | null): unknown {
   } catch {
     return null
   }
+}
+
+/**
+ * Reads the reasoning efforts the catalog declared for one model. A missing,
+ * malformed or differently shaped payload declares nothing, so nothing is
+ * treated as supported.
+ */
+function readDeclaredReasoningEfforts(raw: string | null): string[] {
+  const parsed = parseCapabilities(raw)
+  if (typeof parsed !== "object" || parsed === null) return []
+  const efforts = (parsed as { reasoningEfforts?: unknown }).reasoningEfforts
+  return Array.isArray(efforts) &&
+    efforts.every((value) => typeof value === "string")
+    ? (efforts as string[])
+    : []
+}
+
+/**
+ * Checks the request fields whose support the model catalog must confirm.
+ * `reasoning.effort` is accepted only when the selected model's catalog entry
+ * declares that exact value; structured output stays closed until the catalog
+ * carries a confirmation field for it (the snapshot records reasoning efforts,
+ * API availability and visibility only, so no model is confirmed today).
+ * Unconfirmed capability is never treated as support, and a refused request
+ * never reaches the upstream.
+ */
+export function validateAiRequestCapabilities(input: {
+  capabilities: string | null
+  request: ResponsesRequestBody
+}): { ok: true } | { ok: false; field: "reasoning.effort" | "text.format" } {
+  const effort = input.request.reasoning?.effort
+  if (
+    effort !== undefined &&
+    !readDeclaredReasoningEfforts(input.capabilities).includes(effort)
+  ) {
+    return { ok: false, field: "reasoning.effort" }
+  }
+  if (input.request.text?.format !== undefined) {
+    return { ok: false, field: "text.format" }
+  }
+  return { ok: true }
 }

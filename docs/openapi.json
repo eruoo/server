@@ -2089,7 +2089,10 @@
                             "type": "string"
                           },
                           "connectionId": {
-                            "type": "string"
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "deadlineAt": {
                             "type": "number"
@@ -2122,7 +2125,10 @@
                             "type": "string"
                           },
                           "upstreamModelId": {
-                            "type": "string"
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "upstreamRequestId": {
                             "type": [

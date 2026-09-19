@@ -218,8 +218,10 @@ export const aiInvocations = sqliteTable(
   {
     requestId: text().primaryKey(),
     apiKeyId: text().notNull(),
-    connectionId: text().notNull(),
-    upstreamModelId: text().notNull(),
+    // Nullable since 0003: the slot is taken before the model is resolved, so
+    // the identity is recorded later and stays NULL until then.
+    connectionId: text(),
+    upstreamModelId: text(),
     startedAt: integer().notNull(),
     deadlineAt: integer().notNull(),
     leaseExpiresAt: integer().notNull(),

@@ -25,8 +25,9 @@ import {
 export interface AiInvocationRecord {
   requestId: string
   apiKeyId: string
-  connectionId: string
-  upstreamModelId: string
+  /** Null while a reservation has not been identified yet. */
+  connectionId: string | null
+  upstreamModelId: string | null
   startedAt: number
   deadlineAt: number
   leaseExpiresAt: number
@@ -44,6 +45,26 @@ export type ReserveAiInvocationResult =
   | {
       reserved: false
       reason: "service-quota-exceeded" | "key-quota-exceeded"
+    }
+
+export type AssignAiInvocationIdentityResult =
+  | { assigned: true }
+  | {
+      assigned: false
+      reason:
+        | "invocation-not-found"
+        | "invocation-not-reserved"
+        | "invocation-already-identified"
+    }
+
+export type ReleaseAiInvocationReservationResult =
+  | { released: true }
+  | {
+      released: false
+      reason:
+        | "invocation-not-found"
+        | "invocation-not-reserved"
+        | "invocation-already-identified"
     }
 
 export type CommitAiInvocationOutcomeResult =
@@ -93,8 +114,8 @@ function readChanges(
 interface AiInvocationRow {
   requestId: string
   apiKeyId: string
-  connectionId: string
-  upstreamModelId: string
+  connectionId: string | null
+  upstreamModelId: string | null
   startedAt: number
   deadlineAt: number
   leaseExpiresAt: number
@@ -141,19 +162,24 @@ export async function readAiInvocation(
 }
 
 /**
- * Reserves an in-flight invocation slot. The service-wide limit and the
- * per-key limit are enforced by the same conditional INSERT — there is no
- * read-then-insert window — and only rows whose lease has not expired count
- * against either quota. A rejected reservation writes nothing and does not
- * wait for a slot.
+ * Takes an in-flight invocation slot before the request body is read. The
+ * service-wide limit and the per-key limit are enforced by the same
+ * conditional INSERT — there is no read-then-insert window — and only rows
+ * whose lease has not expired count against either quota. A rejected
+ * reservation writes nothing and does not wait for a slot.
+ *
+ * The connection and the upstream model are not known at this point: they stay
+ * NULL (the explicit "not yet known" representation, never a fabricated
+ * identifier) until `assignAiInvocationIdentity` records the resolved,
+ * authorized model. A reservation that never reaches that step is released by
+ * `releaseAiInvocationReservation`; one whose write landed late is released by
+ * its lease.
  */
 export async function reserveAiInvocation(
   database: D1Database,
   input: {
     requestId: string
     apiKeyId: string
-    connectionId: string
-    upstreamModelId: string
     startedAt: number
     deadlineAt: number
   },
@@ -166,15 +192,6 @@ export async function reserveAiInvocation(
     input.apiKeyId.length > AI_INVOCATION_API_KEY_ID_MAX_LENGTH
   ) {
     throw new RangeError("The AI invocation api key id is invalid.")
-  }
-  if (!isAiServerIdentifier(input.connectionId)) {
-    throw new RangeError("The AI invocation connection id is invalid.")
-  }
-  if (
-    input.upstreamModelId.length < 1 ||
-    input.upstreamModelId.length > AI_INVOCATION_UPSTREAM_MODEL_ID_MAX_LENGTH
-  ) {
-    throw new RangeError("The AI invocation upstream model id is invalid.")
   }
   requireEpochMilliseconds(input.startedAt, "The AI invocation start time")
   requireEpochMilliseconds(input.deadlineAt, "The AI invocation deadline")
@@ -189,21 +206,19 @@ export async function reserveAiInvocation(
          "requestId", "apiKeyId", "connectionId", "upstreamModelId",
          "startedAt", "deadlineAt", "leaseExpiresAt", "status"
        )
-       SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'reserved'
+       SELECT ?1, ?2, NULL, NULL, ?3, ?4, ?5, 'reserved'
        WHERE (
          SELECT COUNT(*) FROM "ai_invocations"
-         WHERE "status" = 'reserved' AND "leaseExpiresAt" > ?5
-       ) < ?8
+         WHERE "status" = 'reserved' AND "leaseExpiresAt" > ?3
+       ) < ?6
          AND (
            SELECT COUNT(*) FROM "ai_invocations"
-           WHERE "status" = 'reserved' AND "apiKeyId" = ?2 AND "leaseExpiresAt" > ?5
-         ) < ?9`,
+           WHERE "status" = 'reserved' AND "apiKeyId" = ?2 AND "leaseExpiresAt" > ?3
+         ) < ?7`,
     )
     .bind(
       input.requestId,
       input.apiKeyId,
-      input.connectionId,
-      input.upstreamModelId,
       input.startedAt,
       input.deadlineAt,
       leaseExpiresAt,
@@ -234,6 +249,104 @@ export async function reserveAiInvocation(
     return { reserved: false, reason: "key-quota-exceeded" }
   }
   return { reserved: false, reason: "service-quota-exceeded" }
+}
+
+/**
+ * Records the resolved and authorized model on a reservation. The write is
+ * conditional on the reservation still being unidentified and un-terminated,
+ * so a late identity can never rewrite a terminal row or overwrite an identity
+ * another writer already recorded.
+ */
+export async function assignAiInvocationIdentity(
+  database: D1Database,
+  input: { requestId: string; connectionId: string; upstreamModelId: string },
+): Promise<AssignAiInvocationIdentityResult> {
+  if (!isAiServerIdentifier(input.requestId)) {
+    throw new RangeError("The AI invocation request id is invalid.")
+  }
+  if (!isAiServerIdentifier(input.connectionId)) {
+    throw new RangeError("The AI invocation connection id is invalid.")
+  }
+  if (
+    input.upstreamModelId.length < 1 ||
+    input.upstreamModelId.length > AI_INVOCATION_UPSTREAM_MODEL_ID_MAX_LENGTH
+  ) {
+    throw new RangeError("The AI invocation upstream model id is invalid.")
+  }
+
+  const result = await database
+    .prepare(
+      `UPDATE "ai_invocations"
+       SET "connectionId" = ?2, "upstreamModelId" = ?3
+       WHERE "requestId" = ?1
+         AND "status" = 'reserved'
+         AND "connectionId" IS NULL
+         AND "upstreamModelId" IS NULL`,
+    )
+    .bind(input.requestId, input.connectionId, input.upstreamModelId)
+    .run()
+  if (readChanges(result, "identity assignment") === 1) {
+    return { assigned: true }
+  }
+  return {
+    assigned: false,
+    reason: await classifyReservationLoss(database, input.requestId),
+  }
+}
+
+/**
+ * Releases a reservation whose request never started: the slot is given back
+ * immediately instead of waiting for the lease. Conditional on the row still
+ * being unidentified and un-terminated, so it can never delete a call that
+ * already ran (or is running).
+ */
+export async function releaseAiInvocationReservation(
+  database: D1Database,
+  requestId: string,
+): Promise<ReleaseAiInvocationReservationResult> {
+  if (!isAiServerIdentifier(requestId)) {
+    throw new RangeError("The AI invocation request id is invalid.")
+  }
+  const result = await database
+    .prepare(
+      `DELETE FROM "ai_invocations"
+       WHERE "requestId" = ?1
+         AND "status" = 'reserved'
+         AND "connectionId" IS NULL
+         AND "upstreamModelId" IS NULL`,
+    )
+    .bind(requestId)
+    .run()
+  if (readChanges(result, "reservation release") === 1) {
+    return { released: true }
+  }
+  return {
+    released: false,
+    reason: await classifyReservationLoss(database, requestId),
+  }
+}
+
+async function classifyReservationLoss(
+  database: D1Database,
+  requestId: string,
+): Promise<
+  | "invocation-not-found"
+  | "invocation-not-reserved"
+  | "invocation-already-identified"
+> {
+  const row = await database
+    .prepare(
+      'SELECT "status", "connectionId", "upstreamModelId" FROM "ai_invocations" WHERE "requestId" = ?1',
+    )
+    .bind(requestId)
+    .first<{
+      connectionId: string | null
+      status: AiInvocationStatus
+      upstreamModelId: string | null
+    }>()
+  if (row === null) return "invocation-not-found"
+  if (row.status !== "reserved") return "invocation-not-reserved"
+  return "invocation-already-identified"
 }
 
 /**

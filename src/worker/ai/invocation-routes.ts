@@ -2,7 +2,6 @@ import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi"
 
 import {
   AI_INVOCATION_TOTAL_DEADLINE_MS,
-  AI_MAX_IN_FLIGHT_INVOCATIONS,
   isAiConnectionSlug,
 } from "../../shared/ai"
 import { parseAiExternalModelId } from "../../shared/api-key"
@@ -13,11 +12,16 @@ import { getRequestAuth } from "../auth/session"
 import { errorResponse, problem } from "../http/response"
 import type { AppBindings } from "../http/types"
 import { getAiConnectionBySlug } from "./connections"
-import { reserveAiInvocation } from "./invocations"
+import {
+  assignAiInvocationIdentity,
+  releaseAiInvocationReservation,
+  reserveAiInvocation,
+} from "./invocations"
 import {
   authorizeAiInvocation,
   authorizeAiModelRead,
   listAiAuthorizedModels,
+  validateAiRequestCapabilities,
 } from "./model-authorization"
 import { listAiModels } from "./models"
 import { validateResponsesRequest } from "./responses-request"
@@ -29,12 +33,13 @@ import { invokeCodexResponses } from "./responses-transport"
  * Both endpoints authenticate with the `x-api-key` carrier only: the AI
  * profile's `ai` operations and the per-connection model grants decide what
  * a key may list and invoke. No body byte is read before the key is verified
- * and owner-bound, and a cheap in-flight pre-check rejects an obviously full
- * service before the body is read. The authoritative reservation still has
- * to follow the read, because the model ID that identifies the slot lives in
- * the body; §7's "read the body after securing the slot" is therefore
- * satisfied by the pre-check plus the atomic insert, not by the insert
- * alone.
+ * and owner-bound, and the in-flight slot is taken by the same conditional
+ * insert that enforces both quotas — before the body is read. That
+ * reservation starts without an identity, because the model ID lives in the
+ * body: it is identified once the model is resolved, authorized and checked
+ * against its catalog capabilities. A request that never reaches that step
+ * releases its slot immediately, and a reservation whose write landed late is
+ * released by its lease.
  */
 
 /** The exact request-body budget for the invocation route (§7). */
@@ -132,7 +137,12 @@ function rejectNonApiKeyCarrier(
   return undefined
 }
 
-/** Reads the request body with the exact size and time budgets. */
+/**
+ * Reads the request body with the exact size and time budgets. The read also
+ * ends when the client disconnects: a cancelled request stops waiting for
+ * bytes it will never receive, so the slot it holds is released promptly
+ * instead of at the body-read budget.
+ */
 async function readBoundedBody(
   c: Parameters<Parameters<OpenAPIHono<AppBindings>["openapi"]>[1]>[0],
 ): Promise<
@@ -140,7 +150,9 @@ async function readBoundedBody(
   | { ok: false; response: ReturnType<typeof problem> }
 > {
   const requestId = c.get("requestId")
+  const clientSignal = c.req.raw.signal
   let timer: ReturnType<typeof setTimeout> | undefined
+  let onAbort: (() => void) | undefined
   const chunks: Uint8Array[] = []
   const reader = c.req.raw.body?.getReader()
   try {
@@ -157,6 +169,14 @@ async function readBoundedBody(
       }
       return "done" as const
     })()
+    const aborted = new Promise<"aborted">((resolve) => {
+      if (clientSignal.aborted) {
+        resolve("aborted")
+        return
+      }
+      onAbort = () => resolve("aborted")
+      clientSignal.addEventListener("abort", onAbort, { once: true })
+    })
     const outcome = await Promise.race([
       readAll,
       new Promise<"timeout">((resolve) => {
@@ -165,7 +185,12 @@ async function readBoundedBody(
           AI_RESPONSES_BODY_READ_BUDGET_MS,
         )
       }),
+      aborted,
     ])
+    if (outcome === "aborted") {
+      await reader.cancel().catch(() => undefined)
+      return { ok: false, response: problem("request-timeout", requestId) }
+    }
     if (outcome === "timeout") {
       await reader.cancel().catch(() => undefined)
       return { ok: false, response: problem("request-timeout", requestId) }
@@ -191,6 +216,8 @@ async function readBoundedBody(
     return { ok: false, response: problem("invalid-request", requestId) }
   } finally {
     clearTimeout(timer)
+    if (onAbort !== undefined)
+      clientSignal.removeEventListener("abort", onAbort)
     reader?.releaseLock()
   }
 }
@@ -277,6 +304,11 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
+      // The total deadline runs from request arrival, so the clock starts
+      // before the carrier check and the entry limiter: caller authentication
+      // and admission share the same 5 second budget.
+      const startedAt = Date.now()
+      const admissionDeadline = startedAt + AI_INVOCATION_ADMISSION_BUDGET_MS
       const rejected = rejectNonApiKeyCarrier(c)
       if (rejected) return rejected
       const limited = await limitAuthEntry(
@@ -286,40 +318,64 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
       )
       if (limited) return limited
 
-      const startedAt = Date.now()
-      const admissionDeadline = startedAt + AI_INVOCATION_ADMISSION_BUDGET_MS
       const key = await verifyAiKey(c)
       if (key instanceof Response) return key
       if (Date.now() >= admissionDeadline) {
         return problem("request-timeout", requestId)
       }
 
-      // Cheap pre-admission: a full service rejects before the body read.
-      // The authoritative conditional insert below still decides.
-      let inFlight
+      // The slot is taken before the body is read: the conditional insert is
+      // the admission decision, so a full service or key never reads a byte of
+      // the body. The connection and model are not known yet — they stay NULL
+      // until the resolved, authorized model is recorded below.
+      const deadlineAt = startedAt + AI_INVOCATION_TOTAL_DEADLINE_MS
+      let reserved
       try {
-        inFlight = await c.env.DB.prepare(
-          `SELECT COUNT(*) AS "inFlight" FROM "ai_invocations"
-           WHERE "status" = 'reserved' AND "leaseExpiresAt" > ?1`,
-        )
-          .bind(Date.now())
-          .first<{ inFlight: number }>()
+        reserved = await reserveAiInvocation(c.env.DB, {
+          apiKeyId: key.id,
+          deadlineAt,
+          requestId,
+          startedAt,
+        })
       } catch {
         return problem("service-unavailable", requestId)
       }
-      if (
-        inFlight === null ||
-        inFlight.inFlight >= AI_MAX_IN_FLIGHT_INVOCATIONS
-      ) {
+      if (!reserved.reserved) {
         const response = problem("ai-concurrency-exceeded", requestId)
         response.headers.set("retry-after", "1")
         return response
       }
 
+      /**
+       * Gives the slot back for a request that never started. A release that
+       * cannot land leaves the reservation to its lease, which is the same
+       * bounded release the spec promises for late writes.
+       */
+      const abandonReservation = async (): Promise<void> => {
+        try {
+          await releaseAiInvocationReservation(c.env.DB, requestId)
+        } catch {
+          // The lease releases the slot; the response still tells the truth.
+        }
+      }
+
+      // A reservation whose admission write landed after the budget is a late
+      // result: it is released instead of starting the call.
+      if (Date.now() >= admissionDeadline) {
+        await abandonReservation()
+        return problem("request-timeout", requestId)
+      }
+
       const parsed = await readBoundedBody(c)
-      if (!parsed.ok) return parsed.response
+      if (!parsed.ok) {
+        await abandonReservation()
+        return parsed.response
+      }
       const validated = validateResponsesRequest(parsed.body)
-      if (!validated.ok) return problem("validation-failed", requestId)
+      if (!validated.ok) {
+        await abandonReservation()
+        return problem("validation-failed", requestId)
+      }
 
       // Resolve the public model ID against the live catalog, then require
       // both the invoke operation and the exact model grant. Unknown and
@@ -328,6 +384,7 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
       const parts = parseAiExternalModelId(validated.value.model)
       let connectionId: string | null = null
       let upstreamModelId: string | null = null
+      let modelCapabilities: string | null = null
       // A malformed slug is an unresolvable model, not a service failure.
       if (parts !== null && isAiConnectionSlug(parts.connectionSlug)) {
         try {
@@ -341,16 +398,18 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
             connection.authorizationStatus === "connected"
           ) {
             const models = await listAiModels(c.env.DB, connection.id)
-            if (
-              models.some(
-                (model) => model.upstreamModelId === parts.upstreamModelId,
-              )
-            ) {
+            const model = models.find(
+              (candidate) =>
+                candidate.upstreamModelId === parts.upstreamModelId,
+            )
+            if (model !== undefined) {
               connectionId = connection.id
               upstreamModelId = parts.upstreamModelId
+              modelCapabilities = model.capabilities
             }
           }
         } catch {
+          await abandonReservation()
           return problem("service-unavailable", requestId)
         }
       }
@@ -359,27 +418,39 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
         upstreamModelId === null ||
         !authorizeAiInvocation(key.permissions, connectionId, upstreamModelId)
       ) {
+        await abandonReservation()
         return problem("permission-denied", requestId)
       }
 
-      const deadlineAt = startedAt + AI_INVOCATION_TOTAL_DEADLINE_MS
-      let reserved
+      // Capabilities are checked after the grant check, so an ungranted model
+      // never reveals what its catalog entry declares. Unconfirmed capability
+      // is never treated as support: the request is refused here, before any
+      // upstream call.
+      const capabilityCheck = validateAiRequestCapabilities({
+        capabilities: modelCapabilities,
+        request: validated.value,
+      })
+      if (!capabilityCheck.ok) {
+        await abandonReservation()
+        return problem("validation-failed", requestId)
+      }
+
+      // The reservation is identified only now: the slot was held from the
+      // start, and a reservation that is already gone means the call must not
+      // start.
       try {
-        reserved = await reserveAiInvocation(c.env.DB, {
-          apiKeyId: key.id,
+        const assigned = await assignAiInvocationIdentity(c.env.DB, {
           connectionId,
-          deadlineAt,
           requestId,
-          startedAt,
           upstreamModelId,
         })
+        if (!assigned.assigned) {
+          await abandonReservation()
+          return problem("service-unavailable", requestId)
+        }
       } catch {
+        await abandonReservation()
         return problem("service-unavailable", requestId)
-      }
-      if (!reserved.reserved) {
-        const response = problem("ai-concurrency-exceeded", requestId)
-        response.headers.set("retry-after", "1")
-        return response
       }
 
       const delivery = await invokeCodexResponses({

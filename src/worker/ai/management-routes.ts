@@ -885,7 +885,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
                 records: z.array(
                   z.object({
                     apiKeyId: z.string(),
-                    connectionId: z.string(),
+                    connectionId: z.string().nullable(),
                     deadlineAt: z.number(),
                     effectiveStatus: z.string(),
                     endedAt: z.number().nullable(),
@@ -894,7 +894,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
                     requestId: z.string(),
                     startedAt: z.number(),
                     status: z.string(),
-                    upstreamModelId: z.string(),
+                    upstreamModelId: z.string().nullable(),
                     upstreamRequestId: z.string().nullable(),
                     usage: z.string().nullable(),
                   }),

@@ -16,6 +16,8 @@ import { ownerSession } from "./fixtures/session"
 const connectionId = "11111111-1111-1111-1111-111111111111"
 const upstreamModelId = "gpt-test"
 const externalModelId = "codex-main/gpt-test"
+const reasoningUpstreamModelId = "gpt-reasoning"
+const reasoningExternalModelId = `codex-main/${reasoningUpstreamModelId}`
 
 function sseFrame(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
@@ -60,10 +62,12 @@ async function call(
     cookie?: string
     headers?: Record<string, string>
     method?: string
+    rawBody?: string
   } = {},
 ) {
   const payload =
-    options.body === undefined ? undefined : JSON.stringify(options.body)
+    options.rawBody ??
+    (options.body === undefined ? undefined : JSON.stringify(options.body))
   const context = createExecutionContext()
   const response = await worker.fetch(
     new Request(`${env.APP_ORIGIN}${path}`, {
@@ -126,15 +130,41 @@ async function seedCatalog(): Promise<void> {
       `INSERT INTO "ai_models" ("connectionId","upstreamModelId","displayName","capabilities","snapshotCredentialVersion","discoveredAt")
        VALUES (?,?,NULL,NULL,1,?)`,
     ).bind(connectionId, "other-model", now),
+    // One model with declared reasoning efforts, so a confirmed capability can
+    // be told apart from an unconfirmed one.
+    env.DB.prepare(
+      `INSERT INTO "ai_models" ("connectionId","upstreamModelId","displayName","capabilities","snapshotCredentialVersion","discoveredAt")
+       VALUES (?,?,NULL,?,1,?)`,
+    ).bind(
+      connectionId,
+      reasoningUpstreamModelId,
+      JSON.stringify({
+        reasoningEfforts: ["low", "high"],
+        supportedInApi: true,
+        visibility: "list",
+      }),
+      now,
+    ),
   ])
 }
 
+/** Counts the live reservations, which is what both quotas are read from. */
+async function reservedRowCount(): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM "ai_invocations" WHERE "status" = 'reserved'`,
+  ).first<{ count: number }>()
+  return row?.count ?? 0
+}
+
 /** Creates an ai-profile key through the real gateway. */
-async function createAiKey(modelIds: string[]): Promise<string> {
-  const session = await ownerSession()
+async function createAiKey(
+  modelIds: string[],
+  cookie?: string,
+): Promise<string> {
+  const sessionCookie = cookie ?? (await ownerSession()).cookie
   const response = await call("/api/auth/api-key/create", {
     body: { modelIds, name: "ai route probe", purpose: "ai" },
-    cookie: session.cookie,
+    cookie: sessionCookie,
   })
   expect(response.status).toBe(200)
   const created = await response.json<{ key: string }>()
@@ -227,11 +257,176 @@ describe("AI invocation routes", () => {
       fetchMock.mockRestore()
     }
 
-    // The invocation row is committed with the terminal outcome.
+    // The invocation row is committed with the terminal outcome and the
+    // identity that was resolved and authorized before the call started.
     const rows = await env.DB.prepare(
-      "SELECT status, errorCode FROM ai_invocations",
-    ).all<{ errorCode: string | null; status: string }>()
-    expect(rows.results).toEqual([{ errorCode: null, status: "succeeded" }])
+      "SELECT status, errorCode, connectionId, upstreamModelId FROM ai_invocations",
+    ).all<{
+      connectionId: string | null
+      errorCode: string | null
+      status: string
+      upstreamModelId: string | null
+    }>()
+    expect(rows.results).toEqual([
+      {
+        connectionId,
+        errorCode: null,
+        status: "succeeded",
+        upstreamModelId,
+      },
+    ])
+  })
+
+  it("accepts a reasoning effort the model catalog declares", async () => {
+    const key = await createAiKey([reasoningExternalModelId])
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => sseUpstream(completedFrames))
+    try {
+      const response = await call("/api/ai/responses", {
+        body: {
+          input: "hi",
+          model: reasoningExternalModelId,
+          reasoning: { effort: "high" },
+        },
+        headers: { "x-api-key": key },
+      })
+      expect(response.status).toBe(200)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      fetchMock.mockRestore()
+    }
+  })
+
+  it("refuses a reasoning effort the model catalog does not declare", async () => {
+    // `gpt-test` records no reasoning efforts: unconfirmed capability is not
+    // support, so no effort is accepted for it.
+    const key = await createAiKey([externalModelId])
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+    try {
+      const response = await call("/api/ai/responses", {
+        body: {
+          input: "hi",
+          model: externalModelId,
+          reasoning: { effort: "high" },
+        },
+        headers: { "x-api-key": key },
+      })
+      expect(response.status).toBe(422)
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      fetchMock.mockRestore()
+    }
+    expect(await reservedRowCount()).toBe(0)
+  })
+
+  it("refuses structured output the catalog cannot confirm", async () => {
+    // Even the model with declared reasoning efforts carries no confirmation
+    // field for structured output, so the request is refused before the call.
+    const key = await createAiKey([reasoningExternalModelId])
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+    try {
+      const response = await call("/api/ai/responses", {
+        body: {
+          input: "hi",
+          model: reasoningExternalModelId,
+          text: {
+            format: {
+              name: "answer",
+              schema: { properties: { answer: { type: "string" } } },
+              type: "json_schema",
+            },
+          },
+        },
+        headers: { "x-api-key": key },
+      })
+      expect(response.status).toBe(422)
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      fetchMock.mockRestore()
+    }
+    expect(await reservedRowCount()).toBe(0)
+  })
+
+  it("releases the slot and calls no upstream when the request never starts", async () => {
+    const session = await ownerSession()
+    const key = await createAiKey([externalModelId], session.cookie)
+    const ungrantedKey = await createAiKey(
+      ["codex-main/other-model"],
+      session.cookie,
+    )
+    const cases: {
+      body?: unknown
+      expected: number
+      key: string
+      rawBody?: string
+    }[] = [
+      { expected: 400, key, rawBody: "{not json" },
+      { expected: 413, key, rawBody: `"${"x".repeat(9 * 1_048_576)}"` },
+      {
+        // A body that is otherwise valid: the 422 comes from the unknown
+        // field, not from a missing required one.
+        body: { input: "hi", model: externalModelId, temperature: 0.5 },
+        expected: 422,
+        key,
+      },
+      {
+        body: { input: "hi", model: "codex-main/not-in-catalog" },
+        expected: 403,
+        key,
+      },
+      {
+        body: { input: "hi", model: externalModelId },
+        expected: 403,
+        key: ungrantedKey,
+      },
+    ]
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+    try {
+      for (const testCase of cases) {
+        const response = await call("/api/ai/responses", {
+          body: testCase.body,
+          headers: { "x-api-key": testCase.key },
+          rawBody: testCase.rawBody,
+        })
+        expect(response.status).toBe(testCase.expected)
+        expect(fetchMock).not.toHaveBeenCalled()
+        expect(await reservedRowCount()).toBe(0)
+      }
+    } finally {
+      fetchMock.mockRestore()
+    }
+  })
+
+  it("answers concurrency-exceeded without reading an oversize body", async () => {
+    const key = await createAiKey([externalModelId])
+    const now = Date.now()
+    const insert = (requestId: string, apiKeyId: string) =>
+      env.DB.prepare(
+        `INSERT INTO "ai_invocations" ("requestId","apiKeyId","connectionId","upstreamModelId","startedAt","deadlineAt","leaseExpiresAt","status")
+         VALUES (?,?,?,?,?,?,?,'reserved')`,
+      )
+        .bind(
+          requestId,
+          apiKeyId,
+          connectionId,
+          upstreamModelId,
+          now,
+          now + 60_000,
+          now + 60_000,
+        )
+        .run()
+    await insert("99999999-9999-4999-8999-999999999999", "other-key-1")
+    await insert("99999999-9999-4999-8999-999999999998", "other-key-2")
+
+    // The body is over the 8 MiB budget: a route that read it before deciding
+    // admission would answer 413 instead of the quota answer.
+    const response = await call("/api/ai/responses", {
+      headers: { "x-api-key": key },
+      rawBody: `"${"x".repeat(9 * 1_048_576)}"`,
+    })
+    expect(response.status).toBe(429)
+    expect(await reservedRowCount()).toBe(2)
   })
 
   it("answers concurrency-exceeded when the only slot is taken", async () => {
