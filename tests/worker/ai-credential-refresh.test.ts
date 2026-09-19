@@ -156,6 +156,26 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+/**
+ * The service reads the wall clock at every decision taken after an await.
+ * These fixtures live on a synthetic timeline, so the tests hand it a clock
+ * that follows that timeline instead of the real one.
+ */
+let clockNow = now
+
+/**
+ * Runs credential access on the test clock, which follows the entry time the
+ * caller passes: the service reads that clock for every decision taken after
+ * an await, and these fixtures live on a synthetic timeline.
+ */
+function accessWithClock(
+  serviceContext: Parameters<typeof accessCodexCredentials>[0],
+  request: Parameters<typeof accessCodexCredentials>[1],
+): ReturnType<typeof accessCodexCredentials> {
+  clockNow = request.now
+  return accessCodexCredentials(serviceContext, request)
+}
+
 let context: AiCredentialServiceContext
 
 beforeEach(async () => {
@@ -165,7 +185,13 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM ai_connections"),
     env.DB.prepare("DELETE FROM user"),
   ])
-  context = { credentialKeys: keyringRaw, database: env.DB, environment }
+  clockNow = now
+  context = {
+    clock: () => clockNow,
+    credentialKeys: keyringRaw,
+    database: env.DB,
+    environment,
+  }
 })
 
 let authorizationSessionSeed = 0
@@ -260,7 +286,7 @@ describe("credential access and refresh", () => {
       expiresAtMs: now + 3_600_000,
     })
     const mock = installUpstreamMock()
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -285,7 +311,7 @@ describe("credential access and refresh", () => {
           refresh_token: "refresh-token-2",
         }),
     })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -329,7 +355,7 @@ describe("credential access and refresh", () => {
       // The fixed contract may omit fields; the old values stay in force.
       refresh: () => jsonResponse({ refresh_token: "refresh-token-2" }),
     })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -365,7 +391,7 @@ describe("credential access and refresh", () => {
       expiresAtMs: now + AI_CREDENTIAL_REFRESH_LEAD_MS / 2,
     })
     const mock = installUpstreamMock()
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: now - 1,
       now,
@@ -384,7 +410,7 @@ describe("credential access and refresh", () => {
         access_token: fakeAccessToken(now + 3_600_000, "later"),
         refresh_token: "r2",
       })
-    const retry = await accessCodexCredentials(context, {
+    const retry = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now: now + 1_000,
@@ -402,7 +428,7 @@ describe("credential access and refresh", () => {
       deadlineAt: stageDeadlineAt,
       upstreamTotalMs: 0,
     })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -420,7 +446,7 @@ describe("credential access and refresh", () => {
     installUpstreamMock({
       refresh: () => jsonResponse({ error: "invalid_grant" }, 400),
     })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -450,7 +476,7 @@ describe("credential access and refresh", () => {
           400,
         ),
     })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -472,7 +498,7 @@ describe("credential access and refresh", () => {
     installUpstreamMock({
       refresh: () => jsonResponse({ error: "temporarily_unavailable" }, 400),
     })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -495,7 +521,7 @@ describe("credential access and refresh", () => {
     installUpstreamMock({
       refresh: () => jsonResponse({ error: "unauthorized" }, 401),
     })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -512,7 +538,7 @@ describe("credential access and refresh", () => {
       expiresAtMs: now + AI_CREDENTIAL_REFRESH_LEAD_MS / 2,
     })
     installUpstreamMock({ refresh: () => jsonResponse({ error: "boom" }, 503) })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -537,7 +563,7 @@ describe("credential access and refresh", () => {
         throw new TypeError("fetch failed")
       },
     })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -566,7 +592,7 @@ describe("credential access and refresh", () => {
           )
         }),
     })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: now + 1_000,
       now,
@@ -589,7 +615,7 @@ describe("credential access and refresh", () => {
     )
       .bind(otherClaimId, now + 20_000, connectionId)
       .run()
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -629,7 +655,7 @@ describe("credential access and refresh", () => {
         })
       },
     })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -662,11 +688,110 @@ describe("credential access and refresh", () => {
         })
       },
     })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
     })
+    expect(result).toEqual({
+      reason: "refresh-claim-expired",
+      status: "reauthentication-required",
+    })
+    expect(await getAiConnection(env.DB, connectionId)).toMatchObject({
+      authorizationStatus: "reauthentication_required",
+      credentialCiphertext: null,
+    })
+  })
+
+  it("keeps newly reauthorized credentials when an older refresh fails", async () => {
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(now + 30_000),
+      expiresAtMs: now + 30_000,
+    })
+    const winner = await encryptPackage({
+      accessToken: fakeAccessToken(now + 7_200_000, "winner"),
+      refreshToken: "refresh-winner",
+    })
+    const winnerSessionId = "77777777-7777-4777-8777-777777777777"
+    const winnerClaimId = "88888888-8888-4888-8888-888888888888"
+    installUpstreamMock({
+      refresh: async () => {
+        // The owner completes a reauthorization while the refresh request is
+        // still in flight: the refresh failure below is stale. The reauthorized
+        // write runs on its own timestamps, so only the version guard decides.
+        expect(
+          await createAiAuthorizationSession(env.DB, {
+            connectionId,
+            deviceGrantCiphertext: "device-grant-winner",
+            id: winnerSessionId,
+            ownerSessionId,
+            ownerUserId,
+            pollIntervalMs: 1_000,
+            sessionTtlMs: 900_000,
+            now: now + 8_000,
+          }),
+        ).toMatchObject({ created: true })
+        expect(
+          await claimAiAuthorizationPoll(env.DB, {
+            claimId: winnerClaimId,
+            now: now + 10_000,
+            ownerSessionId,
+            ownerUserId,
+            sessionId: winnerSessionId,
+          }),
+        ).toMatchObject({ claimed: true })
+        expect(
+          await completeAiAuthorization(env.DB, {
+            claimId: winnerClaimId,
+            completionId: "99999999-9999-4999-8999-999999999999",
+            credentialCiphertext: winner,
+            credentialExpiresAt: now + 7_200_000,
+            now: now + 15_001,
+            sessionId: winnerSessionId,
+            upstreamAccountId: "account-main",
+          }),
+        ).toMatchObject({ completed: true })
+        return jsonResponse({ error: "invalid_grant" }, 400)
+      },
+    })
+
+    const result = await accessWithClock(context, {
+      connectionId,
+      deadlineAt: now + 45_000,
+      now: now + 15_000,
+    })
+
+    // The stale failure must not clear the credentials the reauthorization
+    // wrote, and the caller is told about the state that actually won.
+    expect(result).toMatchObject({ status: "usable" })
+    expect(await getAiConnection(env.DB, connectionId)).toMatchObject({
+      authorizationStatus: "connected",
+      credentialCiphertext: winner,
+      credentialVersion: 2,
+    })
+  })
+
+  it("does not commit a refresh whose claim expired while the upstream was answering", async () => {
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(now + 30_000),
+      expiresAtMs: now + 30_000,
+    })
+    installUpstreamMock({
+      refresh: () => {
+        // The upstream answer arrives after the claim's 30-second lifetime.
+        clockNow = now + 45_000
+        return jsonResponse({
+          access_token: fakeAccessToken(now + 3_600_000, "late"),
+        })
+      },
+    })
+
+    const result = await accessWithClock(context, {
+      connectionId,
+      deadlineAt: now + 45_000,
+      now: now + 8_000,
+    })
+
     expect(result).toEqual({
       reason: "refresh-claim-expired",
       status: "reauthentication-required",
@@ -693,7 +818,7 @@ describe("credential access and refresh", () => {
         })
       },
     })
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -719,7 +844,7 @@ describe("credential access and refresh", () => {
     )
       .bind("not-a-valid-envelope", connectionId)
       .run()
-    const result = await accessCodexCredentials(context, {
+    const result = await accessWithClock(context, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -741,11 +866,12 @@ describe("credential access and refresh", () => {
       keyringRaw: keyringRaw,
     })
     const withoutOldKey = {
+      clock: () => clockNow,
       credentialKeys: `2:${toBase64Url(keyV2)}`,
       database: env.DB,
       environment,
     }
-    const result = await accessCodexCredentials(withoutOldKey, {
+    const result = await accessWithClock(withoutOldKey, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -770,11 +896,12 @@ describe("credential access and refresh", () => {
         }),
     })
     const rotatedContext = {
+      clock: () => clockNow,
       credentialKeys: rotatedKeyringRaw,
       database: env.DB,
       environment,
     }
-    const result = await accessCodexCredentials(rotatedContext, {
+    const result = await accessWithClock(rotatedContext, {
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -798,14 +925,14 @@ describe("credential access and refresh", () => {
     })
     expect(disabled).toMatchObject({ updated: true })
     expect(
-      await accessCodexCredentials(context, {
+      await accessWithClock(context, {
         connectionId,
         deadlineAt: stageDeadlineAt,
         now,
       }),
     ).toEqual({ status: "disabled" })
     expect(
-      await accessCodexCredentials(context, {
+      await accessWithClock(context, {
         connectionId: "99999999-9999-9999-9999-999999999999",
         deadlineAt: stageDeadlineAt,
         now,
@@ -977,7 +1104,7 @@ describe("model catalog discovery and read", () => {
         }),
     })
     expect(
-      await accessCodexCredentials(context, {
+      await accessWithClock(context, {
         connectionId,
         deadlineAt: stageDeadlineAt,
         now: now + 2_000,

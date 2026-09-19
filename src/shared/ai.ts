@@ -100,6 +100,14 @@ export function isAiConnectionSlug(value: string): boolean {
   )
 }
 
+/**
+ * Reads the current wall clock for decisions taken after an asynchronous step.
+ * Production omits it (the default is `Date.now`); tests hand the AI flows
+ * their own clock so a synthetic timeline stays consistent with the durable
+ * rows they seed.
+ */
+export type AiClock = () => number
+
 /** Device authorization sessions live at most 15 minutes. */
 export const AI_AUTHORIZATION_SESSION_MAX_TTL_MS = 15 * 60 * 1000
 

@@ -207,6 +207,25 @@ afterEach(() => {
 })
 
 let auditEvents: AiAuthorizationAuditEvent[]
+/**
+ * The service reads the wall clock at every decision taken after an await.
+ * These fixtures live on a synthetic timeline, so the tests hand it a clock
+ * that follows that timeline instead of the real one.
+ */
+let clockNow = now
+
+/**
+ * Runs a poll on the test clock, which follows the entry time it is given: the
+ * service reads that clock for every decision taken after an await, and these
+ * fixtures live on a synthetic timeline.
+ */
+function pollWithClock(
+  input: Parameters<typeof pollCodexAuthorization>[1],
+): ReturnType<typeof pollCodexAuthorization> {
+  clockNow = input.now
+  return pollCodexAuthorization(context, input)
+}
+
 let context: AiAuthorizationFlowContext
 
 beforeEach(async () => {
@@ -218,8 +237,10 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM security_audit_events"),
   ])
   auditEvents = []
+  clockNow = now
   context = {
     audit: (event) => auditEvents.push(event),
+    clock: () => clockNow,
     credentialKeys: keyringRaw,
     database: env.DB,
     environment,
@@ -341,7 +362,7 @@ async function authorizeThroughFlow(input: {
     ownerUserId: flowOwnerUserId,
   })
   expect(started).toMatchObject({ status: "started" })
-  const pollResult = await pollCodexAuthorization(context, {
+  const pollResult = await pollWithClock({
     authorizationId: (started as { authorizationId: string }).authorizationId,
     deadlineAt: at + 30_000,
     now: at + defaultIntervalMs,
@@ -609,7 +630,7 @@ describe("device authorization poll", () => {
     })
     const authorizationId = (started as { authorizationId: string })
       .authorizationId
-    const first = await pollCodexAuthorization(context, {
+    const first = await pollWithClock({
       authorizationId,
       deadlineAt: now + 30_000,
       now: now + defaultIntervalMs,
@@ -626,7 +647,7 @@ describe("device authorization poll", () => {
         .length,
     ).toBe(1)
     // An immediate re-poll is too early: the interval is enforced.
-    const second = await pollCodexAuthorization(context, {
+    const second = await pollWithClock({
       authorizationId,
       deadlineAt: now + 60_000,
       now: now + defaultIntervalMs + 1_000,
@@ -675,7 +696,7 @@ describe("device authorization poll", () => {
     })
     const authorizationId = (started as { authorizationId: string })
       .authorizationId
-    const firstPoll = pollCodexAuthorization(context, {
+    const firstPoll = pollWithClock({
       authorizationId,
       deadlineAt: now + 60_000,
       now: now + defaultIntervalMs,
@@ -685,7 +706,7 @@ describe("device authorization poll", () => {
     // Wait until the first poll's upstream check is actually in flight; the
     // claim was already written before the fetch started.
     await checkStarted
-    const second = await pollCodexAuthorization(context, {
+    const second = await pollWithClock({
       authorizationId,
       deadlineAt: now + 60_000,
       now: now + defaultIntervalMs,
@@ -714,7 +735,7 @@ describe("device authorization poll", () => {
     })
     const authorizationId = (started as { authorizationId: string })
       .authorizationId
-    const result = await pollCodexAuthorization(context, {
+    const result = await pollWithClock({
       authorizationId,
       deadlineAt: now + 30_000,
       now: now + defaultIntervalMs,
@@ -747,7 +768,7 @@ describe("device authorization poll", () => {
       ownerSessionId: owner.sessionId,
       ownerUserId: owner.userId,
     })
-    const result = await pollCodexAuthorization(context, {
+    const result = await pollWithClock({
       authorizationId: (started as { authorizationId: string }).authorizationId,
       deadlineAt: now + 30_000,
       now: now + defaultIntervalMs,
@@ -769,7 +790,7 @@ describe("device authorization poll", () => {
       ownerSessionId: owner.sessionId,
       ownerUserId: owner.userId,
     })
-    const result = await pollCodexAuthorization(context, {
+    const result = await pollWithClock({
       authorizationId: (started as { authorizationId: string }).authorizationId,
       deadlineAt: now + 30_000,
       now: now + AI_AUTHORIZATION_SESSION_MAX_TTL_MS + 1_000,
@@ -814,7 +835,7 @@ describe("device authorization poll", () => {
       ownerSessionId: owner.sessionId,
       ownerUserId: owner.userId,
     })
-    const result = await pollCodexAuthorization(context, {
+    const result = await pollWithClock({
       authorizationId: (started as { authorizationId: string }).authorizationId,
       deadlineAt: now + 30_000,
       now: now + defaultIntervalMs,
@@ -862,7 +883,7 @@ describe("device authorization poll", () => {
     })
     const authorizationId = (started as { authorizationId: string })
       .authorizationId
-    const result = await pollCodexAuthorization(context, {
+    const result = await pollWithClock({
       authorizationId,
       deadlineAt: now + 30_000,
       now: now + defaultIntervalMs,
@@ -894,7 +915,7 @@ describe("device authorization poll", () => {
           code_verifier: "verifier-1",
         }),
     }
-    const retry = await pollCodexAuthorization(context, {
+    const retry = await pollWithClock({
       authorizationId,
       deadlineAt: now + 60_000,
       now: now + defaultIntervalMs * 2,
@@ -981,7 +1002,7 @@ describe("device authorization poll", () => {
       ownerSessionId: owner.sessionId,
       ownerUserId: owner.userId,
     })
-    const result = await pollCodexAuthorization(context, {
+    const result = await pollWithClock({
       authorizationId: (started as { authorizationId: string }).authorizationId,
       deadlineAt: now + 30_000,
       now: now + defaultIntervalMs,
@@ -1039,7 +1060,7 @@ describe("device authorization poll", () => {
       ownerSessionId: owner.sessionId,
       ownerUserId: owner.userId,
     })
-    const result = await pollCodexAuthorization(context, {
+    const result = await pollWithClock({
       authorizationId: (started as { authorizationId: string }).authorizationId,
       deadlineAt: now + 30_000,
       now: now + defaultIntervalMs,
@@ -1047,6 +1068,117 @@ describe("device authorization poll", () => {
       ownerUserId: owner.userId,
     })
     expect(result).toEqual({ status: "invalid-identity" })
+    expect(await getAiConnection(env.DB, connectionId)).toMatchObject({
+      authorizationStatus: "never_authorized",
+      credentialCiphertext: null,
+    })
+  })
+
+  it("rechecks the owner's recent authentication at commit time", async () => {
+    await createConnection()
+    // At entry the authentication is 14m59s old: inside the window by one
+    // second. The exchange then spends two more seconds, so the commit must
+    // judge the window against the current clock, not the entry time.
+    const owner = await createOwnerSession({
+      reauthenticatedAtMs: now + 5_000 - 899_000,
+    })
+    installUpstreamMock({
+      deviceToken: () =>
+        jsonResponse({
+          authorization_code: "auth-code-1",
+          code_challenge: "challenge-1",
+          code_verifier: "verifier-1",
+        }),
+      exchange: async () => {
+        clockNow = now + 7_000
+        return jsonResponse({
+          access_token: fakeAccessToken(now + 3_600_000),
+          expires_in: 3_600,
+          id_token: await signTestIdToken({
+            chatgptAccountId: "account-main",
+            chatgptUserId: "user-main",
+            expiresAtMs: now + 3_600_000,
+          }),
+          refresh_token: "refresh-token-1",
+        })
+      },
+    })
+    const started = await startCodexAuthorization(context, {
+      connectionId,
+      deadlineAt: now + 30_000,
+      now,
+      ownerSessionId: owner.sessionId,
+      ownerUserId: owner.userId,
+    })
+    expect(started).toMatchObject({ status: "started" })
+    clockNow = now + 5_000
+    const result = await pollWithClock({
+      authorizationId: (started as { authorizationId: string }).authorizationId,
+      deadlineAt: now + 35_000,
+      now: now + 5_000,
+      ownerSessionId: owner.sessionId,
+      ownerUserId: owner.userId,
+    })
+    expect(result).toEqual({ status: "recent-authentication-required" })
+    // The session stays pending: a re-verified owner may poll again.
+    const session = await readSessionRow(
+      (started as { authorizationId: string }).authorizationId,
+    )
+    expect(session?.status).toBe("pending")
+    expect(await getAiConnection(env.DB, connectionId)).toMatchObject({
+      authorizationStatus: "never_authorized",
+      credentialCiphertext: null,
+    })
+  })
+
+  it("rejects a completion whose poll claim expired while the upstream was answering", async () => {
+    await createConnection()
+    const owner = await createOwnerSession({
+      reauthenticatedAtMs: now - 60_000,
+    })
+    installUpstreamMock({
+      deviceToken: () =>
+        jsonResponse({
+          authorization_code: "auth-code-1",
+          code_challenge: "challenge-1",
+          code_verifier: "verifier-1",
+        }),
+      exchange: async () => {
+        // The upstream answer arrives after the 30-second claim lifetime.
+        clockNow = now + 40_000
+        return jsonResponse({
+          access_token: fakeAccessToken(now + 3_600_000),
+          expires_in: 3_600,
+          id_token: await signTestIdToken({
+            chatgptAccountId: "account-main",
+            chatgptUserId: "user-main",
+            expiresAtMs: now + 3_600_000,
+          }),
+          refresh_token: "refresh-token-1",
+        })
+      },
+    })
+    const started = await startCodexAuthorization(context, {
+      connectionId,
+      deadlineAt: now + 30_000,
+      now,
+      ownerSessionId: owner.sessionId,
+      ownerUserId: owner.userId,
+    })
+    expect(started).toMatchObject({ status: "started" })
+    clockNow = now + 5_000
+    const result = await pollWithClock({
+      authorizationId: (started as { authorizationId: string }).authorizationId,
+      deadlineAt: now + 35_000,
+      now: now + 5_000,
+      ownerSessionId: owner.sessionId,
+      ownerUserId: owner.userId,
+    })
+    expect(result).toEqual({ status: "poll-claim-held" })
+    const session = await readSessionRow(
+      (started as { authorizationId: string }).authorizationId,
+    )
+    expect(session?.status).toBe("pending")
     expect(await getAiConnection(env.DB, connectionId)).toMatchObject({
       authorizationStatus: "never_authorized",
       credentialCiphertext: null,
@@ -1117,7 +1249,7 @@ describe("authorization status and cancel", () => {
       type: "ai_authorization_cancelled",
     })
     // A late poll after cancellation cannot resurrect the session.
-    const late = await pollCodexAuthorization(context, {
+    const late = await pollWithClock({
       authorizationId,
       deadlineAt: now + 60_000,
       now: now + defaultIntervalMs,

@@ -405,10 +405,14 @@ export async function invokeCodexResponses(
       }
       if (replay.status === 401) {
         await replay.body?.cancel().catch(() => undefined)
-        // A fresh token was rejected: the authorization itself is dead.
+        // A fresh token was rejected: the authorization itself is dead. The
+        // transition is bound to the version whose token was rejected, so a
+        // reauthorization that landed meanwhile keeps its credentials — the
+        // problem below then describes this invocation, not the stored state.
         await markAiConnectionReauthenticationRequired(input.database, {
           connectionId: input.connectionId,
           now: Date.now(),
+          observedCredentialVersion: credentials.connection.credentialVersion,
         })
         return fail("ai-reauthorization-required", {
           upstreamRequestId: boundedUpstreamRequestId(
