@@ -1176,6 +1176,81 @@ describe("model catalog discovery and read", () => {
     })
   })
 
+  it("treats a recovery refresh that cannot be sent as unavailability", async () => {
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(now + 3_600_000),
+      expiresAtMs: now + 3_600_000,
+    })
+    const mock = installUpstreamMock({
+      models: () => jsonResponse({ detail: "Unauthorized" }, 401),
+      refresh: () =>
+        jsonResponse({
+          access_token: fakeAccessToken(now + 3_600_000, "refreshed"),
+          refresh_token: "refresh-token-2",
+        }),
+    })
+    // The stage deadline is already past when the recovery would run: the
+    // forced refresh is provably not sent, and no replay happens.
+    const result = await refreshCodexModelCatalog(context, {
+      connectionId,
+      deadlineAt: now - 1,
+      now,
+    })
+    expect(result).toEqual({
+      keptSnapshot: true,
+      reason: "unavailable",
+      status: "upstream-failure",
+    })
+    expect(
+      mock.calls.filter((call) =>
+        call.url.includes("/backend-api/codex/models"),
+      ),
+    ).toHaveLength(1)
+    expect(
+      mock.calls.filter((call) => call.url.includes("/oauth/token")),
+    ).toHaveLength(0)
+    // The claim was released; the stored credential survives untouched.
+    const connection = await getAiConnection(env.DB, connectionId)
+    expect(connection).toMatchObject({
+      authorizationStatus: "connected",
+      credentialCiphertext: expect.any(String),
+      credentialVersion: 1,
+      refreshClaimId: null,
+    })
+  })
+
+  it("classifies a replay that fails after a successful recovery as transient", async () => {
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(now + 3_600_000),
+      expiresAtMs: now + 3_600_000,
+    })
+    let modelsCalls = 0
+    installUpstreamMock({
+      models: () => {
+        modelsCalls += 1
+        return modelsCalls === 1
+          ? jsonResponse({ detail: "Unauthorized" }, 401)
+          : jsonResponse({ error: "down" }, 500)
+      },
+      refresh: () =>
+        jsonResponse({
+          access_token: fakeAccessToken(now + 3_600_000, "refreshed"),
+          refresh_token: "refresh-token-2",
+        }),
+    })
+    const result = await refreshCodexModelCatalog(context, {
+      connectionId,
+      deadlineAt: stageDeadlineAt,
+      now,
+    })
+    expect(result).toEqual({
+      keptSnapshot: false,
+      reason: "unavailable",
+      status: "upstream-failure",
+    })
+    expect(modelsCalls).toBe(2)
+  })
+
   it("still classifies a catalog 403 as a protocol failure without recovery", async () => {
     await createConnectedConnection({
       accessToken: fakeAccessToken(now + 3_600_000),

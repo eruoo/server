@@ -198,6 +198,7 @@ export async function refreshCodexModelCatalog(
     if (rejectedWith401(catalogAttempt)) {
       console.warn(
         JSON.stringify({
+          connectionId: connection.id,
           event: "ai_model_refresh_failed",
           failureKind: "http",
           httpStatus: 401,
@@ -233,11 +234,14 @@ export async function refreshCodexModelCatalog(
       catalog.failure.kind === "network" ||
       (catalog.failure.kind === "http" &&
         (catalog.failure.status >= 500 || catalog.failure.status === 429))
-    // One controlled operational event per failed discovery: only the
-    // failure kind, the HTTP status, and the classification are recorded;
-    // upstream bodies never leave the connector.
+    // Every failed catalog attempt emits exactly one controlled operational
+    // event: only the connection, the failure kind, the HTTP status, and the
+    // classification are recorded; upstream bodies never leave the connector.
+    // Discoveries that never reach the catalog call (credential-stage
+    // failures, an exhausted budget) do not emit this event.
     console.warn(
       JSON.stringify({
+        connectionId: connection.id,
         event: "ai_model_refresh_failed",
         failureKind: catalog.failure.kind,
         httpStatus:
