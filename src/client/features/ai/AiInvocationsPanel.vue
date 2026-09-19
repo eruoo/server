@@ -4,7 +4,11 @@ import { onMounted, onUnmounted, shallowRef } from "vue"
 import { useSession } from "../../composables/session"
 import { ApiError } from "../../lib/http"
 import type { AiInvocationCursor, AiInvocationRecord } from "./ai-invocations"
-import { listAiInvocations, readUsageTotalTokens } from "./ai-invocations"
+import {
+  describeAiInvocationError,
+  listAiInvocations,
+  readUsageTotalTokens,
+} from "./ai-invocations"
 
 const session = useSession()
 const records = shallowRef<AiInvocationRecord[]>([])
@@ -86,9 +90,10 @@ onUnmounted(() => {
           }}
         </p>
         <p>
-          <template v-if="record.errorCode"
-            >错误码 {{ record.errorCode }}</template
-          ><template v-else>无受控错误码</template> ·
+          <span data-testid="ai-invocation-error">{{
+            describeAiInvocationError(record.errorCode)
+          }}</span>
+          ·
           <template v-if="readUsageTotalTokens(record.usage) !== null"
             >用量 {{ readUsageTotalTokens(record.usage) }} tokens</template
           ><template v-else>用量未知</template>

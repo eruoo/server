@@ -258,3 +258,32 @@ describe("AI management routes", () => {
     expect(badCursor.status).toBe(422)
   })
 })
+
+it("returns a masked upstream account and never the raw identifier", async () => {
+  const session = await ownerSession()
+  const created = await call("/api/ai/connections", {
+    body: { name: "Masked", slug: "codex-masked" },
+    cookie: session.cookie,
+  })
+  expect(created.status).toBe(200)
+  const connectionId = (await created.json<{ connection: { id: string } }>())
+    .connection.id
+
+  // §5.2: the management API returns the masked account, not the raw one.
+  await env.DB.prepare(
+    `UPDATE "ai_connections" SET "upstreamAccountId" = ?1 WHERE "id" = ?2`,
+  )
+    .bind("account-abcdefgh", connectionId)
+    .run()
+
+  const listed = await call("/api/ai/connections", { cookie: session.cookie })
+  expect(listed.status).toBe(200)
+  const body = await listed.json<{
+    connections: { id: string; upstreamAccount: string }[]
+  }>()
+  const connection = body.connections.find(
+    (candidate) => candidate.id === connectionId,
+  )
+  expect(connection?.upstreamAccount).toBe("ac…efgh")
+  expect(JSON.stringify(body)).not.toContain("account-abcdefgh")
+})

@@ -58,7 +58,18 @@ interface AiConnectionView {
   providerType: string
   slug: string
   updatedAt: number
-  upstreamAccountId: string | null
+  /**
+   * Design §5.2: the management API returns the masked account, never the raw
+   * upstream account identifier.
+   */
+  upstreamAccount: string
+}
+
+/** Masks the upstream account identifier for management reads (§5.2). */
+function maskUpstreamAccount(accountId: string | null): string {
+  if (accountId === null || accountId.length === 0) return "未绑定账号"
+  if (accountId.length <= 8) return "…" + accountId.slice(-2)
+  return accountId.slice(0, 2) + "…" + accountId.slice(-4)
 }
 
 function connectionView(connection: {
@@ -83,7 +94,7 @@ function connectionView(connection: {
     providerType: connection.providerType,
     slug: connection.slug,
     updatedAt: connection.updatedAt,
-    upstreamAccountId: connection.upstreamAccountId,
+    upstreamAccount: maskUpstreamAccount(connection.upstreamAccountId),
   }
 }
 
@@ -171,7 +182,7 @@ const connectionViewSchema = z
     providerType: z.string(),
     slug: z.string(),
     updatedAt: z.number(),
-    upstreamAccountId: z.string().nullable(),
+    upstreamAccount: z.string(),
   })
   .openapi("AiConnection")
 const connectionWithModelsSchema = connectionViewSchema.extend({
