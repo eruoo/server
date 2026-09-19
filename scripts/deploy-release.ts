@@ -78,12 +78,16 @@ if (
   ) ||
   !config.ratelimits?.some(
     (value: { name: string }) => value.name === "API_KEY_RATE_LIMITER",
+  ) ||
+  !config.ratelimits?.some(
+    (value: { name: string }) => value.name === "AI_RATE_LIMITER",
   )
 )
   throw new Error("Release bindings are incomplete")
 for (const [name, limit] of [
   ["AUTH_RATE_LIMITER", 10],
   ["API_KEY_RATE_LIMITER", 5],
+  ["AI_RATE_LIMITER", 60],
 ] as const)
   if (
     !config.ratelimits.some(
@@ -198,7 +202,7 @@ if (
 verifyBackupLifecycle(lifecycle)
 const requiredSecrets: string[] = config.secrets?.required ?? []
 if (
-  requiredSecrets.length !== 5 ||
+  requiredSecrets.length !== 6 ||
   requiredSecrets.some(
     (name) =>
       !latestSettings.bindings.some(
@@ -337,6 +341,7 @@ if (
 for (const [name, limit] of [
   ["AUTH_RATE_LIMITER", 10],
   ["API_KEY_RATE_LIMITER", 5],
+  ["AI_RATE_LIMITER", 60],
 ] as const)
   if (
     !activeVersion.bindings.some(

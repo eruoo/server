@@ -14,7 +14,9 @@ const namespaces = ["staging", "production"].flatMap((target) =>
     (binding: { namespace_id: string }) => binding.namespace_id,
   ),
 )
-if (namespaces.length !== 4 || new Set(namespaces).size !== 4)
+// Three limiters per remote environment (auth, API key, AI), each with its
+// own namespace: six isolated ids across staging and production.
+if (namespaces.length !== 6 || new Set(namespaces).size !== 6)
   throw new Error("Each remote rate limiter must have an isolated namespace")
 const sha = execFileSync("git", ["rev-parse", "HEAD"], {
   encoding: "utf8",

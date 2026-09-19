@@ -393,6 +393,17 @@ owner 授权收尾文档、核验首次自动调度并定点排查 §4.12 的登
 - 生成文档：五个 `/api/auth/api-key/*` 契约随档位扩展更新（`docs/openapi.json` 重新生成）；AI 接口契约仍不注册。
 - 验证：`tests/worker/ai-model-authorization.test.ts` 7 项（精确解析、重复/非法/未知拒绝、UUID 绑定与排序、双条件授权、目录过滤、slug 复用后旧授权失效、对外 ID 解析与格式化）；`tests/worker/api-key-management.test.ts` 30 项（原 28 项按新契约更新：ai 档已开放、未知档仍拒绝、跨档隔离保留；新增 AI 档创建权限构造与更新替换/保留/撤销）。`pnpm run check` 全链通过（worker 387、client 36、scripts 66、e2e 6）。未验证：真实上游（不变）；AI 路由与部署配置在 PR 7。
 
+### 4.19 2026-09-19 PR 7（进行中）：AI 调用端点与部署配置（本地实现）
+
+按本轮 owner 授权的 PR 7 切片注册 AI 调用端点并落地部署配置声明。本记录随切片推进更新：§6.1 管理端点与 §6.2 调用端点均已交付；管理界面与发布读回验证仍在进行中。
+
+- 调用端点（`src/worker/ai/invocation-routes.ts`）：`GET /api/ai/models` 只列当前 Key 被授予且仍在目录中的模型；`POST /api/ai/responses` 走单载体规则（仅 `x-api-key`，Cookie/Bearer 一律 401）、`AI_RATE_LIMITER` 粗入口限流（60 次/60 秒）、Key 校验与 owner 绑定、8 MiB/15 秒有界读体（超限 413、超时 504）、严格子集校验（422）、按目录解析模型 ID 并同时校验 `ai:invoke` 与精确模型许可（未知模型与未授权模型同样返回 403，不做目录探测）、D1 条件写入准入（满员 429 + Retry-After: 1）、随后调用 PR 5 的编排并把 `settled` 交给执行上下文。准入预算 5 秒、总 deadline 300 秒。
+- 部署配置声明：`wrangler.jsonc` 三处环境新增 `AI_RATE_LIMITER`（staging 1005 / production 1006 / local 1007，三类 limiter、两环境共 6 个互不重复 namespace），staging/production/local 的必需 Secret 增加 `AI_CREDENTIAL_KEYS`，新增 `enable_request_signal` 兼容标记；`pnpm run types:generate` 已重跑。发布脚本（`scripts/deploy-release.ts`）同步校验三类 limiter、限额与 6 个必需 Secret，测试夹具更新。`.dev.vars` 与 `.dev.vars.example` 增加本地合成 keyring（格式 `1:<base64url-32 字节>`）。
+- 生成文档：`docs/openapi.json` 随两个新契约重新生成（调用端点契约进入生成文档；管理端点契约随 §6.1 交付时加入）。
+- 管理端点（`src/worker/ai/management-routes.ts`）：§6.1 全部 12 个契约——providers、connections（GET/POST/PATCH/DELETE）、disconnect、authorizations（start/read/poll/cancel）、models/refresh、invocations 历史。读取要求 owner Session、变更要求 recent owner Session；授权会话的读取/poll/取消绑定创建它的 Session；连接视图只含身份、状态与模型快照（不含凭证与授权内部字段）；管理上游阶段预算 30 秒；连接创建/更新/断开/删除写入新增的 `ai_connection_created/updated/disconnected/deleted` 审计事件（metadata 仅 connectionId 与 providerType），授权事件经 flow 的 sink 复用既有枚举。
+- 复审修复（独立 review 一轮，approve-with-fixes）：管理变更补齐精确 Origin 与 JSON content-type 校验（SameSite 不能替代 CSRF 防护）并按 `AI_RATE_LIMITER` 计入粗入口限流；管理请求体改为 1 MiB 有界读取（413）；调用路由增加便宜的满员预检（在读取请求体之前拒绝），并把模块注释改为与真实顺序一致——模型 ID 来自请求体，因此权威 reservation 必然在读取之后，§7 的“取得名额后读体”由预检加原子写入共同满足（§7 的字面顺序在模型来自请求体的约束下不可直接实现，登记为设计澄清项）；非法模型 ID 从 503 改为不可解析（403）；`settled` 拒绝改为记录受控事件而不是逃逸为未处理拒绝；PATCH/创建的名称长度上限与存储层一致；poll 的 session-mismatch 统一为 403；生成契约中 AI 操作的请求/响应 schema 仍为骨架，登记为待办。
+- 验证：`tests/worker/ai-management-routes.test.ts` 4 项（管理路由无凭据一律 401（覆盖 7 个操作）、连接生命周期含审计集合与模型快照、精确 Origin 与 1 MiB 有界读体、输入校验与调用历史分页/游标拒绝）；`tests/worker/ai-invocation-routes.test.ts` 6 项——目录只列被授予模型、会话/Bearer/缺失载体一律 401、未知 Key 401、未授权模型 403（与未知模型同答）、非法请求体 422、流式成功（上游 mock）并提交 `succeeded` 调用记录、满员 429 + Retry-After 且既有 reservation 不被改写。`pnpm run check` 全链通过（worker 397、client 36、scripts 66、e2e 6）。未覆盖：PATCH/DELETE 连接、授权 start/read/poll/cancel 与 models/refresh 的 401 边界（已登记为待补测试）。边界测试同步：`ai-codex-authorization` 改为断言全部 /api/ai 路由无凭据时返回受控 401（不再是 404），`contract-boundaries` 的生成文档 operation 计数更新为 24（含 14 个 AI 契约）。未验证：真实上游（不变）；管理界面未交付。
+
 ## 5. 后续验证与已知限制
 
 Cloudflare 与 GitHub 接线、staging 验收及 production 首次发布、真实登录和备份已按上述记录完成。以下限制与后续范围仍保留，不能由本地测试替代：

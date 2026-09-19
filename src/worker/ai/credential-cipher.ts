@@ -52,14 +52,14 @@ function toBase64Url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
 }
 
-function fromBase64Url(value: string): Uint8Array {
+function fromBase64Url(value: string): Uint8Array<ArrayBuffer> {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/")
   const normalized = padded + "=".repeat((4 - (padded.length % 4)) % 4)
   const binary = atob(normalized)
   return Uint8Array.from(binary, (character) => character.charCodeAt(0))
 }
 
-function tryFromBase64Url(value: string): Uint8Array | null {
+function tryFromBase64Url(value: string): Uint8Array<ArrayBuffer> | null {
   try {
     return fromBase64Url(value)
   } catch {
@@ -73,7 +73,9 @@ export interface AiCredentialKeyring {
   keys: ReadonlyMap<number, CryptoKey>
 }
 
-async function importAiCipherKey(keyBytes: Uint8Array): Promise<CryptoKey> {
+async function importAiCipherKey(
+  keyBytes: Uint8Array<ArrayBuffer>,
+): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, [
     "decrypt",
     "encrypt",
@@ -142,8 +144,12 @@ interface AiCipherEnvelope {
   v: number
 }
 
-function additionalDataBytes(aad: AiCipherAdditionalData): Uint8Array {
-  return new TextEncoder().encode(
+function additionalDataBytes(
+  aad: AiCipherAdditionalData,
+): Uint8Array<ArrayBuffer> {
+  // Copy into an explicitly allocated ArrayBuffer: the two tsconfig programs
+  // disagree about TextEncoder's generic, and WebCrypto needs BufferSource.
+  const encoded = new TextEncoder().encode(
     [
       "eruoo:ai-credential:v1",
       aad.environment,
@@ -152,6 +158,9 @@ function additionalDataBytes(aad: AiCipherAdditionalData): Uint8Array {
       aad.purpose,
     ].join("\0"),
   )
+  const bytes = new Uint8Array(encoded.byteLength)
+  bytes.set(encoded)
+  return bytes
 }
 
 /** Encrypts one plaintext under the keyring's current key with a fresh 96-bit IV. */
@@ -160,7 +169,9 @@ export async function encryptAiSecret(
   plaintext: string,
   aad: AiCipherAdditionalData,
 ): Promise<string> {
-  const iv = crypto.getRandomValues(new Uint8Array(AI_CIPHER_IV_BYTES))
+  const iv: Uint8Array<ArrayBuffer> = crypto.getRandomValues(
+    new Uint8Array(AI_CIPHER_IV_BYTES),
+  )
   const ciphertext = await crypto.subtle.encrypt(
     {
       additionalData: additionalDataBytes(aad),

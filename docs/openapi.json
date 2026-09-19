@@ -56,6 +56,10 @@
               "ai_authorization_cancelled",
               "ai_authorization_completed",
               "ai_authorization_started",
+              "ai_connection_created",
+              "ai_connection_deleted",
+              "ai_connection_disconnected",
+              "ai_connection_updated",
               "api_key_created",
               "api_key_expired",
               "api_key_rejected",
@@ -787,6 +791,10 @@
                 "ai_authorization_cancelled",
                 "ai_authorization_completed",
                 "ai_authorization_started",
+                "ai_connection_created",
+                "ai_connection_deleted",
+                "ai_connection_disconnected",
+                "ai_connection_updated",
                 "api_key_created",
                 "api_key_expired",
                 "api_key_rejected",
@@ -1367,6 +1375,468 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiKeyPluginError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/providers": {
+      "get": {
+        "operationId": "listAiProviders",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Provider definitions"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/connections": {
+      "get": {
+        "operationId": "listAiConnections",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connections with model snapshots"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAiConnection",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Created connection"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/connections/{id}": {
+      "patch": {
+        "operationId": "updateAiConnection",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated connection"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAiConnection",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted connection"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/connections/{id}/disconnect": {
+      "post": {
+        "operationId": "disconnectAiConnection",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Disconnected connection"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/connections/{id}/authorizations": {
+      "post": {
+        "operationId": "startAiAuthorization",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Started device authorization"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/authorizations/{id}": {
+      "get": {
+        "operationId": "readAiAuthorization",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorization status"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "cancelAiAuthorization",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancelled authorization"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/authorizations/{id}/poll": {
+      "post": {
+        "operationId": "pollAiAuthorization",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One bounded poll"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/connections/{id}/models/refresh": {
+      "post": {
+        "operationId": "refreshAiModels",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Refreshed model snapshot"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/invocations": {
+      "get": {
+        "operationId": "listAiInvocations",
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Invocation history"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/models": {
+      "get": {
+        "operationId": "listAiModels",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Models this API key may invoke",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "models": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "capabilities": {},
+                          "displayName": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "id": {
+                            "type": "string"
+                          },
+                          "discoveredAt": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "displayName",
+                          "id",
+                          "discoveredAt"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "models"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/responses": {
+      "post": {
+        "operationId": "createAiResponse",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Responses subset as an SSE stream or a JSON terminal"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }

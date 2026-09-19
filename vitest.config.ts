@@ -25,6 +25,8 @@ const syntheticTestBindings = {
   GITHUB_CLIENT_SECRET: "synthetic-github-client-secret",
   AUDIT_IP_HASH_SECRET: "synthetic-audit-secret-only-for-tests-32-characters",
   OWNER_GITHUB_ID: "50254496",
+  // 合成 AI 凭据 keyring（格式 1:<base64url-32 字节>），仅用于 worker 测试。
+  AI_CREDENTIAL_KEYS: "1:bNd71_-qByTrDg415O_DhkcUJ-_PaG5wxIpQ3607Cos",
 } as const
 
 export default defineConfig({

@@ -31,6 +31,7 @@ const secrets = [
   "GITHUB_CLIENT_SECRET",
   "AUDIT_IP_HASH_SECRET",
   "D1_EXPORT_API_TOKEN",
+  "AI_CREDENTIAL_KEYS",
 ]
 const stagingConfig = {
   name: "eruoo-server-staging",
@@ -64,6 +65,7 @@ const stagingConfig = {
   ratelimits: [
     { name: "AUTH_RATE_LIMITER", simple: { limit: 10, period: 60 } },
     { name: "API_KEY_RATE_LIMITER", simple: { limit: 5, period: 60 } },
+    { name: "AI_RATE_LIMITER", simple: { limit: 60, period: 60 } },
   ],
   triggers: { crons: ["0 19 * * *", "0 20 * * *"] },
   secrets: { required: secrets },

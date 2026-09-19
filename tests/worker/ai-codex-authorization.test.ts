@@ -1204,23 +1204,47 @@ describe("model snapshot reset on reauthorization", () => {
 })
 
 describe("AI formal entries stay closed", () => {
-  it("rejects every /api/ai route in the production root assembly", async () => {
+  it("refuses every /api/ai route without credentials", async () => {
+    // The AI surface is registered: an unauthenticated request is rejected
+    // with a controlled Problem, never a 404 or an unhandled error.
     for (const [method, path] of [
       ["GET", "/api/ai/providers"],
       ["GET", "/api/ai/connections"],
       ["POST", "/api/ai/connections"],
+      ["GET", "/api/ai/invocations"],
+      [
+        "POST",
+        "/api/ai/connections/11111111-1111-1111-1111-111111111111/disconnect",
+      ],
       ["GET", "/api/ai/models"],
       ["POST", "/api/ai/responses"],
-      ["GET", "/api/ai/invocations"],
     ] as const) {
       const context = createExecutionContext()
       const response = await worker.fetch(
-        new Request(`http://local.test${path}`, { method }),
+        new Request(`http://local.test${path}`, {
+          // Mutations check the exact Origin and JSON content type first
+          // (the /api/auth/* precedent), so carry both to reach the
+          // authentication boundary this test asserts.
+          ...(method === "GET"
+            ? {}
+            : {
+                body: "{}",
+                headers: {
+                  "content-type": "application/json",
+                  origin: "http://local.test",
+                },
+              }),
+          method,
+        }),
         env,
         context,
       )
       await waitOnExecutionContext(context)
-      expect(response.status, `${method} ${path}`).toBe(404)
+      expect(response.status, `${method} ${path}`).toBe(401)
+      expect(
+        response.headers.get("content-type"),
+        `${method} ${path}`,
+      ).toContain("application/problem+json")
     }
   })
 })
