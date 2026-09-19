@@ -168,19 +168,19 @@ Better Auth 是 Session Cookie、JWE、登录 ceremony 和持久 Session 的唯�
 
 使用独立的 `@better-auth/api-key` 插件，`enableSessionForAPIKeys=false`，只有 `x-api-key` 入口。哈希存 D1，原始值仅在创建响应返回一次。
 
-| 项       | 规则                                                                                                                                                                                                       |
-| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 用途     | 一把 key 对应一个脚本/调用方；不用于登录、内部 Cron 或凭证管理                                                                                                                                             |
-| 期限     | 默认 180 天，最长 365 天，禁止永久 key；SPA 默认创建 180 天                                                                                                                                                |
-| 权限     | 首期服务端固定 `status:read`；HTTP 不接受 permissions，禁止 wildcard 和权限更新                                                                                                                            |
-| 限流     | 每把 key 60/60 秒，同步凭证计数；入口粗限流见运维规格                                                                                                                                                      |
-| 到期提示 | 剩余有效期在 (0, 14 天] 且最终为 2xx 时，返回 UTC RFC3339 `API-Key-Expires-At`                                                                                                                             |
-| mutation | 创建、命名更新、撤销均要求 recent owner Session；不能通过 key 管理另一把 key                                                                                                                               |
-| 网关     | 应用网关校验 owner/recent-auth、Origin、凭证载体、字段与配置档后调用插件服务端 API；`create`/`update` 不携带浏览器 headers/request，`userId` 只取已验证 owner；`list`/`get`/`delete` 保留插件 Session 校验 |
-| 配置档   | 当前只开放 default（`purpose` 省略或 `status`）；`configId` 缺省显式补 `default`，未知值拒绝；`create` 不接受 `configId`；`get` 的 `keyId` 映射插件 query `id`；key 不能切换配置档                         |
-| 删除重试 | 以资源归属校验后的不存在作为幂等完成；跨 owner 或跨档现存资源拒绝；归属预查后发生并发撤销且确认资源确实不存在时同样幂等完成，不能借此忽略身份失败或依赖异常                                                |
-| 网关限流 | 五个管理 operation 由网关按已登记 operation 与可信 IP 消费 100/60 秒持久桶，与原生 handler 共享桶键；429 带 Retry-After，不写拒绝审计，计数依赖异常返回 503                                                |
-| 歧义输入 | mutation 原始 JSON 的顶层重复字段（含转义后同名）与重复 query 参数按 400 拒绝，不执行 Key 变更                                                                                                             |
+| 项       | 规则                                                                                                                                                                                                                                  |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 用途     | 一把 key 对应一个脚本/调用方；不用于登录、内部 Cron 或凭证管理                                                                                                                                                                        |
+| 期限     | 默认 180 天，最长 365 天，禁止永久 key；SPA 默认创建 180 天                                                                                                                                                                           |
+| 权限     | 首期服务端固定 `status:read`（default 档）与 `ai: [invoke, models:read]`（ai 档，2026-09-19 开放）；HTTP 不接受 permissions，禁止 wildcard；ai 档的模型许可由服务端按 `modelIds` 构造，default 档不开放权限更新                       |
+| 限流     | 每把 key 60/60 秒，同步凭证计数；入口粗限流见运维规格                                                                                                                                                                                 |
+| 到期提示 | 剩余有效期在 (0, 14 天] 且最终为 2xx 时，返回 UTC RFC3339 `API-Key-Expires-At`                                                                                                                                                        |
+| mutation | 创建、命名更新、撤销均要求 recent owner Session；不能通过 key 管理另一把 key                                                                                                                                                          |
+| 网关     | 应用网关校验 owner/recent-auth、Origin、凭证载体、字段与配置档后调用插件服务端 API；`create`/`update` 不携带浏览器 headers/request，`userId` 只取已验证 owner；`list`/`get`/`delete` 保留插件 Session 校验                            |
+| 配置档   | 开放 default（`purpose` 省略或 `status`）与 ai（`purpose: ai` + 必填 `modelIds`，2026-09-19 开放）；`configId` 缺省显式补 `default`，未知值拒绝；`create` 不接受 `configId`；`get` 的 `keyId` 映射插件 query `id`；key 不能切换配置档 |
+| 删除重试 | 以资源归属校验后的不存在作为幂等完成；跨 owner 或跨档现存资源拒绝；归属预查后发生并发撤销且确认资源确实不存在时同样幂等完成，不能借此忽略身份失败或依赖异常                                                                           |
+| 网关限流 | 五个管理 operation 由网关按已登记 operation 与可信 IP 消费 100/60 秒持久桶，与原生 handler 共享桶键；429 带 Retry-After，不写拒绝审计，计数依赖异常返回 503                                                                           |
+| 歧义输入 | mutation 原始 JSON 的顶层重复字段（含转义后同名）与重复 query 参数按 400 拒绝，不执行 Key 变更                                                                                                                                        |
 
 依赖失败必须抛出可区分的服务错误，不允许插件把数据库异常吞成 invalid key。旧 patch 只在目标版本的对应行为测试仍失败时移植；不把整个旧补丁集默认带回。
 
@@ -253,14 +253,14 @@ Vue 3 + `<script setup lang="ts">` + Vue Router。一个 Session 控制器管理
 
 ## 7. 数据与迁移
 
-| 数据                                                                                           | 所有者                                                  | 变更边界                                                                                                                                                                         |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| user/account/session/verification、Passkey、API Key、OAuth token/consent/client/resource、JWKS | Better Auth 与固定版本插件                              | 原生 adapter；库 schema 生成结果做 drift 校验，应用不复制模型实现                                                                                                                |
-| OAuth family tombstone                                                                         | OAuth 撤销模块                                          | 与插件 token 状态通过 D1 原子 batch 和前后检查协作                                                                                                                               |
-| security_audit_events                                                                          | 审计模块                                                | 应用 schema；append + 有界清理                                                                                                                                                   |
-| maintenance_lease、database_backup_health                                                      | 维护模块                                                | 只供备份协调与终态，不建设通用任务表                                                                                                                                             |
-| rateLimit                                                                                      | Better Auth 限流                                        | 只允许命中已登记 operation；不作为业务使用台账                                                                                                                                   |
-| ai_connections、ai_authorization_sessions、ai_models、ai_invocations                           | AI 存储模块（[AI 规格 §8](ai-service.md#8-存储与恢复)） | 应用 schema（0002 追加迁移）；凭证版本条件写、原子授权完成、有界刷新 claim、并发 reservation 与每日有界清理；表存在不代表 AI 服务已开放，AI HTTP、Key 配置档与上游连接器尚未注册 |
+| 数据                                                                                           | 所有者                                                  | 变更边界                                                                                                                                                                                                            |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| user/account/session/verification、Passkey、API Key、OAuth token/consent/client/resource、JWKS | Better Auth 与固定版本插件                              | 原生 adapter；库 schema 生成结果做 drift 校验，应用不复制模型实现                                                                                                                                                   |
+| OAuth family tombstone                                                                         | OAuth 撤销模块                                          | 与插件 token 状态通过 D1 原子 batch 和前后检查协作                                                                                                                                                                  |
+| security_audit_events                                                                          | 审计模块                                                | 应用 schema；append + 有界清理                                                                                                                                                                                      |
+| maintenance_lease、database_backup_health                                                      | 维护模块                                                | 只供备份协调与终态，不建设通用任务表                                                                                                                                                                                |
+| rateLimit                                                                                      | Better Auth 限流                                        | 只允许命中已登记 operation；不作为业务使用台账                                                                                                                                                                      |
+| ai_connections、ai_authorization_sessions、ai_models、ai_invocations                           | AI 存储模块（[AI 规格 §8](ai-service.md#8-存储与恢复)） | 应用 schema（0002 追加迁移）；凭证版本条件写、原子授权完成、有界刷新 claim、并发 reservation 与每日有界清理；表存在不代表 AI 服务已开放，AI HTTP 路由尚未注册；Key 配置档与上游连接器已实施（本地合成验证，未部署） |
 
 应用字段用 epoch milliseconds；库表保留 adapter 日期表示，只在边界转换。API 时间单位不得混用；OAuth NumericDate 按协议。所有查询参数化，资源查询限定 owner，分页有上限，已有索引优先复用。
 

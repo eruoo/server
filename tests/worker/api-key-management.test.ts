@@ -83,6 +83,38 @@ async function createDefaultKey(
   }>()
 }
 
+/** Catalog rows for gateway resolution tests (creation paths are covered elsewhere). */
+async function seedAiCatalog(): Promise<void> {
+  const now = Date.now()
+  await env.DB.batch([
+    // The gateway suite's beforeEach does not own the AI tables; seeding is
+    // idempotent so each test starts from the same catalog.
+    env.DB.prepare(
+      `DELETE FROM "ai_connections" WHERE "id"='11111111-1111-1111-1111-111111111111'`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO "ai_connections" ("id","slug","name","providerType","enabled","authorizationStatus","upstreamAccountId","credentialVersion","credentialCiphertext","credentialExpiresAt","refreshClaimId","refreshClaimExpiresAt","createdAt","updatedAt")
+       VALUES (?,?,?,?,1,'connected','account-main',1,'ciphertext',?,NULL,NULL,?,?)`,
+    ).bind(
+      "11111111-1111-1111-1111-111111111111",
+      "codex-main",
+      "Main",
+      "openai-codex",
+      now + 3_600_000,
+      now,
+      now,
+    ),
+    env.DB.prepare(
+      `INSERT INTO "ai_models" ("connectionId","upstreamModelId","displayName","capabilities","snapshotCredentialVersion","discoveredAt")
+       VALUES ('11111111-1111-1111-1111-111111111111','gpt-test','GPT Test',NULL,1,?)`,
+    ).bind(now),
+    env.DB.prepare(
+      `INSERT INTO "ai_models" ("connectionId","upstreamModelId","displayName","capabilities","snapshotCredentialVersion","discoveredAt")
+       VALUES ('11111111-1111-1111-1111-111111111111','openai/gpt-other','GPT Other',NULL,1,?)`,
+    ).bind(now),
+  ])
+}
+
 async function insertSyntheticKey(options: {
   configId: string
   referenceId: string
@@ -277,17 +309,28 @@ it("rejects unopened fields, profiles and ambiguous parameters", async () => {
       { body: { name: "x", modelIds: ["codex/gpt"] } },
     ],
     ["/api/auth/api-key/create", { body: { name: "x", purpose: "ai" } }],
+    [
+      "/api/auth/api-key/create",
+      {
+        body: {
+          modelIds: ["missing-connection/gpt"],
+          name: "x",
+          purpose: "ai",
+        },
+      },
+    ],
     ["/api/auth/api-key/create", { body: { name: "x", purpose: "unknown" } }],
-    ["/api/auth/api-key/list?configId=ai", undefined],
     ["/api/auth/api-key/list?configId=unknown", undefined],
-    [`/api/auth/api-key/get?keyId=${created.id}&configId=ai`, undefined],
     [
       "/api/auth/api-key/update",
-      { body: { keyId: created.id, configId: "ai", name: "x" } },
-    ],
-    [
-      "/api/auth/api-key/delete",
-      { body: { keyId: created.id, configId: "ai" } },
+      {
+        body: {
+          configId: "default",
+          keyId: created.id,
+          modelIds: ["codex-main/gpt-test"],
+          name: "x",
+        },
+      },
     ],
     [
       "/api/auth/api-key/update",
@@ -385,6 +428,8 @@ it("keeps synthetic keys in another profile invisible and untouchable", async ()
       .bind(aiKeyId)
       .first("name"),
   ).toBe("synthetic ai")
+  // The ai profile is open in this slice, so the same-profile delete now
+  // succeeds; the default profile above still cannot see or touch the key.
   expect(
     (
       await call("/api/auth/api-key/delete", {
@@ -392,7 +437,12 @@ it("keeps synthetic keys in another profile invisible and untouchable", async ()
         body: { keyId: aiKeyId, configId: "ai" },
       })
     ).status,
-  ).toBe(422)
+  ).toBe(200)
+  expect(
+    await env.DB.prepare("SELECT name FROM apikey WHERE id=?")
+      .bind(aiKeyId)
+      .first("name"),
+  ).toBeNull()
 })
 
 it("keeps managing keys that already exist in the default profile", async () => {
@@ -916,6 +966,104 @@ it("reports a revocation confirmation database outage as a dependency failure", 
   expect(body.status).toBe(503)
   expect(body.requestId).toBeTruthy()
   expect(body.detail).not.toContain("synthetic")
+})
+
+it("creates an ai profile key with server-built model permissions", async () => {
+  await seedAiCatalog()
+  const session = await ownerSession()
+  const response = await call("/api/auth/api-key/create", {
+    cookie: session.cookie,
+    body: {
+      modelIds: ["codex-main/gpt-test", "codex-main/openai/gpt-other"],
+      name: "ai key",
+      purpose: "ai",
+    },
+  })
+  expect(response.status).toBe(200)
+  const created = await response.json<{ configId: string; id: string }>()
+  expect(created.configId).toBe("ai")
+  const stored = await env.DB.prepare(
+    "SELECT permissions FROM apikey WHERE id=?",
+  )
+    .bind(created.id)
+    .first<{ permissions: string }>()
+  expect(JSON.parse(stored?.permissions ?? "{}")).toEqual({
+    ai: ["invoke", "models:read"],
+    "ai-model:11111111-1111-1111-1111-111111111111": [
+      "gpt-test",
+      "openai/gpt-other",
+    ],
+  })
+  // The ai key is invisible to the default profile and vice versa.
+  const defaultList = await call("/api/auth/api-key/list?configId=default", {
+    cookie: session.cookie,
+  })
+  const defaultBody = await defaultList.json<{ apiKeys: { id: string }[] }>()
+  expect(defaultBody.apiKeys.map((key) => key.id)).not.toContain(created.id)
+  const aiList = await call("/api/auth/api-key/list?configId=ai", {
+    cookie: session.cookie,
+  })
+  const aiBody = await aiList.json<{ apiKeys: { id: string }[] }>()
+  expect(aiBody.apiKeys.map((key) => key.id)).toContain(created.id)
+})
+
+it("replaces and revokes ai model grants through update", async () => {
+  await seedAiCatalog()
+  const session = await ownerSession()
+  const created = await call("/api/auth/api-key/create", {
+    cookie: session.cookie,
+    body: { modelIds: ["codex-main/gpt-test"], name: "ai key", purpose: "ai" },
+  }).then((response) => response.json<{ id: string }>())
+
+  const replaced = await call("/api/auth/api-key/update", {
+    cookie: session.cookie,
+    body: {
+      configId: "ai",
+      keyId: created.id,
+      modelIds: ["codex-main/openai/gpt-other"],
+      name: "ai key renamed",
+    },
+  })
+  expect(replaced.status).toBe(200)
+  const afterReplace = await env.DB.prepare(
+    "SELECT name, permissions FROM apikey WHERE id=?",
+  )
+    .bind(created.id)
+    .first<{ name: string; permissions: string }>()
+  expect(afterReplace?.name).toBe("ai key renamed")
+  expect(JSON.parse(afterReplace?.permissions ?? "{}")).toEqual({
+    ai: ["invoke", "models:read"],
+    "ai-model:11111111-1111-1111-1111-111111111111": ["openai/gpt-other"],
+  })
+
+  // An omitted selection keeps the grant; an empty one revokes every model.
+  const kept = await call("/api/auth/api-key/update", {
+    cookie: session.cookie,
+    body: { configId: "ai", keyId: created.id, name: "ai key renamed again" },
+  })
+  expect(kept.status).toBe(200)
+  const afterKeep = await env.DB.prepare(
+    "SELECT permissions FROM apikey WHERE id=?",
+  )
+    .bind(created.id)
+    .first<{ permissions: string }>()
+  expect(JSON.parse(afterKeep?.permissions ?? "{}")).toMatchObject({
+    "ai-model:11111111-1111-1111-1111-111111111111": ["openai/gpt-other"],
+  })
+
+  const revoked = await call("/api/auth/api-key/update", {
+    cookie: session.cookie,
+    body: { configId: "ai", keyId: created.id, modelIds: [], name: "ai key" },
+  })
+  expect(revoked.status).toBe(200)
+  const afterRevoke = await env.DB.prepare(
+    "SELECT permissions FROM apikey WHERE id=?",
+  )
+    .bind(created.id)
+    .first<{ permissions: string }>()
+  expect(JSON.parse(afterRevoke?.permissions ?? "{}")).toEqual({
+    ai: ["invoke", "models:read"],
+  })
 })
 
 it("documents both the application Problem and the real plugin error", async () => {
