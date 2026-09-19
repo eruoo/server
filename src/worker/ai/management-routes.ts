@@ -7,8 +7,9 @@ import {
   isAiServerIdentifier,
 } from "../../shared/ai"
 import { scheduleAuditEvent } from "../audit"
+import { limitAuthEntry } from "../auth/entry-limit"
 import { readOwnerSession } from "../auth/session"
-import { errorResponse, problem } from "../http/response"
+import { boundedRequest, errorResponse, problem } from "../http/response"
 import type { AppBindings, OwnerSession } from "../http/types"
 import {
   cancelCodexAuthorization,
@@ -99,16 +100,50 @@ function stageBudget(now: number) {
   }
 }
 
+/**
+ * Reads one bounded JSON body. Management entries keep the general 1 MiB
+ * rule; only the invocation route carries the 8 MiB exception.
+ */
 async function readJson(
   c: AppContext,
-): Promise<{ ok: true; body: unknown } | { ok: false; response: Response }> {
+): Promise<
+  | { ok: true; body: unknown }
+  | { ok: false; response: ReturnType<typeof problem> }
+> {
   const requestId = c.get("requestId")
+  const request = await boundedRequest(c.req.raw)
+  if (!request)
+    return { ok: false, response: problem("payload-too-large", requestId) }
   try {
-    const raw = await c.req.raw.clone().text()
+    const raw = await request.text()
     return { body: JSON.parse(raw) as unknown, ok: true }
   } catch {
     return { ok: false, response: problem("invalid-request", requestId) }
   }
+}
+
+/**
+ * Browser-cookie mutations require the exact Origin (SameSite cannot replace
+ * CSRF protection) and the JSON content type, mirroring the /api/auth/*
+ * rules for the only carrier these routes accept.
+ */
+function rejectMutationRequest(
+  c: AppContext,
+): ReturnType<typeof problem> | undefined {
+  const requestId = c.get("requestId")
+  if (c.req.raw.headers.get("origin") !== c.env.APP_ORIGIN) {
+    return problem("permission-denied", requestId)
+  }
+  if (
+    c.req.raw.headers
+      .get("content-type")
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase() !== "application/json"
+  ) {
+    return problem("unsupported-media-type", requestId)
+  }
+  return undefined
 }
 
 const connectionIdParam = z.object({ id: z.string() })
@@ -118,10 +153,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
   const owner = async (
     c: AppContext,
     recent = false,
-  ): Promise<OwnerSession | Response> => {
-    const session = await readOwnerSession(c, recent)
-    return session instanceof Response ? session : session
-  }
+  ): Promise<OwnerSession | Response> => readOwnerSession(c, recent)
 
   app.openapi(
     createRoute({
@@ -198,12 +230,20 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
+      const rejected = rejectMutationRequest(c)
+      if (rejected) return rejected
+      const limited = await limitAuthEntry(
+        c,
+        `${c.req.method} ${new URL(c.req.url).pathname}`,
+        c.env.AI_RATE_LIMITER,
+      )
+      if (limited) return limited
       const session = await owner(c, true)
       if (session instanceof Response) return session
       const body = await readJson(c)
       if (!body.ok) return body.response
       const parsed = z
-        .object({ name: z.string().min(1), slug: z.string().min(1) })
+        .object({ name: z.string().min(1).max(200), slug: z.string().min(1) })
         .strict()
         .safeParse(body.body)
       if (!parsed.success) return problem("validation-failed", requestId)
@@ -249,6 +289,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
+      const rejected = rejectMutationRequest(c)
+      if (rejected) return rejected
+      const limited = await limitAuthEntry(
+        c,
+        `${c.req.method} ${new URL(c.req.url).pathname}`,
+        c.env.AI_RATE_LIMITER,
+      )
+      if (limited) return limited
       const session = await owner(c, true)
       if (session instanceof Response) return session
       const id = c.req.param("id")
@@ -258,7 +306,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       const parsed = z
         .object({
           enabled: z.boolean().optional(),
-          name: z.string().min(1).optional(),
+          name: z.string().min(1).max(200).optional(),
         })
         .strict()
         .safeParse(body.body)
@@ -314,6 +362,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
+      const rejected = rejectMutationRequest(c)
+      if (rejected) return rejected
+      const limited = await limitAuthEntry(
+        c,
+        `${c.req.method} ${new URL(c.req.url).pathname}`,
+        c.env.AI_RATE_LIMITER,
+      )
+      if (limited) return limited
       const session = await owner(c, true)
       if (session instanceof Response) return session
       const id = c.req.param("id")
@@ -351,6 +407,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
+      const rejected = rejectMutationRequest(c)
+      if (rejected) return rejected
+      const limited = await limitAuthEntry(
+        c,
+        `${c.req.method} ${new URL(c.req.url).pathname}`,
+        c.env.AI_RATE_LIMITER,
+      )
+      if (limited) return limited
       const session = await owner(c, true)
       if (session instanceof Response) return session
       const id = c.req.param("id")
@@ -391,6 +455,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
+      const rejected = rejectMutationRequest(c)
+      if (rejected) return rejected
+      const limited = await limitAuthEntry(
+        c,
+        `${c.req.method} ${new URL(c.req.url).pathname}`,
+        c.env.AI_RATE_LIMITER,
+      )
+      if (limited) return limited
       const session = await owner(c, true)
       if (session instanceof Response) return session
       const id = c.req.param("id")
@@ -488,6 +560,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
+      const rejected = rejectMutationRequest(c)
+      if (rejected) return rejected
+      const limited = await limitAuthEntry(
+        c,
+        `${c.req.method} ${new URL(c.req.url).pathname}`,
+        c.env.AI_RATE_LIMITER,
+      )
+      if (limited) return limited
       const session = await owner(c, true)
       if (session instanceof Response) return session
       const id = c.req.param("id")
@@ -511,6 +591,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
         case "authorization-not-found":
           return problem("not-found", requestId)
         case "session-mismatch":
+          return problem("permission-denied", requestId)
         case "owner-session-revoked":
         case "recent-authentication-required":
           return problem("recent-authentication-required", requestId)
@@ -541,6 +622,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
+      const rejected = rejectMutationRequest(c)
+      if (rejected) return rejected
+      const limited = await limitAuthEntry(
+        c,
+        `${c.req.method} ${new URL(c.req.url).pathname}`,
+        c.env.AI_RATE_LIMITER,
+      )
+      if (limited) return limited
       const session = await owner(c, true)
       if (session instanceof Response) return session
       const id = c.req.param("id")
@@ -583,6 +672,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
+      const rejected = rejectMutationRequest(c)
+      if (rejected) return rejected
+      const limited = await limitAuthEntry(
+        c,
+        `${c.req.method} ${new URL(c.req.url).pathname}`,
+        c.env.AI_RATE_LIMITER,
+      )
+      if (limited) return limited
       const session = await owner(c, true)
       if (session instanceof Response) return session
       const id = c.req.param("id")

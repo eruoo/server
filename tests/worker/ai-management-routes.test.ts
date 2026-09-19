@@ -14,6 +14,7 @@ async function call(
   options: {
     body?: unknown
     cookie?: string
+    headers?: Record<string, string>
     method?: string
   } = {},
 ) {
@@ -28,6 +29,7 @@ async function call(
         "content-type": "application/json",
         origin: env.APP_ORIGIN,
         ...(options.cookie ? { cookie: options.cookie } : {}),
+        ...options.headers,
       },
       ...(payload === undefined ? {} : { body: payload }),
     }),
@@ -166,6 +168,40 @@ describe("AI management routes", () => {
       ].sort(),
     )
     expect(audits.results.every((row) => row.outcome === "success")).toBe(true)
+  })
+
+  it("requires the exact Origin and a bounded body on mutations", async () => {
+    const session = await ownerSession()
+    const context = createExecutionContext()
+    const noOrigin = await worker.fetch(
+      new Request(`${env.APP_ORIGIN}/api/ai/connections`, {
+        body: JSON.stringify({ name: "Main", slug: "codex-main" }),
+        headers: {
+          "cf-connecting-ip": `ai-management-${++sequence}`,
+          "content-type": "application/json",
+          cookie: session.cookie,
+        },
+        method: "POST",
+      }),
+      env,
+      context,
+    )
+    await waitOnExecutionContext(context)
+    expect(noOrigin.status).toBe(403)
+
+    const crossOrigin = await call("/api/ai/connections", {
+      body: { name: "Main", slug: "codex-main" },
+      cookie: session.cookie,
+      headers: { origin: "https://sibling.eruoo.me" },
+    })
+    expect(crossOrigin.status).toBe(403)
+
+    // The general 1 MiB management bound applies to this entry.
+    const oversized = await call("/api/ai/connections", {
+      body: { name: "x".repeat(1_048_576), slug: "codex-main" },
+      cookie: session.cookie,
+    })
+    expect(oversized.status).toBe(413)
   })
 
   it("validates inputs and lists the invocation history", async () => {

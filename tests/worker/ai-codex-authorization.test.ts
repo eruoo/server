@@ -1221,7 +1221,21 @@ describe("AI formal entries stay closed", () => {
     ] as const) {
       const context = createExecutionContext()
       const response = await worker.fetch(
-        new Request(`http://local.test${path}`, { method }),
+        new Request(`http://local.test${path}`, {
+          // Mutations check the exact Origin and JSON content type first
+          // (the /api/auth/* precedent), so carry both to reach the
+          // authentication boundary this test asserts.
+          ...(method === "GET"
+            ? {}
+            : {
+                body: "{}",
+                headers: {
+                  "content-type": "application/json",
+                  origin: "http://local.test",
+                },
+              }),
+          method,
+        }),
         env,
         context,
       )

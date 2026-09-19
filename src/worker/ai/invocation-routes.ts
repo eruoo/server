@@ -1,6 +1,10 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi"
 
-import { AI_INVOCATION_TOTAL_DEADLINE_MS } from "../../shared/ai"
+import {
+  AI_INVOCATION_TOTAL_DEADLINE_MS,
+  AI_MAX_IN_FLIGHT_INVOCATIONS,
+  isAiConnectionSlug,
+} from "../../shared/ai"
 import { parseAiExternalModelId } from "../../shared/api-key"
 import { scheduleAuditEvent } from "../audit"
 import { inspectCredentialCarriers } from "../auth/carriers"
@@ -24,9 +28,13 @@ import { invokeCodexResponses } from "./responses-transport"
  *
  * Both endpoints authenticate with the `x-api-key` carrier only: the AI
  * profile's `ai` operations and the per-connection model grants decide what
- * a key may list and invoke. The request body is read only after the key was
- * verified and the invocation slot was reserved, so an unauthenticated or
- * over-quota request never parses a large JSON body.
+ * a key may list and invoke. No body byte is read before the key is verified
+ * and owner-bound, and a cheap in-flight pre-check rejects an obviously full
+ * service before the body is read. The authoritative reservation still has
+ * to follow the read, because the model ID that identifies the slot lives in
+ * the body; §7's "read the body after securing the slot" is therefore
+ * satisfied by the pre-check plus the atomic insert, not by the insert
+ * alone.
  */
 
 /** The exact request-body budget for the invocation route (§7). */
@@ -282,6 +290,28 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
         return problem("request-timeout", requestId)
       }
 
+      // Cheap pre-admission: a full service rejects before the body read.
+      // The authoritative conditional insert below still decides.
+      let inFlight
+      try {
+        inFlight = await c.env.DB.prepare(
+          `SELECT COUNT(*) AS "inFlight" FROM "ai_invocations"
+           WHERE "status" = 'reserved' AND "leaseExpiresAt" > ?1`,
+        )
+          .bind(Date.now())
+          .first<{ inFlight: number }>()
+      } catch {
+        return problem("service-unavailable", requestId)
+      }
+      if (
+        inFlight === null ||
+        inFlight.inFlight >= AI_MAX_IN_FLIGHT_INVOCATIONS
+      ) {
+        const response = problem("ai-concurrency-exceeded", requestId)
+        response.headers.set("retry-after", "1")
+        return response
+      }
+
       const parsed = await readBoundedBody(c)
       if (!parsed.ok) return parsed.response
       const validated = validateResponsesRequest(parsed.body)
@@ -294,7 +324,8 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
       const parts = parseAiExternalModelId(validated.value.model)
       let connectionId: string | null = null
       let upstreamModelId: string | null = null
-      if (parts !== null) {
+      // A malformed slug is an unresolvable model, not a service failure.
+      if (parts !== null && isAiConnectionSlug(parts.connectionSlug)) {
         try {
           const connection = await getAiConnectionBySlug(
             c.env.DB,
@@ -361,8 +392,18 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
         upstreamModelId,
       })
       // The streaming path settles after the stream closes; the caller keeps
-      // it alive so the invocation outcome is always committed.
-      c.executionCtx.waitUntil(delivery.settled)
+      // it alive so the invocation outcome is always committed. A commit that
+      // cannot land rejects, and the row stays reserved for lease recovery,
+      // so the rejection is reported instead of escaping.
+      c.executionCtx.waitUntil(
+        delivery.settled.catch((error: unknown) => {
+          console.warn({
+            event: "ai_invocation_settle_failed",
+            message: error instanceof Error ? error.message : "unknown",
+            requestId,
+          })
+        }),
+      )
       return delivery.response
     },
   )
