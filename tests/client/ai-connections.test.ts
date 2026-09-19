@@ -18,7 +18,10 @@ vi.mock("../../src/client/features/ai/ai-connections", async () => {
     typeof import("../../src/client/features/ai/ai-connections")
   >("../../src/client/features/ai/ai-connections")
   return {
+    ...actual,
     cancelAiAuthorization: vi.fn<typeof actual.cancelAiAuthorization>(),
+    getAiAuthorization: vi.fn<typeof actual.getAiAuthorization>(),
+    listAiProviders: vi.fn<typeof actual.listAiProviders>(),
     createAiConnection: vi.fn<typeof actual.createAiConnection>(),
     deleteAiConnection: vi.fn<typeof actual.deleteAiConnection>(),
     disconnectAiConnection: vi.fn<typeof actual.disconnectAiConnection>(),

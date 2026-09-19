@@ -6,6 +6,7 @@ import {
   sessionKey,
 } from "../../src/client/composables/session"
 import {
+  describeAiInvocationError,
   listAiInvocations,
   readUsageTotalTokens,
 } from "../../src/client/features/ai/ai-invocations"
@@ -95,4 +96,17 @@ it("reads only well-formed usage totals", () => {
   expect(readUsageTotalTokens(JSON.stringify({ total_tokens: "7" }))).toBeNull()
   expect(readUsageTotalTokens("not json")).toBeNull()
   expect(readUsageTotalTokens(null)).toBeNull()
+})
+
+it("labels the controlled errors the operator must tell apart", () => {
+  expect(describeAiInvocationError("ai-upstream-quota-exceeded")).toBe(
+    "额度暂不可用（ai-upstream-quota-exceeded）",
+  )
+  expect(describeAiInvocationError("ai-reauthorization-required")).toBe(
+    "需要重新授权（ai-reauthorization-required）",
+  )
+  expect(describeAiInvocationError("something-new")).toBe(
+    "错误码 something-new",
+  )
+  expect(describeAiInvocationError(null)).toBe("无受控错误码")
 })

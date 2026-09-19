@@ -43,6 +43,25 @@ export async function listAiInvocations(
   })
 }
 
+/**
+ * Design §9: the history tells apart the controlled errors an operator has to
+ * act on differently — a quota failure is temporary, a reauthorization is not.
+ */
+export const AI_INVOCATION_ERROR_LABELS: Readonly<Record<string, string>> = {
+  "ai-upstream-quota-exceeded": "额度暂不可用",
+  "ai-reauthorization-required": "需要重新授权",
+  "ai-upstream-unavailable": "上游暂不可用",
+  "ai-upstream-protocol-error": "上游协议错误",
+}
+
+export function describeAiInvocationError(errorCode: string | null): string {
+  if (errorCode === null) return "无受控错误码"
+  const label = AI_INVOCATION_ERROR_LABELS[errorCode]
+  return label === undefined
+    ? `错误码 ${errorCode}`
+    : `${label}（${errorCode}）`
+}
+
 /** The recorded usage payload's total token count, when it is present. */
 export function readUsageTotalTokens(usage: string | null): number | null {
   if (usage === null) return null

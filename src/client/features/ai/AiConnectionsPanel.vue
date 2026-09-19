@@ -4,14 +4,25 @@ import { computed, onMounted, onUnmounted, shallowRef } from "vue"
 import ConfirmAction from "../../components/security/ConfirmAction.vue"
 import { useManagedList } from "../../composables/managed-list"
 import { useSession } from "../../composables/session"
-import type { AiAuthorizationStart } from "./ai-connections"
+import type {
+  AiAuthorizationStart,
+  AiProviderDefinition,
+} from "./ai-connections"
 import {
+  AI_AUTHORIZATION_STATE_LABELS,
   cancelAiAuthorization,
   createAiConnection,
   deleteAiConnection,
+  describeAiModelCapabilities,
+  describeAiProtocols,
   disconnectAiConnection,
+  getAiAuthorization,
   listAiConnections,
+  listAiProviders,
+  maskAiAccount,
   pollAiAuthorization,
+  readAiConnectionState,
+  readAiPollDelayMs,
   refreshAiModels,
   renameAiConnection,
   setAiConnectionEnabled,
@@ -25,8 +36,68 @@ const name = shallowRef("")
 const authorization = shallowRef<AiAuthorizationStart | null>(null)
 const authorizationConnection = shallowRef<string | null>(null)
 const authorizationMessage = shallowRef("")
+const provider = shallowRef<AiProviderDefinition | null>(null)
+const discoveryFailure = shallowRef<Record<string, string>>({})
+/** Connection ids whose catalog has no successful snapshot yet (§5.3). */
+const catalogEmpty = shallowRef<Record<string, boolean>>({})
 let generation = 0
 let disposed = false
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * Design §5.1: a pending session can be resumed within its lifetime after the
+ * page was closed, so the id survives a reload in this tab's session storage.
+ */
+const PENDING_AUTHORIZATION_KEY = "ai-pending-authorization"
+
+interface PendingAuthorization {
+  authorizationId: string
+  connectionId: string
+}
+
+function rememberPendingAuthorization(pending: PendingAuthorization) {
+  try {
+    sessionStorage.setItem(PENDING_AUTHORIZATION_KEY, JSON.stringify(pending))
+  } catch {
+    // Storage can be unavailable; polling still works for this page view.
+  }
+}
+
+function readPendingAuthorization(): PendingAuthorization | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_AUTHORIZATION_KEY)
+    if (raw === null) return null
+    const parsed = JSON.parse(raw) as Partial<PendingAuthorization>
+    return typeof parsed.authorizationId === "string" &&
+      typeof parsed.connectionId === "string"
+      ? {
+          authorizationId: parsed.authorizationId,
+          connectionId: parsed.connectionId,
+        }
+      : null
+  } catch {
+    return null
+  }
+}
+
+function forgetPendingAuthorization() {
+  try {
+    sessionStorage.removeItem(PENDING_AUTHORIZATION_KEY)
+  } catch {
+    // Nothing to clear.
+  }
+}
+
+function stopPolling() {
+  if (pollTimer !== null) clearTimeout(pollTimer)
+  pollTimer = null
+}
+
+function schedulePoll(delayMs: number) {
+  stopPolling()
+  if (disposed) return
+  pollTimer = setTimeout(() => void poll(), delayMs)
+}
 
 const authorizationExpiry = computed(() =>
   authorization.value
@@ -36,9 +107,24 @@ const authorizationExpiry = computed(() =>
 
 function forgetAuthorization() {
   generation++
+  stopPolling()
+  forgetPendingAuthorization()
   authorization.value = null
   authorizationConnection.value = null
   authorizationMessage.value = ""
+}
+
+function stateLabel(connection: {
+  authorizationStatus: string
+  enabled: boolean
+}): string {
+  return AI_AUTHORIZATION_STATE_LABELS[readAiConnectionState(connection)]
+}
+
+function protocolLabel(): string {
+  return provider.value === null
+    ? "Responses"
+    : describeAiProtocols(provider.value.responsesStyle)
 }
 
 async function create() {
@@ -61,15 +147,37 @@ async function beginAuthorization(id: string) {
     authorization.value = started
     authorizationConnection.value = id
     authorizationMessage.value = "请在官方页面输入下方代码完成授权。"
+    rememberPendingAuthorization({
+      authorizationId: started.authorizationId,
+      connectionId: id,
+    })
+    schedulePoll(readAiPollDelayMs(started, Date.now()))
   })
 }
 
 async function poll() {
+  stopPolling()
   const started = authorization.value
   if (!started) return
   const ownGeneration = generation
   await list.mutate(async () => {
-    const result = await pollAiAuthorization(started.authorizationId)
+    let result: Awaited<ReturnType<typeof pollAiAuthorization>>
+    try {
+      result = await pollAiAuthorization(started.authorizationId)
+    } catch (error) {
+      if (disposed || generation !== ownGeneration) return
+      // Design §6.1: after a client timeout the persisted session is read back
+      // instead of replaying the exchange.
+      const persisted = await readPersistedAuthorization(
+        started.authorizationId,
+      )
+      if (persisted === null) {
+        authorizationMessage.value = "授权状态读取失败，请稍后重试。"
+        schedulePoll(5_000)
+        return
+      }
+      result = persisted
+    }
     if (disposed || generation !== ownGeneration) return
     switch (result.status) {
       case "completed": {
@@ -83,10 +191,12 @@ async function poll() {
         return
       }
       case "pending":
-        authorizationMessage.value = "尚未完成，请稍后再次检查。"
+        authorizationMessage.value = "尚未完成，正在按上游节奏自动检查。"
+        schedulePoll(readAiPollDelayMs(result, Date.now()))
         return
       case "poll-too-early":
-        authorizationMessage.value = "检查过于频繁，请稍后再试。"
+        authorizationMessage.value = "检查过于频繁，稍后自动重试。"
+        schedulePoll(readAiPollDelayMs(result, Date.now()))
         return
       case "expired":
         authorizationMessage.value = "授权会话已过期，请重新开始。"
@@ -108,9 +218,26 @@ async function cancelAuthorization() {
 }
 
 async function refresh(id: string) {
-  await list.mutate(async () => {
-    await refreshAiModels(id)
+  const success = await list.mutate(async () => {
+    try {
+      const modelCount = await refreshAiModels(id)
+      catalogEmpty.value = { ...catalogEmpty.value, [id]: modelCount === 0 }
+      const remaining = { ...discoveryFailure.value }
+      delete remaining[id]
+      discoveryFailure.value = remaining
+    } catch (error) {
+      // §5.3: a failed update keeps the last snapshot and shows the failure.
+      discoveryFailure.value = {
+        ...discoveryFailure.value,
+        [id]:
+          error instanceof Error && error.message.length > 0
+            ? error.message
+            : "模型发现失败",
+      }
+      throw error
+    }
   })
+  return success
 }
 
 async function disconnect(id: string) {
@@ -127,10 +254,58 @@ async function remove(id: string) {
   })
 }
 
-onMounted(list.load)
+async function readPersistedAuthorization(
+  authorizationId: string,
+): Promise<Awaited<ReturnType<typeof getAiAuthorization>> | null> {
+  try {
+    return await getAiAuthorization(
+      authorizationId,
+      new AbortController().signal,
+    )
+  } catch {
+    return null
+  }
+}
+
+/** Resumes a pending session after the page was closed (§5.1). */
+async function resumePendingAuthorization() {
+  const pending = readPendingAuthorization()
+  if (pending === null) return
+  const status = await readPersistedAuthorization(pending.authorizationId)
+  if (status === null) {
+    forgetPendingAuthorization()
+    return
+  }
+  if (status.status !== "pending") {
+    forgetPendingAuthorization()
+    if (status.status === "completed") await list.load()
+    return
+  }
+  authorizationConnection.value = pending.connectionId
+  authorizationMessage.value = "已恢复进行中的授权会话，继续自动检查。"
+  authorization.value = {
+    authorizationId: pending.authorizationId,
+    expiresAt: status.expiresAt ?? Date.now(),
+    intervalMs: 5_000,
+    userCode: "",
+    verificationUrl: provider.value?.deviceVerificationUrl ?? "",
+  }
+  schedulePoll(readAiPollDelayMs(status, Date.now()))
+}
+
+onMounted(async () => {
+  await list.load()
+  try {
+    provider.value =
+      (await listAiProviders(new AbortController().signal))[0] ?? null
+  } catch {
+    provider.value = null
+  }
+  await resumePendingAuthorization()
+})
 onUnmounted(() => {
   disposed = true
-  forgetAuthorization()
+  stopPolling()
 })
 </script>
 <template>
@@ -173,14 +348,26 @@ onUnmounted(() => {
     <ul class="credential-list">
       <li v-for="connection in list.items.value" :key="connection.id">
         <h2>{{ connection.name }} · {{ connection.slug }}</h2>
-        <p>
-          {{ connection.authorizationStatus }} ·
+        <p data-testid="ai-connection-state">
+          <strong>{{ stateLabel(connection) }}</strong> ·
+          {{ connection.providerType }} · 账号
+          {{ maskAiAccount(connection.upstreamAccountId) }} ·
           {{ connection.enabled ? "已启用" : "已停用" }} ·
           {{
             connection.credentialExpiresAt
               ? `凭证至 ${new Date(connection.credentialExpiresAt).toLocaleString()}`
               : "无有效凭证"
           }}
+        </p>
+        <p
+          v-if="discoveryFailure[connection.id]"
+          class="notice"
+          role="status"
+          data-testid="ai-discovery-failure"
+        >
+          模型发现失败：{{
+            discoveryFailure[connection.id]
+          }}（仍显示上一次成功快照）
         </p>
         <label
           >名称<input
@@ -196,18 +383,30 @@ onUnmounted(() => {
               )
             "
         /></label>
-        <p>
-          模型 {{ connection.models.length }} 个<template
-            v-if="connection.models.length > 0"
-            >：{{
-              connection.models
-                .map((model) => model.id)
-                .slice(0, 5)
-                .join("、")
-            }}<template v-if="connection.models.length > 5"
-              >…</template
-            ></template
-          >
+        <section
+          v-if="connection.models.length > 0"
+          class="notice"
+          aria-label="模型目录"
+          data-testid="ai-model-catalog"
+        >
+          <p>
+            模型目录（{{ connection.models.length }} 个 · 协议
+            {{ protocolLabel() }}）
+          </p>
+          <ul>
+            <li v-for="model in connection.models" :key="model.id">
+              <strong>{{ model.id }}</strong>
+              <template v-if="model.displayName">
+                · {{ model.displayName }}</template
+              >
+              <br />
+              能力：{{ describeAiModelCapabilities(model.capabilities) }}<br />
+              最近发现 {{ new Date(model.discoveredAt).toLocaleString() }}
+            </li>
+          </ul>
+        </section>
+        <p v-else-if="stateLabel(connection) === '连接已授权'" role="status">
+          尚未成功发现模型，目录为空；请点击“刷新模型”。
         </p>
         <button
           class="pressable"

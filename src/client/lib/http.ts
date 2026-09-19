@@ -8,20 +8,30 @@ export class ApiError extends Error {
   }
 }
 
+export interface DeadlineFetchInit extends RequestInit {
+  /**
+   * Overrides the method-derived budget. AI management operations that reach
+   * the upstream run on their own stage budget (design §6.1: 35 s in the SPA),
+   * so they cannot use the generic 30 s mutation budget.
+   */
+  deadlineMs?: number
+}
+
 export async function deadlineFetch(
   input: RequestInfo | URL,
-  init?: RequestInit,
+  init?: DeadlineFetchInit,
 ): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(
     () => controller.abort(new Error("请求超时，请重试")),
-    ["POST", "PUT", "PATCH", "DELETE"].includes(
-      (
-        init?.method ?? (input instanceof Request ? input.method : "GET")
-      ).toUpperCase(),
-    )
-      ? 30_000
-      : 10_000,
+    init?.deadlineMs ??
+      (["POST", "PUT", "PATCH", "DELETE"].includes(
+        (
+          init?.method ?? (input instanceof Request ? input.method : "GET")
+        ).toUpperCase(),
+      )
+        ? 30_000
+        : 10_000),
   )
   const signals = [
     controller.signal,
@@ -66,7 +76,7 @@ export async function deadlineFetch(
 
 export async function requestJson<T>(
   path: string,
-  init?: RequestInit,
+  init?: DeadlineFetchInit,
 ): Promise<T> {
   const response = await deadlineFetch(path, init)
   const body = await response.json()
