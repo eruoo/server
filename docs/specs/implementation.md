@@ -395,12 +395,13 @@ owner 授权收尾文档、核验首次自动调度并定点排查 §4.12 的登
 
 ### 4.19 2026-09-19 PR 7（进行中）：AI 调用端点与部署配置（本地实现）
 
-按本轮 owner 授权的 PR 7 切片注册 AI 调用端点并落地部署配置声明。本记录随切片推进更新：§6.2 已交付；§6.1 管理端点、管理界面与发布读回验证仍在进行中。
+按本轮 owner 授权的 PR 7 切片注册 AI 调用端点并落地部署配置声明。本记录随切片推进更新：§6.1 管理端点与 §6.2 调用端点均已交付；管理界面与发布读回验证仍在进行中。
 
 - 调用端点（`src/worker/ai/invocation-routes.ts`）：`GET /api/ai/models` 只列当前 Key 被授予且仍在目录中的模型；`POST /api/ai/responses` 走单载体规则（仅 `x-api-key`，Cookie/Bearer 一律 401）、`AI_RATE_LIMITER` 粗入口限流（60 次/60 秒）、Key 校验与 owner 绑定、8 MiB/15 秒有界读体（超限 413、超时 504）、严格子集校验（422）、按目录解析模型 ID 并同时校验 `ai:invoke` 与精确模型许可（未知模型与未授权模型同样返回 403，不做目录探测）、D1 条件写入准入（满员 429 + Retry-After: 1）、随后调用 PR 5 的编排并把 `settled` 交给执行上下文。准入预算 5 秒、总 deadline 300 秒。
 - 部署配置声明：`wrangler.jsonc` 三处环境新增 `AI_RATE_LIMITER`（staging 1005 / production 1006 / local 1007，三类 limiter、两环境共 6 个互不重复 namespace），staging/production/local 的必需 Secret 增加 `AI_CREDENTIAL_KEYS`，新增 `enable_request_signal` 兼容标记；`pnpm run types:generate` 已重跑。发布脚本（`scripts/deploy-release.ts`）同步校验三类 limiter、限额与 6 个必需 Secret，测试夹具更新。`.dev.vars` 与 `.dev.vars.example` 增加本地合成 keyring（格式 `1:<base64url-32 字节>`）。
 - 生成文档：`docs/openapi.json` 随两个新契约重新生成（调用端点契约进入生成文档；管理端点契约随 §6.1 交付时加入）。
-- 验证：`tests/worker/ai-invocation-routes.test.ts` 6 项——目录只列被授予模型、会话/Bearer/缺失载体一律 401、未知 Key 401、未授权模型 403（与未知模型同答）、非法请求体 422、流式成功（上游 mock）并提交 `succeeded` 调用记录、满员 429 + Retry-After 且既有 reservation 不被改写。`pnpm run check` 全链通过（worker 393、client 36、scripts 66、e2e 6）。未验证：真实上游（不变）；§6.1 管理端点与管理界面未交付。
+- 管理端点（`src/worker/ai/management-routes.ts`）：§6.1 全部 12 个契约——providers、connections（GET/POST/PATCH/DELETE）、disconnect、authorizations（start/read/poll/cancel）、models/refresh、invocations 历史。读取要求 owner Session、变更要求 recent owner Session；授权会话的读取/poll/取消绑定创建它的 Session；连接视图只含身份、状态与模型快照（不含凭证与授权内部字段）；管理上游阶段预算 30 秒；连接创建/更新/断开/删除写入新增的 `ai_connection_created/updated/disconnected/deleted` 审计事件（metadata 仅 connectionId 与 providerType），授权事件经 flow 的 sink 复用既有枚举。
+- 验证：`tests/worker/ai-management-routes.test.ts` 3 项（全部管理路由无凭据一律 401、连接生命周期含审计集合与模型快照、输入校验与调用历史分页/游标拒绝）；`tests/worker/ai-invocation-routes.test.ts` 6 项——目录只列被授予模型、会话/Bearer/缺失载体一律 401、未知 Key 401、未授权模型 403（与未知模型同答）、非法请求体 422、流式成功（上游 mock）并提交 `succeeded` 调用记录、满员 429 + Retry-After 且既有 reservation 不被改写。`pnpm run check` 全链通过（worker 396、client 36、scripts 66、e2e 6）。边界测试同步：`ai-codex-authorization` 改为断言全部 /api/ai 路由无凭据时返回受控 401（不再是 404），`contract-boundaries` 的生成文档 operation 计数更新为 24（含 14 个 AI 契约）。未验证：真实上游（不变）；管理界面未交付。
 
 ## 5. 后续验证与已知限制
 
