@@ -4,6 +4,7 @@ import {
   cancelAiAuthorization,
   deleteAiConnection,
   disconnectAiConnection,
+  getAiAuthorization,
   pollAiAuthorization,
   refreshAiModels,
   startAiAuthorization,
@@ -81,4 +82,47 @@ it("sends the key name with a grant update", async () => {
     name: "ai probe",
   })
   expect(calls[0].contentType).toBe("application/json")
+})
+
+it("gives the upstream-touching AI calls the 35 s budget from §6.1", async () => {
+  // A request that only settles when its signal aborts: the abort time is the
+  // observable proof of which budget the call actually used.
+  const abortTimes: number[] = []
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const startedAt = Date.now()
+      return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          abortTimes.push(Date.now() - startedAt)
+          reject(new Error("aborted"))
+        })
+      })
+    }),
+  )
+
+  for (const call of [
+    () => refreshAiModels("11111111-1111-1111-1111-111111111111"),
+    () => startAiAuthorization("11111111-1111-1111-1111-111111111111"),
+    () => pollAiAuthorization("22222222-2222-2222-2222-222222222222"),
+    () =>
+      getAiAuthorization(
+        "22222222-2222-2222-2222-222222222222",
+        new AbortController().signal,
+      ),
+  ]) {
+    vi.useFakeTimers()
+    const pending = call().catch(() => undefined)
+    await vi.advanceTimersByTimeAsync(29_000)
+    expect(abortTimes).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(6_000)
+    expect(abortTimes).toHaveLength(1)
+    // Strictly later than the generic 30 s mutation budget: the AI calls must
+    // not silently fall back to it.
+    expect(abortTimes[0]).toBeGreaterThan(30_000)
+    expect(abortTimes[0]).toBeLessThanOrEqual(35_000)
+    abortTimes.length = 0
+    vi.useRealTimers()
+    await pending
+  }
 })

@@ -804,11 +804,8 @@
           "updatedAt": {
             "type": "number"
           },
-          "upstreamAccountId": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "upstreamAccount": {
+            "type": "string"
           }
         },
         "required": [
@@ -821,7 +818,7 @@
           "providerType",
           "slug",
           "updatedAt",
-          "upstreamAccountId"
+          "upstreamAccount"
         ]
       }
     },

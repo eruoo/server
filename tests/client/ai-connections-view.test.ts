@@ -4,7 +4,6 @@ import {
   AI_AUTHORIZATION_STATE_LABELS,
   describeAiModelCapabilities,
   describeAiProtocols,
-  maskAiAccount,
   readAiConnectionState,
   readAiModelCapabilities,
   readAiPollDelayMs,
@@ -33,13 +32,6 @@ it("maps the durable status onto the four states design §9 requires", () => {
   expect(AI_AUTHORIZATION_STATE_LABELS["reauthentication-required"]).toBe(
     "需要重新授权",
   )
-})
-
-it("masks the upstream account instead of showing the raw identifier", () => {
-  expect(maskAiAccount("account-main")).toBe("ac…main")
-  expect(maskAiAccount(null)).toBe("未绑定账号")
-  expect(maskAiAccount("")).toBe("未绑定账号")
-  expect(maskAiAccount("abc")).toBe("…abc")
 })
 
 it("reads the stored capability payload defensively", () => {

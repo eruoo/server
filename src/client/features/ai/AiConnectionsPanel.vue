@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, shallowRef } from "vue"
 import ConfirmAction from "../../components/security/ConfirmAction.vue"
 import { useManagedList } from "../../composables/managed-list"
 import { useSession } from "../../composables/session"
+import { ApiError } from "../../lib/http"
 import type {
   AiAuthorizationStart,
   AiProviderDefinition,
@@ -19,7 +20,6 @@ import {
   getAiAuthorization,
   listAiConnections,
   listAiProviders,
-  maskAiAccount,
   pollAiAuthorization,
   readAiConnectionState,
   readAiPollDelayMs,
@@ -37,9 +37,18 @@ const authorization = shallowRef<AiAuthorizationStart | null>(null)
 const authorizationConnection = shallowRef<string | null>(null)
 const authorizationMessage = shallowRef("")
 const provider = shallowRef<AiProviderDefinition | null>(null)
+/** Guards against overlapping polls without sharing the list's busy gate. */
+const pollInFlight = shallowRef(false)
+let pollFailures = 0
+/** Bounded retries: a dead session must not be polled forever (§5.1). */
+const AI_POLL_FAILURE_LIMIT = 5
+
+function isTerminalApiError(error: unknown): boolean {
+  return (
+    error instanceof ApiError && (error.status === 403 || error.status === 404)
+  )
+}
 const discoveryFailure = shallowRef<Record<string, string>>({})
-/** Connection ids whose catalog has no successful snapshot yet (§5.3). */
-const catalogEmpty = shallowRef<Record<string, boolean>>({})
 let generation = 0
 let disposed = false
 let pollTimer: ReturnType<typeof setTimeout> | null = null
@@ -122,8 +131,9 @@ function stateLabel(connection: {
 }
 
 function protocolLabel(): string {
+  // Never assert a protocol the provider definition did not confirm.
   return provider.value === null
-    ? "Responses"
+    ? "协议未确认"
     : describeAiProtocols(provider.value.responsesStyle)
 }
 
@@ -155,15 +165,22 @@ async function beginAuthorization(id: string) {
   })
 }
 
+/**
+ * Design §5.1: polling is scheduled by the server and must not depend on the
+ * list controller's busy gate — a poll that fires while the list is refreshing
+ * would otherwise be dropped and the loop would die silently.
+ */
 async function poll() {
   stopPolling()
   const started = authorization.value
-  if (!started) return
+  if (!started || disposed || pollInFlight.value) return
+  pollInFlight.value = true
   const ownGeneration = generation
-  await list.mutate(async () => {
+  try {
     let result: Awaited<ReturnType<typeof pollAiAuthorization>>
     try {
       result = await pollAiAuthorization(started.authorizationId)
+      pollFailures = 0
     } catch (error) {
       if (disposed || generation !== ownGeneration) return
       // Design §6.1: after a client timeout the persisted session is read back
@@ -171,11 +188,22 @@ async function poll() {
       const persisted = await readPersistedAuthorization(
         started.authorizationId,
       )
+      if (disposed || generation !== ownGeneration) return
       if (persisted === null) {
-        authorizationMessage.value = "授权状态读取失败，请稍后重试。"
+        pollFailures += 1
+        if (
+          pollFailures >= AI_POLL_FAILURE_LIMIT ||
+          isTerminalApiError(error)
+        ) {
+          forgetAuthorization()
+          authorizationMessage.value = "授权会话已不可用，请重新开始授权。"
+          return
+        }
+        authorizationMessage.value = "授权状态读取失败，稍后自动重试。"
         schedulePoll(5_000)
         return
       }
+      pollFailures = 0
       result = persisted
     }
     if (disposed || generation !== ownGeneration) return
@@ -185,9 +213,7 @@ async function poll() {
         // authorization commits, then reloads the connection snapshot.
         const connectionId = authorizationConnection.value
         forgetAuthorization()
-        if (connectionId !== null) await refreshAiModels(connectionId)
-        await list.load()
-        if (!disposed) authorizationMessage.value = "授权完成，模型目录已刷新。"
+        if (connectionId !== null) await refreshAfterAuthorization(connectionId)
         return
       }
       case "pending":
@@ -202,10 +228,25 @@ async function poll() {
         authorizationMessage.value = "授权会话已过期，请重新开始。"
         forgetAuthorization()
         return
+      case "cancelled":
+        authorizationMessage.value = "授权已取消，请重新开始。"
+        forgetAuthorization()
+        return
+      case "connection-changed":
+        authorizationMessage.value = "连接已变化，请重新开始授权。"
+        forgetAuthorization()
+        return
+      case "poll-claim-held":
+        // Transient: another tab holds the exchange claim (§5.1).
+        authorizationMessage.value = "另一个标签页正在检查，稍后自动重试。"
+        schedulePoll(readAiPollDelayMs(result, Date.now()))
+        return
       default:
         authorizationMessage.value = "授权未完成，请重试或取消后重新开始。"
     }
-  })
+  } finally {
+    pollInFlight.value = false
+  }
 }
 
 async function cancelAuthorization() {
@@ -217,11 +258,38 @@ async function cancelAuthorization() {
   })
 }
 
+/**
+ * §5.3: a failed update keeps the last snapshot and shows the failure. A
+ * successful authorization whose catalog refresh fails must not read as an
+ * authorization failure, so this path records the discovery error instead of
+ * rethrowing into the shared list message.
+ */
+async function refreshAfterAuthorization(id: string) {
+  let failure: string | null = null
+  try {
+    await refreshAiModels(id)
+  } catch (error) {
+    failure =
+      error instanceof Error && error.message.length > 0
+        ? error.message
+        : "模型发现失败"
+  }
+  const remaining = { ...discoveryFailure.value }
+  if (failure === null) delete remaining[id]
+  else remaining[id] = failure
+  discoveryFailure.value = remaining
+  await list.load()
+  if (disposed) return
+  authorizationMessage.value =
+    failure === null
+      ? "授权完成，模型目录已刷新。"
+      : `授权完成，但模型目录刷新失败：${failure}`
+}
+
 async function refresh(id: string) {
   const success = await list.mutate(async () => {
     try {
-      const modelCount = await refreshAiModels(id)
-      catalogEmpty.value = { ...catalogEmpty.value, [id]: modelCount === 0 }
+      await refreshAiModels(id)
       const remaining = { ...discoveryFailure.value }
       delete remaining[id]
       discoveryFailure.value = remaining
@@ -351,7 +419,7 @@ onUnmounted(() => {
         <p data-testid="ai-connection-state">
           <strong>{{ stateLabel(connection) }}</strong> ·
           {{ connection.providerType }} · 账号
-          {{ maskAiAccount(connection.upstreamAccountId) }} ·
+          {{ connection.upstreamAccount }} ·
           {{ connection.enabled ? "已启用" : "已停用" }} ·
           {{
             connection.credentialExpiresAt
@@ -405,8 +473,9 @@ onUnmounted(() => {
             </li>
           </ul>
         </section>
-        <p v-else-if="stateLabel(connection) === '连接已授权'" role="status">
-          尚未成功发现模型，目录为空；请点击“刷新模型”。
+        <p v-else role="status" data-testid="ai-catalog-empty">
+          目录为空：可能是尚未成功发现模型，或上游本次返回了 0
+          个模型。在确认之前不声明模型可用。
         </p>
         <button
           class="pressable"
@@ -479,8 +548,14 @@ onUnmounted(() => {
       >
         取消授权
       </button>
-      <p role="status">{{ authorizationMessage }}</p>
     </section>
+    <p
+      v-if="authorizationMessage"
+      role="status"
+      data-testid="ai-authorization-message"
+    >
+      {{ authorizationMessage }}
+    </p>
     <button class="pressable" :disabled="list.busy.value" @click="list.load">
       刷新列表
     </button>

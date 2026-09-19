@@ -26,7 +26,8 @@ export interface AiConnection {
   providerType: string
   slug: string
   updatedAt: number
-  upstreamAccountId: string | null
+  /** Already masked by the server (§5.2). */
+  upstreamAccount: string
 }
 
 export interface AiProviderDefinition {
@@ -79,16 +80,6 @@ export function readAiConnectionState(
     default:
       return "never-authorized"
   }
-}
-
-/**
- * Design §9 asks for the masked account, not the upstream account id: the
- * full identifier is an implementation detail of the connection.
- */
-export function maskAiAccount(accountId: string | null): string {
-  if (accountId === null || accountId.length === 0) return "未绑定账号"
-  if (accountId.length <= 4) return "…" + accountId
-  return accountId.slice(0, 2) + "…" + accountId.slice(-4)
 }
 
 export interface AiModelCapabilities {
@@ -253,7 +244,11 @@ export async function deleteAiConnection(id: string): Promise<void> {
 export async function refreshAiModels(id: string): Promise<number> {
   const body = await requestJson<{ modelCount: number }>(
     `/api/ai/connections/${id}/models/refresh`,
-    { headers: jsonHeaders, method: "POST" },
+    {
+      deadlineMs: AI_MANAGEMENT_DEADLINE_MS,
+      headers: jsonHeaders,
+      method: "POST",
+    },
   )
   return body.modelCount
 }

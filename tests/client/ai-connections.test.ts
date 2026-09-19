@@ -47,7 +47,7 @@ const connection = {
   providerType: "openai-codex",
   slug: "codex-main",
   updatedAt: 1,
-  upstreamAccountId: "account-main",
+  upstreamAccount: "ac…main",
 }
 
 function mountPanel() {

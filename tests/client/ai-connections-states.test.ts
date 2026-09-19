@@ -14,6 +14,7 @@ import {
   startAiAuthorization,
 } from "../../src/client/features/ai/ai-connections"
 import AiConnectionsPanel from "../../src/client/features/ai/AiConnectionsPanel.vue"
+import { ApiError } from "../../src/client/lib/http"
 
 vi.mock("../../src/client/features/ai/ai-connections", async () => {
   const actual = await vi.importActual<
@@ -58,7 +59,7 @@ const baseConnection = {
   providerType: "openai-codex",
   slug: "codex-main",
   updatedAt: 1,
-  upstreamAccountId: "account-main",
+  upstreamAccount: "ac…main",
 }
 
 function mountPanel() {
@@ -81,6 +82,22 @@ afterEach(() => {
   vi.useRealTimers()
   sessionStorage.clear()
 })
+
+const startedAuthorization = {
+  authorizationId: "22222222-2222-2222-2222-222222222222",
+  expiresAt: Date.now() + 900_000,
+  intervalMs: 5_000,
+  userCode: "ABCD-EFGH",
+  verificationUrl: "https://auth.openai.com/codex/device",
+}
+
+function defer<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((settle) => {
+    resolve = settle
+  })
+  return { promise, resolve }
+}
 
 it("renders the model catalog with protocol, capabilities and discovery time", async () => {
   vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
@@ -254,4 +271,168 @@ it("does not resume an authorization the server no longer holds pending", async 
   await vi.advanceTimersByTimeAsync(30_000)
   expect(vi.mocked(pollAiAuthorization)).not.toHaveBeenCalled()
   expect(sessionStorage.getItem("ai-pending-authorization")).toBeNull()
+})
+
+it("keeps polling when the timer fires while the list is still refreshing", async () => {
+  vi.useFakeTimers()
+  // The list refresh stays in flight well past the poll interval, which is the
+  // window where a poll gated on the shared busy flag would be dropped.
+  const slowList = defer<never[]>()
+  vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+  vi.mocked(startAiAuthorization).mockResolvedValue(startedAuthorization)
+  vi.mocked(pollAiAuthorization).mockResolvedValue({ status: "pending" })
+
+  const wrapper = mountPanel()
+  await flushPromises()
+  const authorize = wrapper
+    .findAll("button")
+    .find((button) => button.text().includes("开始设备授权"))
+  await authorize?.trigger("click")
+  await flushPromises()
+
+  // A manual refresh holds the list busy across the next scheduled poll.
+  vi.mocked(listAiConnections).mockReturnValue(slowList.promise as never)
+  const refresh = wrapper
+    .findAll("button")
+    .find((button) => button.text().includes("刷新列表"))
+  void refresh?.trigger("click")
+  await flushPromises()
+
+  await vi.advanceTimersByTimeAsync(5_000)
+  await flushPromises()
+  expect(vi.mocked(pollAiAuthorization)).toHaveBeenCalledTimes(1)
+
+  // And the loop keeps re-arming after that poll.
+  await vi.advanceTimersByTimeAsync(5_000)
+  await flushPromises()
+  expect(vi.mocked(pollAiAuthorization)).toHaveBeenCalledTimes(2)
+  slowList.resolve([] as never)
+})
+
+it("refreshes the catalog after a completed authorization and reports a refresh failure", async () => {
+  vi.useFakeTimers()
+  vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+  vi.mocked(startAiAuthorization).mockResolvedValue(startedAuthorization)
+  vi.mocked(pollAiAuthorization).mockResolvedValue({ status: "completed" })
+  vi.mocked(refreshAiModels).mockRejectedValue(new Error("上游暂不可用"))
+
+  const wrapper = mountPanel()
+  await flushPromises()
+  const authorize = wrapper
+    .findAll("button")
+    .find((button) => button.text().includes("开始设备授权"))
+  await authorize?.trigger("click")
+  await flushPromises()
+  await vi.advanceTimersByTimeAsync(5_000)
+  await flushPromises()
+
+  // §5.1 step 8: the client issues its own catalog refresh after completion.
+  expect(vi.mocked(refreshAiModels)).toHaveBeenCalledWith(baseConnection.id)
+  // §5.3: the failure is shown as a discovery failure, not as an auth failure.
+  expect(wrapper.get('[data-testid="ai-discovery-failure"]').text()).toContain(
+    "模型发现失败",
+  )
+  const message = wrapper.get('[data-testid="ai-authorization-message"]').text()
+  expect(message).toContain("授权完成")
+  expect(message).toContain("模型目录刷新失败")
+})
+
+it("reads the persisted session back when the poll request fails", async () => {
+  vi.useFakeTimers()
+  vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+  vi.mocked(startAiAuthorization).mockResolvedValue(startedAuthorization)
+  vi.mocked(pollAiAuthorization).mockRejectedValue(
+    new Error("请求超时，请重试"),
+  )
+  vi.mocked(getAiAuthorization).mockResolvedValue({ status: "pending" })
+
+  const wrapper = mountPanel()
+  await flushPromises()
+  const authorize = wrapper
+    .findAll("button")
+    .find((button) => button.text().includes("开始设备授权"))
+  await authorize?.trigger("click")
+  await flushPromises()
+  await vi.advanceTimersByTimeAsync(5_000)
+  await flushPromises()
+
+  // §6.1: a failed poll reads the persisted state instead of replaying.
+  expect(vi.mocked(getAiAuthorization)).toHaveBeenCalledWith(
+    "22222222-2222-2222-2222-222222222222",
+    expect.anything(),
+  )
+  expect(wrapper.text()).toContain("尚未完成")
+})
+
+it("stops retrying once a poll and its read-back are terminally rejected", async () => {
+  vi.useFakeTimers()
+  vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+  vi.mocked(startAiAuthorization).mockResolvedValue(startedAuthorization)
+  vi.mocked(pollAiAuthorization).mockRejectedValue(
+    new ApiError(404, "not-found", "授权会话不存在"),
+  )
+  vi.mocked(getAiAuthorization).mockRejectedValue(
+    new ApiError(404, "not-found", "授权会话不存在"),
+  )
+
+  const wrapper = mountPanel()
+  await flushPromises()
+  const authorize = wrapper
+    .findAll("button")
+    .find((button) => button.text().includes("开始设备授权"))
+  await authorize?.trigger("click")
+  await flushPromises()
+  await vi.advanceTimersByTimeAsync(5_000)
+  await flushPromises()
+
+  expect(wrapper.text()).toContain("授权会话已不可用")
+  expect(sessionStorage.getItem("ai-pending-authorization")).toBeNull()
+  const calls = vi.mocked(pollAiAuthorization).mock.calls.length
+  await vi.advanceTimersByTimeAsync(60_000)
+  expect(vi.mocked(pollAiAuthorization).mock.calls.length).toBe(calls)
+})
+
+it("clears the session when the server reports a terminal poll status", async () => {
+  vi.useFakeTimers()
+  vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+  vi.mocked(startAiAuthorization).mockResolvedValue(startedAuthorization)
+  vi.mocked(pollAiAuthorization).mockResolvedValue({ status: "cancelled" })
+
+  const wrapper = mountPanel()
+  await flushPromises()
+  const authorize = wrapper
+    .findAll("button")
+    .find((button) => button.text().includes("开始设备授权"))
+  await authorize?.trigger("click")
+  await flushPromises()
+  await vi.advanceTimersByTimeAsync(5_000)
+  await flushPromises()
+
+  expect(wrapper.find('[data-testid="ai-authorization"]').exists()).toBe(false)
+  expect(sessionStorage.getItem("ai-pending-authorization")).toBeNull()
+  await vi.advanceTimersByTimeAsync(30_000)
+  expect(vi.mocked(pollAiAuthorization)).toHaveBeenCalledTimes(1)
+})
+
+it("labels a disabled connection and does not claim models when the catalog is empty", async () => {
+  vi.mocked(listAiConnections).mockResolvedValue([
+    { ...baseConnection, enabled: false, models: [] },
+  ] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+
+  const wrapper = mountPanel()
+  await flushPromises()
+
+  expect(wrapper.get('[data-testid="ai-connection-state"]').text()).toContain(
+    "已停用",
+  )
+  expect(wrapper.find('[data-testid="ai-model-catalog"]').exists()).toBe(false)
+  expect(wrapper.get('[data-testid="ai-catalog-empty"]').text()).toContain(
+    "不声明模型可用",
+  )
 })
