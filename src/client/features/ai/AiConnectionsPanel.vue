@@ -379,10 +379,13 @@ async function readPersistedAuthorization(
  * to commit. The round it belongs to must still be the current one — a late
  * read must never overwrite an authorization started in the meantime. A read
  * that the server definitively refuses (the session is bound to a previous
- * owner session, or no longer exists) ends the round: no re-verification can
- * recover it, so the stale view, the polling state and the re-verification
- * prompt are cleared together. A transient read failure keeps the round and
- * its persisted id, so a later verification or reload can still resume it.
+ * owner session, or no longer exists), or one that reports the round already
+ * terminal (expired, cancelled, connection changed, completed), ends the whole
+ * round: the view, the polling state, the persisted id and the
+ * re-verification prompt are cleared together, with the same messages the poll
+ * path uses — completion instead runs the poll path's success flow. A
+ * transient read failure keeps the round and its persisted id, so a later
+ * verification or reload can still resume it.
  */
 async function resumePendingAuthorization() {
   const pending = readPendingAuthorization()
@@ -409,8 +412,24 @@ async function resumePendingAuthorization() {
     return
   }
   if (status.status !== "pending") {
-    forgetPendingAuthorization()
-    if (status.status === "completed") await list.load()
+    // The persisted round reached a terminal state while this tab was away or
+    // paused. The whole round ends here — view, polling, storage and the
+    // re-verification flag — with the same messages the poll path uses;
+    // completion runs the poll path's success flow instead, so neither the
+    // old device code nor a stale re-verification prompt survives.
+    if (status.status === "completed") {
+      forgetAuthorization()
+      await refreshAfterAuthorization(pending.connectionId)
+      return
+    }
+    forgetAuthorization()
+    if (status.status === "expired") {
+      authorizationMessage.value = "授权会话已过期，请重新开始。"
+    } else if (status.status === "cancelled") {
+      authorizationMessage.value = "授权已取消，请重新开始。"
+    } else {
+      authorizationMessage.value = "连接已变化，请重新开始授权。"
+    }
     return
   }
   if (authorization.value === null) {

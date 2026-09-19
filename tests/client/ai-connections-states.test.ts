@@ -663,6 +663,142 @@ it("keeps the round for a later retry when the persisted read fails transiently"
   }
 })
 
+it("ends the round when the persisted read returns a terminal status after re-verification", async () => {
+  vi.useFakeTimers()
+  vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+  vi.mocked(startAiAuthorization).mockResolvedValue(startedAuthorization)
+  vi.mocked(pollAiAuthorization).mockRejectedValue(
+    new ApiError(
+      403,
+      "https://auth.eruoo.me/problems/recent-authentication-required",
+      "Reauthenticate",
+    ),
+  )
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json({
+      session: { id: "same-session", userId: "owner" },
+      user: { id: "owner", name: "Owner" },
+    }),
+  )
+  const cases = [
+    { expectedMessage: "授权会话已过期，请重新开始。", status: "expired" },
+    { expectedMessage: "授权已取消，请重新开始。", status: "cancelled" },
+    {
+      expectedMessage: "连接已变化，请重新开始授权。",
+      status: "connection-changed",
+    },
+  ]
+  for (const testCase of cases) {
+    sessionStorage.clear()
+    vi.mocked(pollAiAuthorization).mockClear()
+    vi.mocked(getAiAuthorization).mockResolvedValue({
+      status: testCase.status,
+    })
+    const session = createSessionController()
+    await session.refresh(true)
+    const wrapper = mountPanel(session)
+    await flushPromises()
+    try {
+      const authorize = wrapper
+        .findAll("button")
+        .find((button) => button.text().includes("开始设备授权"))
+      await authorize?.trigger("click")
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(5_000)
+      await flushPromises()
+      expect(wrapper.text()).toContain("重新验证")
+      expect(wrapper.find('[data-testid="ai-authorization"]').exists()).toBe(
+        true,
+      )
+
+      // The owner returns to the tab after the session expired upstream:
+      // the visibility refresh (same session id) reads the persisted state
+      // back, and the authorization is over — the whole round ends with the
+      // same message the poll path uses.
+      await vi.advanceTimersByTimeAsync(16 * 60_000)
+      await session.refresh()
+      await flushPromises()
+      expect(vi.mocked(getAiAuthorization)).toHaveBeenCalledWith(
+        startedAuthorization.authorizationId,
+        expect.anything(),
+      )
+      expect(wrapper.find('[data-testid="ai-authorization"]').exists()).toBe(
+        false,
+      )
+      expect(wrapper.text()).not.toContain("验证后会按持久状态继续检查授权")
+      expect(wrapper.text()).toContain(testCase.expectedMessage)
+      expect(sessionStorage.getItem("ai-pending-authorization")).toBeNull()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(vi.mocked(pollAiAuthorization)).toHaveBeenCalledTimes(1)
+      expect(
+        wrapper
+          .findAll("button")
+          .some((button) => button.text().includes("开始设备授权")),
+      ).toBe(true)
+    } finally {
+      wrapper.unmount()
+    }
+  }
+})
+
+it("completes the round through the success flow when the persisted read reports completion", async () => {
+  vi.useFakeTimers()
+  vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+  vi.mocked(startAiAuthorization).mockResolvedValue(startedAuthorization)
+  vi.mocked(pollAiAuthorization).mockRejectedValue(
+    new ApiError(
+      403,
+      "https://auth.eruoo.me/problems/recent-authentication-required",
+      "Reauthenticate",
+    ),
+  )
+  vi.mocked(getAiAuthorization).mockResolvedValue({ status: "completed" })
+  vi.mocked(refreshAiModels).mockResolvedValue(0)
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json({
+      session: { id: "same-session", userId: "owner" },
+      user: { id: "owner", name: "Owner" },
+    }),
+  )
+  const session = createSessionController()
+  await session.refresh(true)
+  const wrapper = mountPanel(session)
+  await flushPromises()
+  try {
+    const authorize = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("开始设备授权"))
+    await authorize?.trigger("click")
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await flushPromises()
+    expect(wrapper.text()).toContain("重新验证")
+
+    await vi.advanceTimersByTimeAsync(16 * 60_000)
+    await session.refresh()
+    await flushPromises()
+
+    // The round finished while the page was away: the same success flow the
+    // poll path uses runs — the catalog refresh and the connection reload —
+    // and neither the old device code nor the re-verification prompt stays.
+    expect(vi.mocked(refreshAiModels)).toHaveBeenCalledWith(baseConnection.id)
+    expect(vi.mocked(listAiConnections).mock.calls.length).toBeGreaterThan(1)
+    expect(wrapper.find('[data-testid="ai-authorization"]').exists()).toBe(
+      false,
+    )
+    expect(wrapper.text()).not.toContain("重新验证")
+    expect(wrapper.text()).not.toContain("验证后会按持久状态继续检查授权")
+    expect(wrapper.text()).toContain("授权完成，模型目录已刷新。")
+    expect(sessionStorage.getItem("ai-pending-authorization")).toBeNull()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(vi.mocked(pollAiAuthorization)).toHaveBeenCalledTimes(1)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
 it("surfaces a recent-authentication refusal instead of masking it with a read-back", async () => {
   vi.useFakeTimers()
   vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
