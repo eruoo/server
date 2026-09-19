@@ -410,8 +410,9 @@ owner 授权收尾文档、核验首次自动调度并定点排查 §4.12 的登
 
 - 客户端 API（`src/client/features/ai/ai-connections.ts`）：复用 `deadlineFetch` 与既有 Problem 解析，覆盖连接列表/创建/改名/启停/断开/删除、设备授权启动与轮询/取消、模型目录刷新；服务端规则不在客户端复制。
 - 面板（`src/client/features/ai/AiConnectionsPanel.vue`）：连接快照（状态、启停、凭证到期、模型摘要）、创建（slug 不可变并做前端格式提示）、逐连接改名/启停/刷新模型、设备授权两步流程（展示官方验证页与一次性 user code、手动检查状态、取消）、断开与删除均走既有确认组件；复用 `useManagedList` 的忙碌态、recent-auth 重验证与错误提示。路由 `/security/ai-connections` 与导航入口随面板加入。
-- 验证：`tests/client/ai-connections.test.ts` 2 项（连接快照渲染 + 授权流程展示代码并在完成后清除并重载、确认断开调用服务端）；`pnpm run check` 全链通过（worker 397、client 38、scripts 66、e2e 6）。
-- 未交付：AI Key 配置档的界面（purpose=ai 与 modelIds 选择）、调用历史视图、e2e 深链覆盖。
+- 验证：`tests/client/ai-connections.test.ts` 2 项（连接快照渲染 + 授权流程展示代码并在完成后清除并重载、确认断开调用服务端）；`pnpm run check` 全链通过（worker 397、client 40、scripts 66、e2e 6）。
+- AI Key 档位界面（同一记录内续交付）：`api-keys.ts` 增加按档位读取/创建/改名/删除与 AI 档模型许可更新（客户端始终显式携带档位，不跨档汇总）；`ApiKeyPanel.vue` 增加档位切换（状态密钥 / AI 密钥）、创建时的模型许可多选（候选来自各连接的目录快照，对外 ID 为 `slug/上游模型 ID`）、以及每个 AI 密钥的许可编辑器（展示时把存储的连接 UUID 许可映射回对外 ID，保存即整体替换）。验证：`tests/client/api-key-ai-profile.test.ts` 2 项（AI 档创建携带所选 modelIds、既有密钥的许可展示与整体替换），原 `api-key-panel` 测试按新函数名更新。
+- 未交付：调用历史视图、e2e 深链覆盖。
 
 ## 5. 后续验证与已知限制
 

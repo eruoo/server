@@ -6,19 +6,27 @@ import {
   sessionKey,
 } from "../../src/client/composables/session"
 import {
-  createApiKey,
-  listApiKeys,
-  removeApiKey,
+  createApiKeyForProfile,
+  listApiKeysForProfile,
+  removeApiKeyFromProfile,
 } from "../../src/client/features/security/api-keys"
 import ApiKeyPanel from "../../src/client/features/security/ApiKeyPanel.vue"
-vi.mock("../../src/client/features/security/api-keys", () => ({
-  listApiKeys: vi.fn<typeof listApiKeys>(),
-  createApiKey: vi.fn<typeof createApiKey>(),
-  renameApiKey:
-    vi.fn<
-      typeof import("../../src/client/features/security/api-keys").renameApiKey
-    >(),
-  removeApiKey: vi.fn<typeof removeApiKey>(),
+vi.mock("../../src/client/features/security/api-keys", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../src/client/features/security/api-keys")
+  >("../../src/client/features/security/api-keys")
+  return {
+    createApiKeyForProfile: vi.fn<typeof actual.createApiKeyForProfile>(),
+    listApiKeysForProfile: vi.fn<typeof actual.listApiKeysForProfile>(),
+    removeApiKeyFromProfile: vi.fn<typeof actual.removeApiKeyFromProfile>(),
+    renameApiKeyInProfile: vi.fn<typeof actual.renameApiKeyInProfile>(),
+    updateAiKeyModelGrants: vi.fn<typeof actual.updateAiKeyModelGrants>(),
+  }
+})
+vi.mock("../../src/client/features/ai/ai-connections", () => ({
+  listAiConnections: vi.fn<
+    typeof import("../../src/client/features/ai/ai-connections").listAiConnections
+  >(async () => []),
 }))
 it("successful revoke clears the just-created key display", async () => {
   const key = {
@@ -28,12 +36,12 @@ it("successful revoke clears the just-created key display", async () => {
     start: "eruoo_",
     expiresAt: new Date(Date.now() + 86400000),
   }
-  vi.mocked(listApiKeys)
+  vi.mocked(listApiKeysForProfile)
     .mockResolvedValueOnce([])
     .mockResolvedValueOnce([key] as never)
     .mockResolvedValueOnce([])
-  vi.mocked(createApiKey).mockResolvedValue(key as never)
-  vi.mocked(removeApiKey).mockResolvedValue(undefined)
+  vi.mocked(createApiKeyForProfile).mockResolvedValue(key as never)
+  vi.mocked(removeApiKeyFromProfile).mockResolvedValue(undefined)
   const wrapper = mount(ApiKeyPanel, {
     global: {
       provide: {
@@ -55,7 +63,7 @@ it("successful revoke clears the just-created key display", async () => {
   ).toBe(key.key)
   await wrapper.find(".revoke").trigger("click")
   await flushPromises()
-  expect(removeApiKey).toHaveBeenCalledWith(key.id)
+  expect(removeApiKeyFromProfile).toHaveBeenCalledWith("default", key.id)
   expect(wrapper.findAll("li")).toHaveLength(0)
   expect(wrapper.find('[aria-label="完整密钥"]').exists()).toBe(false)
   wrapper.unmount()

@@ -1,8 +1,11 @@
 import { apiKeyClient } from "@better-auth/api-key/client"
 import { createAuthClient } from "better-auth/client"
 
-import { API_KEY_DEFAULT_CONFIG_ID } from "../../../shared/api-key"
-import { ApiError, deadlineFetch } from "../../lib/http"
+import {
+  API_KEY_AI_CONFIG_ID,
+  API_KEY_DEFAULT_CONFIG_ID,
+} from "../../../shared/api-key"
+import { ApiError, deadlineFetch, requestJson } from "../../lib/http"
 const client = createAuthClient({
   plugins: [apiKeyClient()],
   fetchOptions: { customFetchImpl: deadlineFetch, retry: 0 },
@@ -52,4 +55,79 @@ export async function removeApiKey(keyId: string) {
     configId: API_KEY_DEFAULT_CONFIG_ID,
   })
   checkError(result.error)
+}
+
+/**
+ * Profile-aware API key operations.
+ *
+ * The gateway owns the profile rules; the client always names the profile it
+ * is reading or changing and never aggregates across profiles before acting
+ * on one of them. `purpose` selects the profile on creation only.
+ */
+export async function listApiKeysForProfile(
+  signal: AbortSignal,
+  configId: string,
+) {
+  const body = await requestJson<{ apiKeys: ManagedApiKey[] }>(
+    `/api/auth/api-key/list?configId=${encodeURIComponent(configId)}`,
+    { signal },
+  )
+  return body.apiKeys
+}
+
+export async function createApiKeyForProfile(input: {
+  configId: string
+  days: number
+  modelIds?: string[]
+  name: string
+}) {
+  const body = await requestJson<{ key: string } & ManagedApiKey>(
+    "/api/auth/api-key/create",
+    {
+      body: JSON.stringify({
+        expiresIn: input.days * 86400,
+        name: input.name,
+        purpose: input.configId === API_KEY_AI_CONFIG_ID ? "ai" : "status",
+        ...(input.modelIds === undefined ? {} : { modelIds: input.modelIds }),
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    },
+  )
+  return body
+}
+
+export async function renameApiKeyInProfile(
+  configId: string,
+  keyId: string,
+  name: string,
+) {
+  await requestJson("/api/auth/api-key/update", {
+    body: JSON.stringify({ configId, keyId, name }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  })
+}
+
+export async function updateAiKeyModelGrants(
+  keyId: string,
+  modelIds: string[],
+) {
+  await requestJson("/api/auth/api-key/update", {
+    body: JSON.stringify({
+      configId: API_KEY_AI_CONFIG_ID,
+      keyId,
+      modelIds,
+    }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  })
+}
+
+export async function removeApiKeyFromProfile(configId: string, keyId: string) {
+  await requestJson("/api/auth/api-key/delete", {
+    body: JSON.stringify({ configId, keyId }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  })
 }
