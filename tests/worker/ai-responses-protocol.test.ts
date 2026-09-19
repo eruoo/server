@@ -1532,7 +1532,9 @@ describe("SSE pipeline end to end", () => {
     expect(upstreamCancelled).toBe(true)
     const delivered = await text
     expect(delivered).toContain("event: error")
-    expect(delivered).toContain("request-timeout")
+    // The frame carries the shared in-stream timeout classification, the
+    // same one the record and JSON mode use — never a handshake timeout.
+    expect(delivered).toContain("ai-upstream-unavailable")
     // Exactly one terminal: the deadline never doubles the error frame.
     expect(delivered.split("event: error\n").length - 1).toBe(1)
   })

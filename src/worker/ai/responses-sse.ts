@@ -459,8 +459,9 @@ export async function runResponsesSsePipeline(input: {
 
     if (input.deadlineSignal?.aborted) {
       // The total deadline ended the call while its terminal was still in
-      // flight: the invocation is a timeout, never a success. A client that
-      // is still reading receives the single sanitized error terminal; a
+      // flight: the invocation is a timeout, never a success, classified as
+      // upstream unavailability like every other in-stream timeout. A client
+      // that is still reading receives the single sanitized error terminal; a
       // backpressured stream ends immediately instead of waiting for space
       // that may never come.
       await writeDeadlineErrorTerminal(writer, input.requestId)
@@ -500,7 +501,7 @@ export async function runResponsesSsePipeline(input: {
         // upstream did afterwards, never an upstream failure; the deadline
         // alone makes the invocation a timeout nobody received — and, when the
         // deadline ended a still-writable delivery mid-write, the client gets
-        // the sanitized timeout terminal instead of a hanging stream; a stream
+        // the sanitized unavailable terminal instead of a hanging stream; a stream
         // the consumer cancelled outright keeps the true terminal for the
         // record.
         if (input.signal?.aborted) return { kind: "aborted" }
@@ -538,15 +539,18 @@ export async function runResponsesSsePipeline(input: {
 }
 
 /**
- * Ends the stream at the total deadline with the sanitized timeout problem
- * when the stream is still writable, or immediately when it is not — never an
- * unbounded wait for space, and never a second terminal afterwards.
+ * Ends the stream at the total deadline with the sanitized error terminal —
+ * the same `ai-upstream-unavailable` classification the invocation record and
+ * JSON mode use for a deadline that ends an established response, per
+ * §6.3/§11.3 — when the stream is still writable, or immediately when it is
+ * not. Never an unbounded wait for space, and never a second terminal
+ * afterwards.
  */
 async function writeDeadlineErrorTerminal(
   writer: ResponsesSseWriter,
   requestId: string,
 ): Promise<void> {
-  const errorResponse = problem("request-timeout", requestId)
+  const errorResponse = problem("ai-upstream-unavailable", requestId)
   const body = (await errorResponse.json()) as Record<string, unknown>
   if (writer.tryWriteTerminalError(JSON.stringify(body)) === "dropped") {
     writer.terminate()

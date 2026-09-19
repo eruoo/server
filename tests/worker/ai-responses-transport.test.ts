@@ -682,6 +682,70 @@ describe("responses transport", () => {
     })
   })
 
+  it.each([true, false])(
+    "keeps one midstream-deadline classification across the SSE frame, JSON mode and the record (stream=%s)",
+    async (stream) => {
+      await createConnectedConnection({
+        accessToken: fakeAccessToken(Date.now() + 3_600_000),
+        expiresAtMs: Date.now() + 3_600_000,
+      })
+      const startedAt = Date.now()
+      await reserve({ deadlineAt: startedAt + 60_000, startedAt })
+      installUpstreamMock({ responses: () => stallingUpstream() })
+
+      // The silence budget outlives the deadline, so the total deadline is
+      // what ends the stalled upstream read — after the response was already
+      // established, which per the contract classifies as upstream
+      // unavailability, never a handshake timeout.
+      const delivery = await invokeCodexResponses({
+        apiKeyId,
+        budgets: { noDataIntervalMs: 30_000 },
+        connectionId,
+        credentialKeys: keyringRaw,
+        database: env.DB,
+        deadlineAt: Date.now() + 100,
+        environment,
+        request: requestBody({ stream }),
+        requestId,
+        startedAt,
+        upstreamModelId,
+      })
+      let delivered: { status: number; type: string }
+      let sseErrorFrameCount = 0
+      if (stream) {
+        const text = await delivery.response.text()
+        sseErrorFrameCount = text.split("event: error\n").length - 1
+        const dataLine = text
+          .split("\n")
+          .find((line) => line.startsWith("data: "))
+        if (dataLine === undefined) throw new Error("no error frame delivered")
+        delivered = JSON.parse(dataLine.slice("data: ".length)) as {
+          status: number
+          type: string
+        }
+      } else {
+        delivered = (await delivery.response.json()) as {
+          status: number
+          type: string
+        }
+      }
+      await delivery.settled
+      const row = await readAiInvocation(env.DB, requestId, Date.now())
+      expect(row).toMatchObject({
+        errorCode: "ai-upstream-unavailable",
+        status: "failed",
+      })
+      // The SSE envelope keeps its 200 with exactly one error terminal; JSON
+      // mode answers with the Problem status itself.
+      expect(delivery.response.status).toBe(stream ? 200 : 503)
+      expect(sseErrorFrameCount).toBe(stream ? 1 : 0)
+      expect(delivered).toMatchObject({
+        status: 503,
+        type: `https://auth.eruoo.me/problems/${row!.errorCode}`,
+      })
+    },
+  )
+
   it("settles and records a timeout when a stalled consumer meets the deadline", async () => {
     await createConnectedConnection({
       accessToken: fakeAccessToken(Date.now() + 3_600_000),
