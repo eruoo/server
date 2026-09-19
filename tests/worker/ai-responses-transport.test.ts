@@ -922,10 +922,12 @@ describe("responses transport", () => {
     })
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
+    // The claim stamps updatedAt, and the schema keeps updatedAt >= createdAt;
+    // the fixture writes its own clock, so read the claim clock after it.
     const claimed = await acquireAiCredentialRefreshClaim(env.DB, {
       claimId: "77777777-7777-7777-7777-777777777777",
       connectionId,
-      now,
+      now: Math.max(now, Date.now()),
     })
     expect(claimed).toMatchObject({ claimed: true })
     installUpstreamMock({})
