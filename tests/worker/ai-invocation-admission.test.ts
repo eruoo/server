@@ -249,4 +249,236 @@ describe("AI invocation admission", () => {
     ).first<{ count: number }>()
     expect(rows?.count).toBe(0)
   })
+
+  it("answers 504 at the admission deadline while owner verification is pending", async () => {
+    const session = await ownerSession()
+    const created = await call("/api/auth/api-key/create", {
+      body: {
+        modelIds: [externalModelId],
+        name: "admission probe",
+        purpose: "ai",
+      },
+      headers: { cookie: session.cookie },
+    })
+    expect(created.status).toBe(200)
+    const { key } = await created.json<{ key: string }>()
+
+    // The owner-verification read stays genuinely pending past the shared
+    // five-second budget: the answer must arrive without waiting for it.
+    let releaseGate!: () => void
+    let markEntered!: () => void
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve
+    })
+    const database = new Proxy(env.DB, {
+      get(target, property) {
+        if (property !== "prepare") {
+          const value = Reflect.get(target, property)
+          return typeof value === "function" ? value.bind(target) : value
+        }
+        return (query: string) => {
+          const statement = target.prepare(query)
+          if (!query.includes("SELECT 1 FROM account WHERE userId="))
+            return statement
+          markEntered()
+          return new Proxy(statement, {
+            get(statementTarget, statementProperty) {
+              if (statementProperty !== "bind") {
+                const value = Reflect.get(statementTarget, statementProperty)
+                return typeof value === "function"
+                  ? value.bind(statementTarget)
+                  : value
+              }
+              return (...values: unknown[]) => {
+                const bound = (
+                  statementTarget.bind as (
+                    ...args: unknown[]
+                  ) => D1PreparedStatement
+                )(...values)
+                return new Proxy(bound, {
+                  get(boundTarget, boundProperty) {
+                    if (boundProperty !== "first") {
+                      const value = Reflect.get(boundTarget, boundProperty)
+                      return typeof value === "function"
+                        ? value.bind(boundTarget)
+                        : value
+                    }
+                    return async (...args: unknown[]) => {
+                      await gate
+                      return (
+                        boundTarget.first as (...callArgs: unknown[]) => unknown
+                      ).apply(boundTarget, args)
+                    }
+                  },
+                })
+              }
+            },
+          })
+        }
+      },
+    }) as unknown as D1Database
+
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+    const context = createExecutionContext()
+    let settled = false
+    const responsePromise = Promise.resolve(
+      worker.fetch(
+        new Request(`${env.APP_ORIGIN}/api/ai/responses`, {
+          body: JSON.stringify({ input: "hi", model: externalModelId }),
+          headers: {
+            "cf-connecting-ip": `ai-admission-${++sequence}`,
+            "content-type": "application/json",
+            origin: env.APP_ORIGIN,
+            "x-api-key": key,
+          },
+          method: "POST",
+        }),
+        { ...env, DB: database },
+        context,
+      ),
+    ).then((response: Response) => {
+      settled = true
+      return response
+    })
+    try {
+      await entered
+      await new Promise((resolve) => setTimeout(resolve, 5_250))
+      const respondedWithinBudget = settled
+      releaseGate()
+      const response = await responsePromise
+      await waitOnExecutionContext(context)
+
+      // The budget expires while the read is still pending: the controlled
+      // timeout answer goes out on time, no upstream call starts, and no
+      // reservation exists.
+      expect(respondedWithinBudget).toBe(true)
+      expect(response.status).toBe(504)
+      expect(fetchMock).not.toHaveBeenCalled()
+      const rows = await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM "ai_invocations"`,
+      ).first<{ count: number }>()
+      expect(rows?.count).toBe(0)
+    } finally {
+      fetchMock.mockRestore()
+    }
+  }, 15_000)
+
+  it("releases a late reservation whose write outlives the admission budget", async () => {
+    const session = await ownerSession()
+    const created = await call("/api/auth/api-key/create", {
+      body: {
+        modelIds: [externalModelId],
+        name: "admission probe",
+        purpose: "ai",
+      },
+      headers: { cookie: session.cookie },
+    })
+    expect(created.status).toBe(200)
+    const { key } = await created.json<{ key: string }>()
+
+    // The reservation write stays genuinely pending past the budget: the
+    // answer must arrive without waiting for it, and the write that lands
+    // afterwards must not keep the slot.
+    let releaseGate!: () => void
+    let markEntered!: () => void
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve
+    })
+    const database = new Proxy(env.DB, {
+      get(target, property) {
+        if (property !== "prepare") {
+          const value = Reflect.get(target, property)
+          return typeof value === "function" ? value.bind(target) : value
+        }
+        return (query: string) => {
+          const statement = target.prepare(query)
+          if (!query.includes(`INSERT INTO "ai_invocations"`)) return statement
+          markEntered()
+          return new Proxy(statement, {
+            get(statementTarget, statementProperty) {
+              if (statementProperty !== "bind") {
+                const value = Reflect.get(statementTarget, statementProperty)
+                return typeof value === "function"
+                  ? value.bind(statementTarget)
+                  : value
+              }
+              return (...values: unknown[]) => {
+                const bound = (
+                  statementTarget.bind as (
+                    ...args: unknown[]
+                  ) => D1PreparedStatement
+                )(...values)
+                return new Proxy(bound, {
+                  get(boundTarget, boundProperty) {
+                    if (boundProperty !== "run") {
+                      const value = Reflect.get(boundTarget, boundProperty)
+                      return typeof value === "function"
+                        ? value.bind(boundTarget)
+                        : value
+                    }
+                    return async () => {
+                      await gate
+                      return (boundTarget.run as () => Promise<unknown>).call(
+                        boundTarget,
+                      )
+                    }
+                  },
+                })
+              }
+            },
+          })
+        }
+      },
+    }) as unknown as D1Database
+
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+    const context = createExecutionContext()
+    let settled = false
+    const responsePromise = Promise.resolve(
+      worker.fetch(
+        new Request(`${env.APP_ORIGIN}/api/ai/responses`, {
+          body: JSON.stringify({ input: "hi", model: externalModelId }),
+          headers: {
+            "cf-connecting-ip": `ai-admission-${++sequence}`,
+            "content-type": "application/json",
+            origin: env.APP_ORIGIN,
+            "x-api-key": key,
+          },
+          method: "POST",
+        }),
+        { ...env, DB: database },
+        context,
+      ),
+    ).then((response: Response) => {
+      settled = true
+      return response
+    })
+    try {
+      await entered
+      await new Promise((resolve) => setTimeout(resolve, 5_250))
+      const respondedWithinBudget = settled
+      releaseGate()
+      const response = await responsePromise
+      await waitOnExecutionContext(context)
+
+      // The timeout answer went out while the write was pending; the write
+      // then landed and was released by the guarded cleanup, so the late
+      // reservation holds no slot and no upstream call ever started.
+      expect(respondedWithinBudget).toBe(true)
+      expect(response.status).toBe(504)
+      expect(fetchMock).not.toHaveBeenCalled()
+      const rows = await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM "ai_invocations"`,
+      ).first<{ count: number }>()
+      expect(rows?.count).toBe(0)
+    } finally {
+      fetchMock.mockRestore()
+    }
+  }, 15_000)
 })

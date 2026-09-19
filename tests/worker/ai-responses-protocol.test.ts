@@ -1501,4 +1501,126 @@ describe("SSE pipeline end to end", () => {
       type: "response.completed",
     })
   })
+
+  it("delivers a controlled error terminal at the deadline to a reading client", async () => {
+    const writer = new ResponsesSseWriter()
+    const deadline = new AbortController()
+    // The upstream never sends a byte; the downstream keeps reading, so only
+    // the total deadline ends the call — and a client that is still there
+    // must receive the sanitized error terminal, not a bare end of stream.
+    let upstreamCancelled = false
+    const upstream = new ReadableStream<Uint8Array>({
+      cancel() {
+        upstreamCancelled = true
+      },
+    })
+    const done = runResponsesSsePipeline({
+      deadlineSignal: deadline.signal,
+      noDataIntervalMs: 10_000,
+      requestId: "req-deadline-error",
+      upstream,
+      writer,
+    })
+    const text = new Response(writer.stream).text()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    deadline.abort()
+
+    expect(await done).toMatchObject({
+      failure: { kind: "unavailable" },
+      kind: "failed",
+    })
+    expect(upstreamCancelled).toBe(true)
+    const delivered = await text
+    expect(delivered).toContain("event: error")
+    expect(delivered).toContain("request-timeout")
+    // Exactly one terminal: the deadline never doubles the error frame.
+    expect(delivered.split("event: error\n").length - 1).toBe(1)
+  })
+
+  it("delivers the deadline error terminal when the deadline ends the terminal write itself", async () => {
+    const writer = new ResponsesSseWriter()
+    const deadline = new AbortController()
+    // The consumer reads everything, so the writer never blocks: the deadline
+    // fires exactly while the completed terminal frame is being written, and
+    // that in-flight write is the one the deadline ends.
+    const smallDelta = dataEvent(
+      { delta: "a".repeat(100), type: "response.output_text.delta" },
+      "response.output_text.delta",
+    )
+    const originalWrite = writer.writeEvent.bind(writer)
+    vi.spyOn(writer, "writeEvent").mockImplementation((event, data) => {
+      if (event === "response.completed" && !deadline.signal.aborted) {
+        deadline.abort()
+      }
+      return originalWrite(event, data)
+    })
+    const done = runResponsesSsePipeline({
+      deadlineSignal: deadline.signal,
+      requestId: "req-deadline-mid-terminal",
+      upstream: streamFromText(
+        smallDelta +
+          terminalEvent("response.completed", {
+            id: "resp_1",
+            output: [],
+            status: "completed",
+          }),
+      ),
+      writer,
+    })
+    const text = await readAll(writer.stream)
+
+    // The completed terminal never reached the client: the invocation is a
+    // timeout whose sanitized error terminal was delivered, the stream ends,
+    // and no second terminal follows.
+    expect(await done).toMatchObject({
+      failure: { kind: "unavailable" },
+      kind: "failed",
+    })
+    expect(text).toContain("event: error")
+    expect(text).not.toContain("event: response.completed")
+    expect(text.split("event: error\n").length - 1).toBe(1)
+  })
+
+  it("keeps an aborted outcome when the client cancels while the terminal awaits space", async () => {
+    const writer = new ResponsesSseWriter()
+    const client = new AbortController()
+    // The first delta is dispatched, the second stays queued above the
+    // high-water mark, so the completed terminal write has to wait for
+    // space — and the client cancels exactly while it is waiting.
+    const smallDelta = dataEvent(
+      { delta: "a".repeat(1_000), type: "response.output_text.delta" },
+      "response.output_text.delta",
+    )
+    const bigDelta = dataEvent(
+      { delta: "a".repeat(100_000), type: "response.output_text.delta" },
+      "response.output_text.delta",
+    )
+    let terminalWriteStarted = false
+    const originalWrite = writer.writeEvent.bind(writer)
+    vi.spyOn(writer, "writeEvent").mockImplementation((event, data) => {
+      if (event === "response.completed") terminalWriteStarted = true
+      return originalWrite(event, data)
+    })
+    const done = runResponsesSsePipeline({
+      requestId: "req-terminal-cancel",
+      signal: client.signal,
+      upstream: streamFromText(
+        smallDelta +
+          bigDelta +
+          terminalEvent("response.completed", {
+            id: "resp_1",
+            output: [],
+            status: "completed",
+          }),
+      ),
+      writer,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(terminalWriteStarted).toBe(true)
+    client.abort()
+
+    // The cancellation is judged after the write returns: the invocation
+    // records the client's disappearance, never an upstream failure.
+    expect(await done).toMatchObject({ kind: "aborted" })
+  })
 })

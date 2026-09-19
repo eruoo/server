@@ -520,6 +520,149 @@ it("ignores a stale authorization restore once another authorization started", a
   wrapper.unmount()
 })
 
+it("ends an unrecoverable round after re-verification created a new session", async () => {
+  vi.useFakeTimers()
+  vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+  vi.mocked(startAiAuthorization).mockResolvedValue(startedAuthorization)
+  vi.mocked(pollAiAuthorization).mockRejectedValue(
+    new ApiError(
+      403,
+      "https://auth.eruoo.me/problems/recent-authentication-required",
+      "Reauthenticate",
+    ),
+  )
+  // The re-verification created a new owner session; the round is bound to
+  // the old one, so the persisted read is refused — no verification can
+  // recover it.
+  vi.mocked(getAiAuthorization).mockRejectedValue(
+    new ApiError(
+      403,
+      "https://auth.eruoo.me/problems/permission-denied",
+      "Session changed",
+    ),
+  )
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    Response.json({
+      session: { id: "old-session", userId: "owner" },
+      user: { id: "owner", name: "Owner" },
+    }),
+  )
+  const session = createSessionController()
+  await session.refresh(true)
+  const wrapper = mountPanel(session)
+  await flushPromises()
+  try {
+    const authorize = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("开始设备授权"))
+    await authorize?.trigger("click")
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await flushPromises()
+    expect(wrapper.text()).toContain("重新验证")
+
+    fetchMock.mockResolvedValue(
+      Response.json({
+        session: { id: "new-session", userId: "owner" },
+        user: { id: "owner", name: "Owner" },
+      }),
+    )
+    await session.refresh(true)
+    await flushPromises()
+
+    // The refused read ends the round: no stale device-authorization view,
+    // no useless re-verification prompt, no resumed polling, and a fresh
+    // round may begin.
+    expect(vi.mocked(getAiAuthorization)).toHaveBeenCalledWith(
+      startedAuthorization.authorizationId,
+      expect.anything(),
+    )
+    expect(sessionStorage.getItem("ai-pending-authorization")).toBeNull()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(vi.mocked(pollAiAuthorization)).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-testid="ai-authorization"]').exists()).toBe(
+      false,
+    )
+    expect(wrapper.text()).not.toContain("重新验证")
+    expect(wrapper.text()).toContain("请重新开始")
+    expect(
+      wrapper
+        .findAll("button")
+        .some((button) => button.text().includes("开始设备授权")),
+    ).toBe(true)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it("keeps the round for a later retry when the persisted read fails transiently", async () => {
+  vi.useFakeTimers()
+  vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+  vi.mocked(startAiAuthorization).mockResolvedValue(startedAuthorization)
+  vi.mocked(pollAiAuthorization).mockRejectedValue(
+    new ApiError(
+      403,
+      "https://auth.eruoo.me/problems/recent-authentication-required",
+      "Reauthenticate",
+    ),
+  )
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    Response.json({
+      session: { id: "old-session", userId: "owner" },
+      user: { id: "owner", name: "Owner" },
+    }),
+  )
+  const session = createSessionController()
+  await session.refresh(true)
+  const wrapper = mountPanel(session)
+  await flushPromises()
+  try {
+    const authorize = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("开始设备授权"))
+    await authorize?.trigger("click")
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await flushPromises()
+    expect(wrapper.text()).toContain("重新验证")
+
+    // The first re-verification cannot read the persisted state (a transient
+    // network failure, not a refusal): the round survives, so a later
+    // verification can still resume it.
+    vi.mocked(getAiAuthorization).mockRejectedValue(new Error("network down"))
+    fetchMock.mockResolvedValue(
+      Response.json({
+        session: { id: "session-two", userId: "owner" },
+        user: { id: "owner", name: "Owner" },
+      }),
+    )
+    await session.refresh(true)
+    await flushPromises()
+    expect(wrapper.find('[data-testid="ai-authorization"]').exists()).toBe(true)
+    expect(sessionStorage.getItem("ai-pending-authorization")).not.toBeNull()
+
+    vi.mocked(getAiAuthorization).mockResolvedValue({
+      expiresAt: Date.now() + 600_000,
+      nextPollAt: Date.now() + 5_000,
+      status: "pending",
+    })
+    fetchMock.mockResolvedValue(
+      Response.json({
+        session: { id: "session-three", userId: "owner" },
+        user: { id: "owner", name: "Owner" },
+      }),
+    )
+    await session.refresh(true)
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(vi.mocked(pollAiAuthorization)).toHaveBeenCalledTimes(2)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
 it("surfaces a recent-authentication refusal instead of masking it with a read-back", async () => {
   vi.useFakeTimers()
   vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)

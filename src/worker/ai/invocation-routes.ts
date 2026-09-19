@@ -306,21 +306,71 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
       const requestId = c.get("requestId")
       // The total deadline runs from request arrival, so the clock starts
       // before the carrier check and the entry limiter: caller authentication
-      // and admission share the same 5 second budget.
+      // and admission share the same 5 second budget. The budget is an
+      // absolute wall-clock deadline every admission await is raced against,
+      // so a slow or hanging D1 cannot stretch the wait past it. The losing
+      // work still completes — the underlying D1 write cannot be cancelled —
+      // and its late result is only observed, never continued: a late
+      // reservation is released by the guarded cleanup or its lease, and no
+      // late chain reads the body, refreshes credentials or starts an
+      // inference.
       const startedAt = Date.now()
       const admissionDeadline = startedAt + AI_INVOCATION_ADMISSION_BUDGET_MS
       const rejected = rejectNonApiKeyCarrier(c)
       if (rejected) return rejected
-      const limited = await limitAuthEntry(
-        c,
-        "POST /api/ai/responses",
-        c.env.AI_RATE_LIMITER,
-      )
-      if (limited) return limited
 
-      const key = await verifyAiKey(c)
-      if (key instanceof Response) return key
+      let admissionTimer: ReturnType<typeof setTimeout> | undefined
+      const admissionExpired = new Promise<"deadline">((resolve) => {
+        admissionTimer = setTimeout(
+          () => resolve("deadline"),
+          Math.max(0, admissionDeadline - Date.now()),
+        )
+      })
+      const stopAdmissionTimer = (): void => {
+        if (admissionTimer !== undefined) clearTimeout(admissionTimer)
+      }
+
+      const limited = await Promise.race([
+        limitAuthEntry(c, "POST /api/ai/responses", c.env.AI_RATE_LIMITER),
+        admissionExpired,
+      ])
+      if (limited === "deadline") {
+        stopAdmissionTimer()
+        return problem("request-timeout", requestId)
+      }
+      if (limited) {
+        stopAdmissionTimer()
+        return limited
+      }
+
+      const keyPromise = verifyAiKey(c)
+      const keyOutcome = await Promise.race([keyPromise, admissionExpired])
+      if (keyOutcome === "deadline") {
+        stopAdmissionTimer()
+        // The late verification is only observed — its result cannot continue
+        // this already-refused request — so a failure in the abandoned read is
+        // reported instead of escaping.
+        c.executionCtx.waitUntil(
+          keyPromise.then(
+            () => undefined,
+            (error: unknown) => {
+              console.warn({
+                event: "ai_admission_late_key_failed",
+                message: error instanceof Error ? error.message : "unknown",
+                requestId,
+              })
+            },
+          ),
+        )
+        return problem("request-timeout", requestId)
+      }
+      if (keyOutcome instanceof Response) {
+        stopAdmissionTimer()
+        return keyOutcome
+      }
+      const key = keyOutcome
       if (Date.now() >= admissionDeadline) {
+        stopAdmissionTimer()
         return problem("request-timeout", requestId)
       }
 
@@ -329,18 +379,54 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
       // the body. The connection and model are not known yet — they stay NULL
       // until the resolved, authorized model is recorded below.
       const deadlineAt = startedAt + AI_INVOCATION_TOTAL_DEADLINE_MS
-      let reserved
-      try {
-        reserved = await reserveAiInvocation(c.env.DB, {
-          apiKeyId: key.id,
-          deadlineAt,
-          requestId,
-          startedAt,
-        })
-      } catch {
+      const reservePromise = reserveAiInvocation(c.env.DB, {
+        apiKeyId: key.id,
+        deadlineAt,
+        requestId,
+        startedAt,
+      })
+      const reserveOutcome = await Promise.race([
+        reservePromise.then(
+          (value) => ({ landed: true as const, value }),
+          (error: unknown) => ({ error, landed: false as const }),
+        ),
+        admissionExpired,
+      ])
+      if (reserveOutcome === "deadline") {
+        stopAdmissionTimer()
+        // The reservation write cannot be cancelled and may still land, so it
+        // would hold one of the two slots. Its late result is observed
+        // detached — after the timeout answer is already out — and a landed
+        // reservation is released by the guarded cleanup, whose own failure
+        // leaves the lease as the bounded backstop.
+        c.executionCtx.waitUntil(
+          reservePromise.then(
+            async (late) => {
+              if (!late.reserved) return
+              try {
+                await releaseAiInvocationReservation(c.env.DB, requestId)
+              } catch {
+                // The lease releases the slot.
+              }
+            },
+            (error: unknown) => {
+              console.warn({
+                event: "ai_admission_late_reserve_failed",
+                message: error instanceof Error ? error.message : "unknown",
+                requestId,
+              })
+            },
+          ),
+        )
+        return problem("request-timeout", requestId)
+      }
+      if (!reserveOutcome.landed) {
+        stopAdmissionTimer()
         return problem("service-unavailable", requestId)
       }
+      const reserved = reserveOutcome.value
       if (!reserved.reserved) {
+        stopAdmissionTimer()
         const response = problem("ai-concurrency-exceeded", requestId)
         response.headers.set("retry-after", "1")
         return response
@@ -360,11 +446,14 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
       }
 
       // A reservation whose admission write landed after the budget is a late
-      // result: it is released instead of starting the call.
+      // result: it is released instead of starting the call. The release runs
+      // detached, so a slow cleanup cannot block the timeout answer.
       if (Date.now() >= admissionDeadline) {
-        await abandonReservation()
+        stopAdmissionTimer()
+        c.executionCtx.waitUntil(abandonReservation())
         return problem("request-timeout", requestId)
       }
+      stopAdmissionTimer()
 
       const parsed = await readBoundedBody(c)
       if (!parsed.ok) {

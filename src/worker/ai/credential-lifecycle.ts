@@ -532,16 +532,17 @@ export async function accessCodexCredentials(
     observedCredentialVersion: claimedConnection.credentialVersion,
   })
   if (committed.committed) {
-    const afterCommit = await getAiConnection(
-      context.database,
-      claimedConnection.id,
-    )
-    if (afterCommit === null) return { status: "connection-not-found" }
+    // The commit returned the row exactly as this refresh wrote it: this
+    // token, its expiry, the cleared claim, and the version this write
+    // created are one consistent snapshot. A reauthorization that completed
+    // after the statement cannot substitute its state into the result — the
+    // replay of this refresh's token stays bound to this refresh's version,
+    // so its rejection can never invalidate the newer credential.
     return {
       status: "usable",
-      accountId: afterCommit.upstreamAccountId,
+      accountId: committed.connection.upstreamAccountId,
       accessToken: merged.accessToken,
-      connection: afterCommit,
+      connection: committed.connection,
     }
   }
   if (committed.reason === "refresh-claim-expired") {

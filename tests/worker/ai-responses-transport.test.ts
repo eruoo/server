@@ -1039,4 +1039,130 @@ describe("responses transport", () => {
       status: "failed",
     })
   })
+
+  it("preserves a reauthorization that completes between the refresh commit and its result", async () => {
+    const now = Date.now()
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(now + 3_600_000, "original"),
+      expiresAtMs: now + 3_600_000,
+    })
+    const startedAt = Date.now()
+    await reserve({ deadlineAt: startedAt + 60_000, startedAt })
+    const refreshedToken = fakeAccessToken(Date.now() + 3_600_000, "refreshed")
+    const winnerCiphertext = await encryptPackage({
+      accessToken: fakeAccessToken(Date.now() + 7_200_000, "reauthorized"),
+      refreshToken: "refresh-token-winner",
+    })
+    const mock = installUpstreamMock({
+      refresh: () =>
+        jsonResponse({
+          access_token: refreshedToken,
+          refresh_token: "refresh-token-2",
+        }),
+      responses: () =>
+        jsonResponse({ error: { message: "unauthorized" } }, 401),
+    })
+
+    // A legal reauthorization lands between the refresh commit and the
+    // snapshot the caller receives: it goes through the real session, claim
+    // and completion primitives, so its version binding holds exactly as in
+    // production. The wrapped database injects it after the commit statement
+    // itself has completed.
+    let committedOnce = false
+    const wrappedDatabase = {
+      prepare(query: string) {
+        const statement = env.DB.prepare(query)
+        return {
+          bind(...values: unknown[]) {
+            const bound = statement.bind(...(values as []))
+            const interleaveReauthorization = async (): Promise<void> => {
+              if (
+                !committedOnce &&
+                query.includes(`SET "credentialCiphertext" = ?3`)
+              ) {
+                committedOnce = true
+                const sessionId = crypto.randomUUID()
+                const claimId = crypto.randomUUID()
+                expect(
+                  await createAiAuthorizationSession(env.DB, {
+                    connectionId,
+                    deviceGrantCiphertext: "device-grant-winner",
+                    id: sessionId,
+                    ownerSessionId,
+                    ownerUserId,
+                    pollIntervalMs: 5_000,
+                    sessionTtlMs: 900_000,
+                    now,
+                  }),
+                ).toMatchObject({ created: true })
+                expect(
+                  await claimAiAuthorizationPoll(env.DB, {
+                    claimId,
+                    now: now + 6_000,
+                    ownerSessionId,
+                    ownerUserId,
+                    sessionId,
+                  }),
+                ).toMatchObject({ claimed: true })
+                expect(
+                  await completeAiAuthorization(env.DB, {
+                    claimId,
+                    completionId: crypto.randomUUID(),
+                    credentialCiphertext: winnerCiphertext,
+                    credentialExpiresAt: now + 7_200_000,
+                    now: now + 7_000,
+                    sessionId,
+                    upstreamAccountId: "account-main",
+                  }),
+                ).toMatchObject({ completed: true })
+              }
+            }
+            return {
+              all: async () => {
+                const result = await bound.all()
+                // The reauthorization lands after the refresh commit's own
+                // statement completed, before its result is returned.
+                await interleaveReauthorization()
+                return result
+              },
+              first: (...args: unknown[]) =>
+                (bound.first as (...callArgs: unknown[]) => unknown).apply(
+                  bound,
+                  args,
+                ),
+              run: () => bound.run(),
+            }
+          },
+        }
+      },
+      batch: <T>(statements: D1PreparedStatement[]) =>
+        env.DB.batch<T>(statements),
+    } as unknown as D1Database
+
+    const delivery = await invokeCodexResponses({
+      apiKeyId,
+      connectionId,
+      credentialKeys: keyringRaw,
+      database: wrappedDatabase,
+      deadlineAt: startedAt + 60_000,
+      environment,
+      request: requestBody(),
+      requestId,
+      startedAt,
+      upstreamModelId,
+    })
+    await delivery.settled
+
+    // The replay still uses this refresh's own token, and its 401 cannot
+    // invalidate the reauthorization that won afterwards: the invalidated
+    // version is the one this refresh wrote, not the row's current version.
+    expect(committedOnce).toBe(true)
+    expect(mock.calls).toHaveLength(2)
+    expect(mock.calls[1].headers.authorization).toBe(`Bearer ${refreshedToken}`)
+    expect(await getAiConnection(env.DB, connectionId)).toMatchObject({
+      authorizationStatus: "connected",
+      credentialCiphertext: winnerCiphertext,
+      credentialVersion: 3,
+    })
+  })
 })
