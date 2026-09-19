@@ -412,7 +412,8 @@ owner 授权收尾文档、核验首次自动调度并定点排查 §4.12 的登
 - 面板（`src/client/features/ai/AiConnectionsPanel.vue`）：连接快照（状态、启停、凭证到期、模型摘要）、创建（slug 不可变并做前端格式提示）、逐连接改名/启停/刷新模型、设备授权两步流程（展示官方验证页与一次性 user code、手动检查状态、取消）、断开与删除均走既有确认组件；复用 `useManagedList` 的忙碌态、recent-auth 重验证与错误提示。路由 `/security/ai-connections` 与导航入口随面板加入。
 - 验证：`tests/client/ai-connections.test.ts` 2 项（连接快照渲染 + 授权流程展示代码并在完成后清除并重载、确认断开调用服务端）；`pnpm run check` 全链通过（worker 397、client 40、scripts 66、e2e 6）。
 - AI Key 档位界面（同一记录内续交付）：`api-keys.ts` 增加按档位读取/创建/改名/删除与 AI 档模型许可更新（客户端始终显式携带档位，不跨档汇总）；`ApiKeyPanel.vue` 增加档位切换（状态密钥 / AI 密钥）、创建时的模型许可多选（候选来自各连接的目录快照，对外 ID 为 `slug/上游模型 ID`）、以及每个 AI 密钥的许可编辑器（展示时把存储的连接 UUID 许可映射回对外 ID，保存即整体替换）。验证：`tests/client/api-key-ai-profile.test.ts` 2 项（AI 档创建携带所选 modelIds、既有密钥的许可展示与整体替换），原 `api-key-panel` 测试按新函数名更新。
-- 未交付：调用历史视图、e2e 深链覆盖。
+- 调用记录视图（同一记录内续交付）：`ai-invocations.ts` 按 `(startedAt, requestId)` 游标分页读取 `GET /api/ai/invocations`（默认 50 条），`AiInvocationsPanel.vue` 展示终态、受控错误码、起止时间、上游请求号与用量（仅从良构 usage JSON 读取 total_tokens，缺失显示未知），提供加载更多与刷新；路由 `/security/ai-invocations` 与导航入口随面板加入。验证：`tests/client/ai-invocations.test.ts` 2 项（元数据渲染 + 游标翻页追加且末页隐藏按钮、usage 读取的良构边界）；e2e 深链覆盖扩展到两个 AI 页面（匿名访问只挂载登录边界、不出现 AI 控件）。`pnpm run check` 全链通过（worker 397、client 42、scripts 66、e2e 6）。
+- 未交付：真实上游与部署验证（不变）；生成契约中 AI 操作的请求/响应 schema、若干 401 边界测试与审计 metadata 仍登记为待办。
 
 ## 5. 后续验证与已知限制
 

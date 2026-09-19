@@ -18,6 +18,10 @@ export const router = createRouter({
       component: () => import("./views/AiConnectionsView.vue"),
     },
     {
+      path: "/security/ai-invocations",
+      component: () => import("./views/AiInvocationsView.vue"),
+    },
+    {
       path: "/security/api-keys",
       component: () => import("./views/ApiKeysView.vue"),
     },
