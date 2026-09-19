@@ -268,6 +268,10 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
         default: errorResponse,
         200: {
           description: "Responses subset as an SSE stream or a JSON terminal",
+          content: {
+            "application/json": { schema: z.record(z.string(), z.unknown()) },
+            "text/event-stream": { schema: z.string() },
+          },
         },
       },
     }),

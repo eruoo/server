@@ -170,11 +170,22 @@ app.all("/api/auth/*", async (c) => {
           response.headers.get("location") ?? "/",
           c.env.APP_ORIGIN,
         ).searchParams.has("error")
+      const apiKeyAudit = c.get("apiKeyAudit")
       scheduleAuditEvent(c, {
         type: event,
         outcome: failed ? "failure" : "success",
         subjectId: c.get("principal")?.subject,
-        metadata: { status: response.status },
+        metadata: {
+          status: response.status,
+          ...(apiKeyAudit === undefined
+            ? {}
+            : {
+                configId: apiKeyAudit.configId,
+                ...(apiKeyAudit.modelGrantCount === 0
+                  ? {}
+                  : { modelGrantCount: apiKeyAudit.modelGrantCount }),
+              }),
+        },
       })
     }
     return response.status >= 500

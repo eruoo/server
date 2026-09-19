@@ -201,6 +201,15 @@ test("anonymous deep links never mount protected controls", async ({
   await page.goto("/security/api-keys")
   await expect(page.getByRole("heading", { name: "请先登录" })).toBeVisible()
   await expect(page.getByRole("button", { name: "创建密钥" })).toHaveCount(0)
+  // The AI deep links mount the same boundary and no AI controls.
+  for (const path of ["/security/ai-connections", "/security/ai-invocations"]) {
+    await page.goto(path)
+    await expect(page.getByRole("heading", { name: "请先登录" })).toBeVisible()
+    await expect(page.getByRole("button", { name: "新建连接" })).toHaveCount(0)
+    await expect(
+      page.getByRole("button", { name: "开始设备授权" }),
+    ).toHaveCount(0)
+  }
   await expect(page.getByRole("button", { name: "账号菜单" })).toHaveCount(0)
   await expect(
     page.getByRole("button", { name: "备份状态", exact: true }),

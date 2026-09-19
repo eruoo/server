@@ -39,6 +39,10 @@ onUnmounted(() => {
     ><RouterLink to="/security/audit-log" class="pressable">安全审计</RouterLink
     ><RouterLink to="/security/authorized-apps" class="pressable"
       >已授权应用</RouterLink
+    ><RouterLink to="/security/ai-connections" class="pressable"
+      >AI 连接</RouterLink
+    ><RouterLink to="/security/ai-invocations" class="pressable"
+      >调用记录</RouterLink
     ><RouterLink to="/security/api-keys" class="pressable">API Key</RouterLink
     ><RouterLink to="/api/docs" class="pressable">API 文档</RouterLink>
   </nav>

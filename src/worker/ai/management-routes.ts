@@ -48,6 +48,19 @@ type AppContext = Parameters<
   Parameters<OpenAPIHono<AppBindings>["openapi"]>[1]
 >[0]
 
+interface AiConnectionView {
+  authorizationStatus: string
+  createdAt: number
+  credentialExpiresAt: number | null
+  enabled: boolean
+  id: string
+  name: string
+  providerType: string
+  slug: string
+  updatedAt: number
+  upstreamAccountId: string | null
+}
+
 function connectionView(connection: {
   id: string
   slug: string
@@ -59,7 +72,7 @@ function connectionView(connection: {
   credentialExpiresAt: number | null
   createdAt: number
   updatedAt: number
-}): Record<string, unknown> {
+}): AiConnectionView {
   return {
     authorizationStatus: connection.authorizationStatus,
     createdAt: connection.createdAt,
@@ -147,13 +160,55 @@ function rejectMutationRequest(
 }
 
 const connectionIdParam = z.object({ id: z.string() })
+const connectionViewSchema = z
+  .object({
+    authorizationStatus: z.string(),
+    createdAt: z.number(),
+    credentialExpiresAt: z.number().nullable(),
+    enabled: z.boolean(),
+    id: z.string(),
+    name: z.string(),
+    providerType: z.string(),
+    slug: z.string(),
+    updatedAt: z.number(),
+    upstreamAccountId: z.string().nullable(),
+  })
+  .openapi("AiConnection")
+const connectionWithModelsSchema = connectionViewSchema.extend({
+  models: z.array(
+    z.object({
+      capabilities: z.unknown(),
+      discoveredAt: z.number(),
+      displayName: z.string().nullable(),
+      id: z.string(),
+    }),
+  ),
+})
+const createConnectionBodySchema = z
+  .object({ name: z.string().min(1).max(200), slug: z.string().min(1).max(64) })
+  .strict()
+const updateConnectionBodySchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    name: z.string().min(1).max(200).optional(),
+  })
+  .strict()
+const authorizationStartSchema = z.object({
+  authorizationId: z.string(),
+  expiresAt: z.number(),
+  intervalMs: z.number(),
+  userCode: z.string(),
+  verificationUrl: z.string(),
+})
+
 const authorizationIdParam = z.object({ id: z.string() })
 
 export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
   const owner = async (
     c: AppContext,
     recent = false,
-  ): Promise<OwnerSession | Response> => readOwnerSession(c, recent)
+  ): Promise<OwnerSession | ReturnType<typeof problem>> =>
+    readOwnerSession(c, recent)
 
   app.openapi(
     createRoute({
@@ -163,7 +218,24 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       security: [{ ownerSession: [] }],
       responses: {
         default: errorResponse,
-        200: { description: "Provider definitions" },
+        200: {
+          description: "Provider definitions",
+          content: {
+            "application/json": {
+              schema: z.object({
+                providers: z.array(
+                  z.object({
+                    authorizationKind: z.string(),
+                    deviceVerificationUrl: z.string(),
+                    issuer: z.string(),
+                    providerType: z.string(),
+                    responsesStyle: z.string(),
+                  }),
+                ),
+              }),
+            },
+          },
+        },
       },
     }),
     async (c) => {
@@ -183,7 +255,16 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       security: [{ ownerSession: [] }],
       responses: {
         default: errorResponse,
-        200: { description: "Connections with model snapshots" },
+        200: {
+          description: "Connections with model snapshots",
+          content: {
+            "application/json": {
+              schema: z.object({
+                connections: z.array(connectionWithModelsSchema),
+              }),
+            },
+          },
+        },
       },
     }),
     async (c) => {
@@ -225,7 +306,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       security: [{ ownerSession: [] }],
       responses: {
         default: errorResponse,
-        200: { description: "Created connection" },
+        200: {
+          description: "Created connection",
+          content: {
+            "application/json": {
+              schema: z.object({ connection: connectionViewSchema }),
+            },
+          },
+        },
       },
     }),
     async (c) => {
@@ -242,10 +330,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       if (session instanceof Response) return session
       const body = await readJson(c)
       if (!body.ok) return body.response
-      const parsed = z
-        .object({ name: z.string().min(1).max(200), slug: z.string().min(1) })
-        .strict()
-        .safeParse(body.body)
+      const parsed = createConnectionBodySchema.safeParse(body.body)
       if (!parsed.success) return problem("validation-failed", requestId)
       let created
       try {
@@ -284,7 +369,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       request: { params: connectionIdParam },
       responses: {
         default: errorResponse,
-        200: { description: "Updated connection" },
+        200: {
+          description: "Updated connection",
+          content: {
+            "application/json": {
+              schema: z.object({ connection: connectionViewSchema }),
+            },
+          },
+        },
       },
     }),
     async (c) => {
@@ -303,13 +395,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       if (!isAiServerIdentifier(id)) return problem("not-found", requestId)
       const body = await readJson(c)
       if (!body.ok) return body.response
-      const parsed = z
-        .object({
-          enabled: z.boolean().optional(),
-          name: z.string().min(1).max(200).optional(),
-        })
-        .strict()
-        .safeParse(body.body)
+      const parsed = updateConnectionBodySchema.safeParse(body.body)
       if (!parsed.success) return problem("validation-failed", requestId)
       if (parsed.data.name === undefined && parsed.data.enabled === undefined) {
         return problem("validation-failed", requestId)
@@ -334,17 +420,16 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
         )
       }
       const connection = await getAiConnection(c.env.DB, id)
+      if (connection === null) return problem("service-unavailable", requestId)
       scheduleAuditEvent(c, {
         metadata: { connectionId: id, providerType: CODEX_PROVIDER_TYPE },
         outcome: "success",
         subjectId: session.subject,
         type: "ai_connection_updated",
       })
-      return c.json(
-        { connection: connection === null ? null : connectionView(connection) },
-        200,
-        { "cache-control": "private, no-store" },
-      )
+      return c.json({ connection: connectionView(connection) }, 200, {
+        "cache-control": "private, no-store",
+      })
     },
   )
 
@@ -357,7 +442,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       request: { params: connectionIdParam },
       responses: {
         default: errorResponse,
-        200: { description: "Deleted connection" },
+        200: {
+          description: "Deleted connection",
+          content: {
+            "application/json": {
+              schema: z.object({ deleted: z.boolean() }),
+            },
+          },
+        },
       },
     }),
     async (c) => {
@@ -402,7 +494,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       request: { params: connectionIdParam },
       responses: {
         default: errorResponse,
-        200: { description: "Disconnected connection" },
+        200: {
+          description: "Disconnected connection",
+          content: {
+            "application/json": {
+              schema: z.object({ disconnected: z.boolean() }),
+            },
+          },
+        },
       },
     }),
     async (c) => {
@@ -450,7 +549,10 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       request: { params: connectionIdParam },
       responses: {
         default: errorResponse,
-        200: { description: "Started device authorization" },
+        200: {
+          description: "Started device authorization",
+          content: { "application/json": { schema: authorizationStartSchema } },
+        },
       },
     }),
     async (c) => {
@@ -514,7 +616,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       request: { params: authorizationIdParam },
       responses: {
         default: errorResponse,
-        200: { description: "Authorization status" },
+        200: {
+          description: "Authorization status",
+          content: {
+            "application/json": {
+              schema: z.object({ status: z.string() }).catchall(z.unknown()),
+            },
+          },
+        },
       },
     }),
     async (c) => {
@@ -555,7 +664,20 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       request: { params: authorizationIdParam },
       responses: {
         default: errorResponse,
-        200: { description: "One bounded poll" },
+        200: {
+          description: "One bounded poll",
+          content: {
+            "application/json": {
+              schema: z
+                .object({
+                  intervalMs: z.number().optional(),
+                  nextPollAt: z.number().optional(),
+                  status: z.string(),
+                })
+                .catchall(z.unknown()),
+            },
+          },
+        },
       },
     }),
     async (c) => {
@@ -617,7 +739,14 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       request: { params: authorizationIdParam },
       responses: {
         default: errorResponse,
-        200: { description: "Cancelled authorization" },
+        200: {
+          description: "Cancelled authorization",
+          content: {
+            "application/json": {
+              schema: z.object({ status: z.string() }).catchall(z.unknown()),
+            },
+          },
+        },
       },
     }),
     async (c) => {
@@ -667,7 +796,17 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       request: { params: connectionIdParam },
       responses: {
         default: errorResponse,
-        200: { description: "Refreshed model snapshot" },
+        200: {
+          description: "Refreshed model snapshot",
+          content: {
+            "application/json": {
+              schema: z.object({
+                modelCount: z.number(),
+                status: z.literal("committed"),
+              }),
+            },
+          },
+        },
       },
     }),
     async (c) => {
@@ -724,7 +863,35 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       security: [{ ownerSession: [] }],
       responses: {
         default: errorResponse,
-        200: { description: "Invocation history" },
+        200: {
+          description: "Invocation history",
+          content: {
+            "application/json": {
+              schema: z.object({
+                nextCursor: z
+                  .object({ requestId: z.string(), startedAt: z.number() })
+                  .nullable(),
+                records: z.array(
+                  z.object({
+                    apiKeyId: z.string(),
+                    connectionId: z.string(),
+                    deadlineAt: z.number(),
+                    effectiveStatus: z.string(),
+                    endedAt: z.number().nullable(),
+                    errorCode: z.string().nullable(),
+                    leaseExpiresAt: z.number(),
+                    requestId: z.string(),
+                    startedAt: z.number(),
+                    status: z.string(),
+                    upstreamModelId: z.string(),
+                    upstreamRequestId: z.string().nullable(),
+                    usage: z.string().nullable(),
+                  }),
+                ),
+              }),
+            },
+          },
+        },
       },
     }),
     async (c) => {

@@ -404,6 +404,20 @@ owner 授权收尾文档、核验首次自动调度并定点排查 §4.12 的登
 - 复审修复（独立 review 一轮，approve-with-fixes）：管理变更补齐精确 Origin 与 JSON content-type 校验（SameSite 不能替代 CSRF 防护）并按 `AI_RATE_LIMITER` 计入粗入口限流；管理请求体改为 1 MiB 有界读取（413）；调用路由增加便宜的满员预检（在读取请求体之前拒绝），并把模块注释改为与真实顺序一致——模型 ID 来自请求体，因此权威 reservation 必然在读取之后，§7 的“取得名额后读体”由预检加原子写入共同满足（§7 的字面顺序在模型来自请求体的约束下不可直接实现，登记为设计澄清项）；非法模型 ID 从 503 改为不可解析（403）；`settled` 拒绝改为记录受控事件而不是逃逸为未处理拒绝；PATCH/创建的名称长度上限与存储层一致；poll 的 session-mismatch 统一为 403；生成契约中 AI 操作的请求/响应 schema 仍为骨架，登记为待办。
 - 验证：`tests/worker/ai-management-routes.test.ts` 4 项（管理路由无凭据一律 401（覆盖 7 个操作）、连接生命周期含审计集合与模型快照、精确 Origin 与 1 MiB 有界读体、输入校验与调用历史分页/游标拒绝）；`tests/worker/ai-invocation-routes.test.ts` 6 项——目录只列被授予模型、会话/Bearer/缺失载体一律 401、未知 Key 401、未授权模型 403（与未知模型同答）、非法请求体 422、流式成功（上游 mock）并提交 `succeeded` 调用记录、满员 429 + Retry-After 且既有 reservation 不被改写。`pnpm run check` 全链通过（worker 397、client 36、scripts 66、e2e 6）。未覆盖：PATCH/DELETE 连接、授权 start/read/poll/cancel 与 models/refresh 的 401 边界（已登记为待补测试）。边界测试同步：`ai-codex-authorization` 改为断言全部 /api/ai 路由无凭据时返回受控 401（不再是 404），`contract-boundaries` 的生成文档 operation 计数更新为 24（含 14 个 AI 契约）。未验证：真实上游（不变）；管理界面未交付。
 
+### 4.20 2026-09-19 PR 8（进行中）：AI 管理界面（本地实现）
+
+按设计 §9/§12 交付 AI 管理界面的第一部分：AI 连接管理面板。本记录随切片推进更新。
+
+- 客户端 API（`src/client/features/ai/ai-connections.ts`）：复用 `deadlineFetch` 与既有 Problem 解析，覆盖连接列表/创建/改名/启停/断开/删除、设备授权启动与轮询/取消、模型目录刷新；服务端规则不在客户端复制。
+- 面板（`src/client/features/ai/AiConnectionsPanel.vue`）：连接快照（状态、启停、凭证到期、模型摘要）、创建（slug 不可变并做前端格式提示）、逐连接改名/启停/刷新模型、设备授权两步流程（展示官方验证页与一次性 user code、手动检查状态、取消）、断开与删除均走既有确认组件；复用 `useManagedList` 的忙碌态、recent-auth 重验证与错误提示。路由 `/security/ai-connections` 与导航入口随面板加入。
+- 验证：`tests/client/ai-connections.test.ts` 2 项（连接快照渲染 + 授权流程展示代码并在完成后清除并重载、确认断开调用服务端）；`pnpm run check` 全链通过（worker 397、client 40、scripts 66、e2e 6）。
+- AI Key 档位界面（同一记录内续交付）：`api-keys.ts` 增加按档位读取/创建/改名/删除与 AI 档模型许可更新（客户端始终显式携带档位，不跨档汇总）；`ApiKeyPanel.vue` 增加档位切换（状态密钥 / AI 密钥）、创建时的模型许可多选（候选来自各连接的目录快照，对外 ID 为 `slug/上游模型 ID`）、以及每个 AI 密钥的许可编辑器（展示时把存储的连接 UUID 许可映射回对外 ID，保存即整体替换）。验证：`tests/client/api-key-ai-profile.test.ts` 2 项（AI 档创建携带所选 modelIds、既有密钥的许可展示与整体替换），原 `api-key-panel` 测试按新函数名更新。
+- 调用记录视图（同一记录内续交付）：`ai-invocations.ts` 按 `(startedAt, requestId)` 游标分页读取 `GET /api/ai/invocations`（默认 50 条），`AiInvocationsPanel.vue` 展示终态、受控错误码、起止时间、上游请求号与用量（仅从良构 usage JSON 读取 total_tokens，缺失显示未知），提供加载更多与刷新；路由 `/security/ai-invocations` 与导航入口随面板加入。验证：`tests/client/ai-invocations.test.ts` 2 项（元数据渲染 + 游标翻页追加且末页隐藏按钮、usage 读取的良构边界）；e2e 深链覆盖扩展到两个 AI 页面（匿名访问只挂载登录边界、不出现 AI 控件）。`pnpm run check` 全链通过（worker 397、client 42、scripts 66、e2e 6）。
+- 已登记差距的收尾（同一分支）：① §7 审计 metadata 补齐——`api_key_created/updated` 事件现在携带 `configId` 与 `modelGrantCount`（`revoked` 携带 `configId`），由网关把档位与许可变更数量交给审计调度器，allowlist 同步扩展，并有断言覆盖；② §6.1 全部 12 个操作的“无凭据一律 401”边界测试补齐（此前覆盖 7 个）。
+- 复审与修复（独立 review 一轮，reject）：两个 blocker 均为线协议不匹配——① 六个无请求体的管理变更（断开/删除/刷新模型/授权启动/轮询/取消）未携带 `content-type: application/json`，被服务端的精确 content-type 校验以 415 拒绝；② AI 档许可更新未携带 `name`，被网关以 422 拒绝。修复：六处补齐 JSON content-type；`updateAiKeyModelGrants` 增加 `name` 参数并由面板传入。三个 major：启用/停用未走列表控制器（无忙碌态、错误不可见、不刷新）→ 改走 `list.mutate`；授权完成后未按 §5.1 第 8 步单独刷新模型目录且状态文案被清除 → 完成后先 `refreshAiModels` 再重载并保留文案；模型目录加载失败时许可编辑器会把未知连接映射为空列表，一键保存即静默撤销全部许可 → 目录未加载成功时禁用保存并提示。新增线协议测试（`tests/client/ai-wire-contract.test.ts` 2 项，mock fetch 断言方法/路径/content-type/请求体），这类缺陷此前被模块级 mock 完全遮蔽。
+- 生成契约：14 个 AI 操作全部补齐 200 响应 schema（连接视图/授权启动/轮询/删除/断开/模型刷新/调用记录等）。请求体 schema 未注册：`@hono/zod-openapi` 的请求体校验会在 handler 之前返回框架自带的 400，与既有 422 `validation-failed` 契约冲突，登记为待办（需要 defaultHook 统一映射后再注册）。
+- 未交付：真实上游与部署验证（不变）；管理界面按 §9 的模型目录视图、授权状态四态与自动轮询仍未交付。
+
 ## 5. 后续验证与已知限制
 
 Cloudflare 与 GitHub 接线、staging 验收及 production 首次发布、真实登录和备份已按上述记录完成。以下限制与后续范围仍保留，不能由本地测试替代：
@@ -412,6 +426,6 @@ Cloudflare 与 GitHub 接线、staging 验收及 production 首次发布、真�
 - §4.11 的 Default 三地 warm 达到新目标，同代码闲置样本满足新目标；旧 JP 尾延迟和 Smart SG 超时未定位，后续若再次出现须按请求与平台证据排查，不能报告为已修复。常规发布阶段耗时尚未积累五次样本，不代表所有代理节点或生产性能已验证。
 - Workflow 中断与代码回退已在 §4.9 完成所列场景；大对象提交竞争与长时限的所有窗口未穷尽。成功导出/上传、隔离库导入、凭证清理及新信任验证已在 §4.8 通过。
 - Desktop App、Rust 安全存储、客户端打包与跨端联调：按 owner 最新决定延期，不属于本次 Web 交付。
-- AI 状态存储切片（§4.14）交付持久状态边界；PR 3（§4.15）补齐 Codex 连接器、凭证加密、设备授权编排、凭证刷新与模型发现；PR 4（§4.16，2026-09-19）补齐 Responses 请求子集与共用 SSE/JSON 协议解析；PR 5（§4.17，2026-09-19）补齐网络调用编排（凭证阶段、上游调用、预算与超时、401 重发、终态落库）；PR 6（§4.18，2026-09-19）开放 AI Key 配置档与模型授权解析，均经本地合成验证。AI HTTP 路由与管理界面仍未注册；真实设备授权、令牌刷新、模型发现、`AI_CREDENTIAL_KEYS` 真实轮换与真实上游事件流未执行，连接器固定契约中标注“待实测”的项（audience 形态、默认有效期、非第一方 originator 待遇、FedRAMP、流内错误分类码集合、令牌长度）不得视为已确认。含 AI 表的远端迁移与隔离恢复演练在后续切片按当次授权执行。
+- AI 状态存储切片（§4.14）交付持久状态边界；PR 3（§4.15）补齐 Codex 连接器、凭证加密、设备授权编排、凭证刷新与模型发现；PR 4（§4.16，2026-09-19）补齐 Responses 请求子集与共用 SSE/JSON 协议解析；PR 5（§4.17，2026-09-19）补齐网络调用编排（凭证阶段、上游调用、预算与超时、401 重发、终态落库）；PR 6（§4.18，2026-09-19）开放 AI Key 配置档与模型授权解析；PR 7（§4.19）注册 §6.1/§6.2 全部路由与部署配置声明；PR 8（§4.20）交付 AI 连接管理面板、AI Key 档位界面与调用记录视图，均经本地合成验证。管理界面按设计 §9 仍有未交付部分（模型目录视图、授权状态四态展示与自动轮询）；真实设备授权、令牌刷新、模型发现、`AI_CREDENTIAL_KEYS` 真实轮换与真实上游事件流未执行，连接器固定契约中标注“待实测”的项（audience 形态、默认有效期、非第一方 originator 待遇、FedRAMP、流内错误分类码集合、令牌长度）不得视为已确认。含 AI 表的远端迁移与隔离恢复演练在后续切片按当次授权执行。
 
 恢复规划器只输出可审核计划；恢复、secret 轮换、资源删除及正式部署仍需当次具体授权。Git 提交和 PR 合并与这些平台操作分别记录，不代表远端发布或验收已经完成。

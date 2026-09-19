@@ -339,6 +339,7 @@ async function handleCreate(
     return problem("validation-failed", requestId)
 
   let permissions: Record<string, string[]> | undefined
+  let modelGrantCount = 0
   if (aiProfile) {
     const resolved = await resolveAiModelSelection(
       c.env.DB,
@@ -346,7 +347,12 @@ async function handleCreate(
     )
     if (!resolved.ok) return problem("validation-failed", requestId)
     permissions = buildAiKeyPermissions(resolved.entries)
+    modelGrantCount = resolved.entries.length
   }
+  c.set("apiKeyAudit", {
+    configId: aiProfile ? API_KEY_AI_CONFIG_ID : API_KEY_DEFAULT_CONFIG_ID,
+    modelGrantCount,
+  })
   return callPluginApi(c, () =>
     getRequestAuth(c).api.createApiKey({
       body: {
@@ -412,6 +418,7 @@ async function handleUpdate(
     return problem("validation-failed", requestId)
 
   let permissions: Record<string, string[]> | undefined
+  let modelGrantCount = 0
   if (configId === API_KEY_AI_CONFIG_ID && parsed.data.modelIds !== undefined) {
     const resolved = await resolveAiModelSelection(
       c.env.DB,
@@ -421,7 +428,9 @@ async function handleUpdate(
     // An empty selection revokes every model grant while keeping the fixed
     // operations, so the key stays valid but can invoke nothing.
     permissions = buildAiKeyPermissions(resolved.entries)
+    modelGrantCount = resolved.entries.length
   }
+  c.set("apiKeyAudit", { configId, modelGrantCount })
   return callPluginApi(c, () =>
     getRequestAuth(c).api.updateApiKey({
       body: {
@@ -481,6 +490,7 @@ async function handleDelete(
   const parsed = deleteApiKeyBodySchema.safeParse(body.body)
   if (!parsed.success) return problem("validation-failed", requestId)
   const configId = parsed.data.configId ?? API_KEY_DEFAULT_CONFIG_ID
+  c.set("apiKeyAudit", { configId, modelGrantCount: 0 })
 
   let stored: { configId?: unknown; referenceId?: unknown } | null
   try {
