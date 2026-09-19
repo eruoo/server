@@ -72,11 +72,16 @@ async function poll() {
     const result = await pollAiAuthorization(started.authorizationId)
     if (disposed || generation !== ownGeneration) return
     switch (result.status) {
-      case "completed":
-        authorizationMessage.value = "授权完成，正在刷新模型目录。"
+      case "completed": {
+        // §5.1 step 8: the client issues its own catalog refresh after the
+        // authorization commits, then reloads the connection snapshot.
+        const connectionId = authorizationConnection.value
         forgetAuthorization()
+        if (connectionId !== null) await refreshAiModels(connectionId)
         await list.load()
+        if (!disposed) authorizationMessage.value = "授权完成，模型目录已刷新。"
         return
+      }
       case "pending":
         authorizationMessage.value = "尚未完成，请稍后再次检查。"
         return
@@ -207,7 +212,11 @@ onUnmounted(() => {
         <button
           class="pressable"
           :disabled="list.busy.value"
-          @click="setAiConnectionEnabled(connection.id, !connection.enabled)"
+          @click="
+            list.mutate(() =>
+              setAiConnectionEnabled(connection.id, !connection.enabled),
+            )
+          "
         >
           {{ connection.enabled ? "停用" : "启用" }}
         </button>

@@ -107,18 +107,26 @@ export async function setAiConnectionEnabled(
   })
 }
 
+const jsonHeaders = { "content-type": "application/json" }
+
 export async function disconnectAiConnection(id: string): Promise<void> {
-  await requestJson(`/api/ai/connections/${id}/disconnect`, { method: "POST" })
+  await requestJson(`/api/ai/connections/${id}/disconnect`, {
+    headers: jsonHeaders,
+    method: "POST",
+  })
 }
 
 export async function deleteAiConnection(id: string): Promise<void> {
-  await requestJson(`/api/ai/connections/${id}`, { method: "DELETE" })
+  await requestJson(`/api/ai/connections/${id}`, {
+    headers: jsonHeaders,
+    method: "DELETE",
+  })
 }
 
 export async function refreshAiModels(id: string): Promise<number> {
   const body = await requestJson<{ modelCount: number }>(
     `/api/ai/connections/${id}/models/refresh`,
-    { method: "POST" },
+    { headers: jsonHeaders, method: "POST" },
   )
   return body.modelCount
 }
@@ -128,7 +136,7 @@ export async function startAiAuthorization(
 ): Promise<AiAuthorizationStart> {
   return requestJson<AiAuthorizationStart>(
     `/api/ai/connections/${id}/authorizations`,
-    { method: "POST" },
+    { headers: jsonHeaders, method: "POST" },
   )
 }
 
@@ -137,7 +145,7 @@ export async function pollAiAuthorization(
 ): Promise<AiAuthorizationStatus> {
   return requestJson<AiAuthorizationStatus>(
     `/api/ai/authorizations/${authorizationId}/poll`,
-    { method: "POST" },
+    { headers: jsonHeaders, method: "POST" },
   )
 }
 
@@ -145,6 +153,7 @@ export async function cancelAiAuthorization(
   authorizationId: string,
 ): Promise<void> {
   await requestJson(`/api/ai/authorizations/${authorizationId}`, {
+    headers: jsonHeaders,
     method: "DELETE",
   })
 }

@@ -770,6 +770,59 @@
         "required": [
           "success"
         ]
+      },
+      "AiConnection": {
+        "type": "object",
+        "properties": {
+          "authorizationStatus": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "number"
+          },
+          "credentialExpiresAt": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "providerType": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "number"
+          },
+          "upstreamAccountId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "authorizationStatus",
+          "createdAt",
+          "credentialExpiresAt",
+          "enabled",
+          "id",
+          "name",
+          "providerType",
+          "slug",
+          "updatedAt",
+          "upstreamAccountId"
+        ]
       }
     },
     "parameters": {}
@@ -1392,7 +1445,49 @@
         ],
         "responses": {
           "200": {
-            "description": "Provider definitions"
+            "description": "Provider definitions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "providers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "authorizationKind": {
+                            "type": "string"
+                          },
+                          "deviceVerificationUrl": {
+                            "type": "string"
+                          },
+                          "issuer": {
+                            "type": "string"
+                          },
+                          "providerType": {
+                            "type": "string"
+                          },
+                          "responsesStyle": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "authorizationKind",
+                          "deviceVerificationUrl",
+                          "issuer",
+                          "providerType",
+                          "responsesStyle"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "providers"
+                  ]
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",
@@ -1417,7 +1512,63 @@
         ],
         "responses": {
           "200": {
-            "description": "Connections with model snapshots"
+            "description": "Connections with model snapshots",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "connections": {
+                      "type": "array",
+                      "items": {
+                        "allOf": [
+                          {
+                            "$ref": "#/components/schemas/AiConnection"
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "models": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "capabilities": {},
+                                    "discoveredAt": {
+                                      "type": "number"
+                                    },
+                                    "displayName": {
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    },
+                                    "id": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "discoveredAt",
+                                    "displayName",
+                                    "id"
+                                  ]
+                                }
+                              }
+                            },
+                            "required": [
+                              "models"
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "connections"
+                  ]
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",
@@ -1440,7 +1591,22 @@
         ],
         "responses": {
           "200": {
-            "description": "Created connection"
+            "description": "Created connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "connection": {
+                      "$ref": "#/components/schemas/AiConnection"
+                    }
+                  },
+                  "required": [
+                    "connection"
+                  ]
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",
@@ -1475,7 +1641,22 @@
         ],
         "responses": {
           "200": {
-            "description": "Updated connection"
+            "description": "Updated connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "connection": {
+                      "$ref": "#/components/schemas/AiConnection"
+                    }
+                  },
+                  "required": [
+                    "connection"
+                  ]
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",
@@ -1508,7 +1689,22 @@
         ],
         "responses": {
           "200": {
-            "description": "Deleted connection"
+            "description": "Deleted connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ]
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",
@@ -1543,7 +1739,22 @@
         ],
         "responses": {
           "200": {
-            "description": "Disconnected connection"
+            "description": "Disconnected connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "disconnected": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "disconnected"
+                  ]
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",
@@ -1578,7 +1789,38 @@
         ],
         "responses": {
           "200": {
-            "description": "Started device authorization"
+            "description": "Started device authorization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "authorizationId": {
+                      "type": "string"
+                    },
+                    "expiresAt": {
+                      "type": "number"
+                    },
+                    "intervalMs": {
+                      "type": "number"
+                    },
+                    "userCode": {
+                      "type": "string"
+                    },
+                    "verificationUrl": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "authorizationId",
+                    "expiresAt",
+                    "intervalMs",
+                    "userCode",
+                    "verificationUrl"
+                  ]
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",
@@ -1613,7 +1855,23 @@
         ],
         "responses": {
           "200": {
-            "description": "Authorization status"
+            "description": "Authorization status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": {}
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",
@@ -1646,7 +1904,23 @@
         ],
         "responses": {
           "200": {
-            "description": "Cancelled authorization"
+            "description": "Cancelled authorization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": {}
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",
@@ -1681,7 +1955,29 @@
         ],
         "responses": {
           "200": {
-            "description": "One bounded poll"
+            "description": "One bounded poll",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "intervalMs": {
+                      "type": "number"
+                    },
+                    "nextPollAt": {
+                      "type": "number"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": {}
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",
@@ -1716,7 +2012,29 @@
         ],
         "responses": {
           "200": {
-            "description": "Refreshed model snapshot"
+            "description": "Refreshed model snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "modelCount": {
+                      "type": "number"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "committed"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "modelCount",
+                    "status"
+                  ]
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",
@@ -1741,7 +2059,112 @@
         ],
         "responses": {
           "200": {
-            "description": "Invocation history"
+            "description": "Invocation history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nextCursor": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "properties": {
+                        "requestId": {
+                          "type": "string"
+                        },
+                        "startedAt": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "requestId",
+                        "startedAt"
+                      ]
+                    },
+                    "records": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "apiKeyId": {
+                            "type": "string"
+                          },
+                          "connectionId": {
+                            "type": "string"
+                          },
+                          "deadlineAt": {
+                            "type": "number"
+                          },
+                          "effectiveStatus": {
+                            "type": "string"
+                          },
+                          "endedAt": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "errorCode": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "leaseExpiresAt": {
+                            "type": "number"
+                          },
+                          "requestId": {
+                            "type": "string"
+                          },
+                          "startedAt": {
+                            "type": "number"
+                          },
+                          "status": {
+                            "type": "string"
+                          },
+                          "upstreamModelId": {
+                            "type": "string"
+                          },
+                          "upstreamRequestId": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "usage": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "apiKeyId",
+                          "connectionId",
+                          "deadlineAt",
+                          "effectiveStatus",
+                          "endedAt",
+                          "errorCode",
+                          "leaseExpiresAt",
+                          "requestId",
+                          "startedAt",
+                          "status",
+                          "upstreamModelId",
+                          "upstreamRequestId",
+                          "usage"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "nextCursor",
+                    "records"
+                  ]
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",
@@ -1829,7 +2252,20 @@
         ],
         "responses": {
           "200": {
-            "description": "Responses subset as an SSE stream or a JSON terminal"
+            "description": "Responses subset as an SSE stream or a JSON terminal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "default": {
             "description": "Request rejected or dependency unavailable",

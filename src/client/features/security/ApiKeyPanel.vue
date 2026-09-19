@@ -31,6 +31,7 @@ const name = shallowRef("")
 const days = shallowRef(180)
 const selectedModels = shallowRef<string[]>([])
 const grantDraft = shallowRef<Record<string, string[]>>({})
+const catalogLoaded = shallowRef(false)
 const secret = shallowRef<{ id: string; value: string } | null>(null)
 const copyMessage = shallowRef("")
 const aiProfile = computed(() => profile.value === API_KEY_AI_CONFIG_ID)
@@ -54,8 +55,10 @@ function toggleModel(modelId: string) {
 async function loadConnections() {
   try {
     connections.value = await listAiConnections(new AbortController().signal)
+    catalogLoaded.value = true
   } catch {
     connections.value = []
+    catalogLoaded.value = false
   }
 }
 async function switchProfile(next: string) {
@@ -94,6 +97,7 @@ async function revoke(id: string) {
 /** The stored key view is read-only in the client plugin's types. */
 type KeyWithGrants = {
   id: string
+  name?: string | null
   permissions?: Readonly<Record<string, readonly string[]>> | null
 }
 
@@ -133,9 +137,11 @@ function updateDraft(key: KeyWithGrants, value: string) {
 }
 async function saveGrants(key: KeyWithGrants) {
   const draft = grantDraft.value[key.id]
-  if (draft === undefined) return
+  // Saving while the catalog is unknown would silently drop every grant whose
+  // connection cannot be resolved, so it stays disabled instead.
+  if (draft === undefined || !catalogLoaded.value) return
   await list.mutate(async () => {
-    await updateAiKeyModelGrants(key.id, draft)
+    await updateAiKeyModelGrants(key.id, key.name ?? "", draft)
     const next = { ...grantDraft.value }
     delete next[key.id]
     grantDraft.value = next
@@ -297,11 +303,14 @@ onUnmounted(() => {
           /></label>
           <button
             class="pressable"
-            :disabled="list.busy.value"
+            :disabled="list.busy.value || !catalogLoaded"
             @click="saveGrants(key)"
           >
             保存模型许可
           </button>
+          <p v-if="!catalogLoaded" role="status">
+            模型目录未加载，无法安全替换许可；请先刷新。
+          </p>
         </template>
         <ConfirmAction
           action-label="撤销"

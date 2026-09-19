@@ -153,7 +153,8 @@ it("saves a replacement model grant for an existing ai key", async () => {
     .find((button) => button.text().includes("保存模型许可"))
   await save?.trigger("click")
   await flushPromises()
-  expect(updateAiKeyModelGrants).toHaveBeenCalledWith("ai-key-id", [
+  // The update contract always carries the key name alongside the grants.
+  expect(updateAiKeyModelGrants).toHaveBeenCalledWith("ai-key-id", "ai probe", [
     "codex-main/gpt-test",
     "codex-main/other-model",
   ])

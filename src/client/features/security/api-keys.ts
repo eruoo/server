@@ -111,12 +111,14 @@ export async function renameApiKeyInProfile(
 
 export async function updateAiKeyModelGrants(
   keyId: string,
+  name: string,
   modelIds: string[],
 ) {
   await requestJson("/api/auth/api-key/update", {
     body: JSON.stringify({
       configId: API_KEY_AI_CONFIG_ID,
       keyId,
+      name,
       modelIds,
     }),
     headers: { "content-type": "application/json" },
