@@ -67,6 +67,13 @@ export interface AiCredentialAccessRequest {
   signal?: AbortSignal
   /** Shared stage budget; when absent the refresh uses its own 10-second cap. */
   upstream?: AiStageUpstreamBudget
+  /**
+   * Forces the single-writer refresh path even when the recorded expiry still
+   * looks valid. The inference transport uses it after an upstream 401 proved
+   * the recorded token wrong; the claim, commit, and uncertainty rules are
+   * identical to a scheduled refresh.
+   */
+  forceRefresh?: boolean
 }
 
 export type AiReauthenticationReason =
@@ -289,8 +296,8 @@ export async function accessCodexCredentials(
   }
 
   if (
-    connection.credentialExpiresAt >
-    request.now + AI_CREDENTIAL_REFRESH_LEAD_MS
+    request.forceRefresh !== true &&
+    connection.credentialExpiresAt > request.now + AI_CREDENTIAL_REFRESH_LEAD_MS
   ) {
     return {
       status: "usable",

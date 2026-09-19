@@ -277,10 +277,16 @@ export async function runResponsesSsePipeline(input: {
   writer: ResponsesSseWriter
   requestId: string
   signal?: AbortSignal
+  /** Upstream silence budget forwarded to the shared consumer. */
+  noDataIntervalMs?: number
+  /** Absolute transport deadline forwarded to the shared consumer. */
+  deadlineSignal?: AbortSignal
 }): Promise<ResponsesTerminalResult> {
   const { writer } = input
   const result = await consumeResponsesUpstream({
+    deadlineSignal: input.deadlineSignal,
     heartbeatSink: writer,
+    noDataIntervalMs: input.noDataIntervalMs,
     onEvent: async (frame) => {
       const withinBudget = await writer.writeEvent(frame.event, frame.data)
       if (!withinBudget) {

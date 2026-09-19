@@ -158,6 +158,22 @@ export const AI_RESPONSES_STREAM_MAX_BYTES = 8 * 1_048_576
 /** Downstream SSE comment heartbeat interval once the stream goes quiet. */
 export const AI_SSE_HEARTBEAT_INTERVAL_MS = 15_000
 
+/**
+ * Absolute inference deadline measured from the request's arrival. Every
+ * stage budget is truncated by it; switching stages, a 401 recovery, or a
+ * replay never resets it.
+ */
+export const AI_INVOCATION_TOTAL_DEADLINE_MS = 300_000
+
+/** Time allowed for the upstream to answer with response headers. */
+export const AI_INVOCATION_FIRST_RESPONSE_BUDGET_MS = 90_000
+
+/** Maximum silence between two upstream body chunks before the call fails. */
+export const AI_INVOCATION_NO_DATA_INTERVAL_MS = 90_000
+
+/** Stage budget for reading the credential and any refresh it needs. */
+export const AI_CREDENTIAL_STAGE_BUDGET_MS = 15_000
+
 /** Service-wide and per-key in-flight invocation slots. */
 export const AI_MAX_IN_FLIGHT_INVOCATIONS = 2
 export const AI_MAX_IN_FLIGHT_INVOCATIONS_PER_KEY = 1

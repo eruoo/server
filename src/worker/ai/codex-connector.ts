@@ -654,6 +654,33 @@ export async function listCodexModels(
   return { ok: true, value: entries }
 }
 
+/**
+ * Builds the fixed Responses invocation request. The target address and every
+ * header come from the pinned reference (CLIProxyAPI 7bbfeaf
+ * codex_executor_stream.go: `baseURL + "/responses"`; codex_executor_request.go
+ * applyCodexHeadersFromSources: JSON content type, bearer authorization, the
+ * workspace account header, the originator/user-agent identity, and an
+ * Accept that follows the streaming mode). Callers can never override the
+ * origin, host, or authorization.
+ */
+export function buildCodexResponsesRequest(input: {
+  accessToken: string
+  accountId: string | null
+  stream: boolean
+}): { headers: Record<string, string>; url: string } {
+  return {
+    headers: {
+      ...buildCodexBackendRequestHeaders({
+        accessToken: input.accessToken,
+        accountId: input.accountId,
+      }),
+      accept: input.stream ? "text/event-stream" : "application/json",
+      "content-type": "application/json",
+    },
+    url: `${CODEX_MODELS_BASE_URL}/responses`,
+  }
+}
+
 /** Headers the connector sets on authenticated backend (models/responses) calls. */
 export function buildCodexBackendRequestHeaders(input: {
   accessToken: string
