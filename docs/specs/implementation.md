@@ -422,7 +422,7 @@ owner 授权收尾文档、核验首次自动调度并定点排查 §4.12 的登
 - §5.2 修正（同一分支）：管理 API 此前直接返回原始上游账号 ID（`upstreamAccountId`），与设计 §176“管理 API 返回连接状态和脱敏账号信息”不符。现由服务端在连接视图统一脱敏为 `upstreamAccount`，原始 ID 不再离开服务端；客户端不再自行脱敏（单一事实来源），生成契约同步。新增 worker 断言：列表响应包含 `ac…efgh` 且整体响应不含原始 ID。
 - 验证（复审后）：`pnpm run check` 全链通过（worker 398、client 62、scripts 66、e2e 6）；新增/更新测试：`ai-connections-states.test.ts` 12 项（含轮询存活、完成刷新与失败呈现、读回、终局停止、终态状态、停用标签与空目录文案）、`ai-connections-view.test.ts` 4 项、`ai-wire-contract.test.ts` 3 项（含 35 秒预算的中止时刻断言）。
 - 测试稳定性修正：`tests/worker/ai-responses-transport.test.ts` 的 credential-busy 用例在 CI 上偶发 `ai_connections_time_check` 失败——它在夹具写入连接行之前取 `now`，而夹具用自己的时钟写 `createdAt`；相隔一毫秒时 claim 写入的 `updatedAt` 会早于 `createdAt`，触发迁移约束（生产路径要求调用方传入的 now 不早于建行时间，属测试时序假象）。已改为在夹具之后读取 claim 时钟；约束本身保持不变。
-- 未交付：真实上游与部署验证（不变）。界面按 §9 无已知未交付项；E2E 仅覆盖两个 AI 深链的匿名边界（登录边界挂载、不出现 AI 控件），未在已登录状态下挂载 AI 面板：尝试用 `/api/auth/get-session` 桩 + 真实 worker 读取渲染面板时，受保护路由仍落到登录边界（客户端会话守卫未采用该桩），故不保留一个不可靠的断言，登记为后续补强（需要能复现已登录会话的 e2e 夹具）。
+- 未交付：真实上游与部署验证（不变）。界面按 §9 无已知未交付项；E2E 覆盖两个 AI 深链的匿名边界（登录边界挂载、不出现 AI 控件）与已登录挂载：已登录用例复用 e2e 服务器预置的会话 Cookie、对真实 worker 读取渲染两个面板，并置于 Passkey 用例之前——后者会登出并删除该预置会话行，此前把它放在其后导致受保护路由落到登录边界（曾误判为会话守卫问题）。
 
 ## 5. 后续验证与已知限制
 
