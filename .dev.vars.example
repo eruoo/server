@@ -6,3 +6,7 @@ GITHUB_CLIENT_SECRET=replace-with-local-github-client-secret
 AUDIT_IP_HASH_SECRET=replace-with-a-separate-random-secret-at-least-32-characters
 # 默认本地开发不运行备份 cron；只有实际备份环境需要有效 export token。
 D1_EXPORT_API_TOKEN=local-backup-not-configured
+
+# Local synthetic AI credential keyring (format 1:<base64url-32-bytes>);
+# real values are provisioned with `wrangler secret put`.
+AI_CREDENTIAL_KEYS=1:pgG8FoidSR1kHdFmHLMiRDgkJRVASBlMWjeg5CU9syk

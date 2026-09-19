@@ -3,7 +3,7 @@
   "name": "eruoo-server-v2",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-08-19",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   "env": {
     "staging": {
       "name": "eruoo-server-staging",
@@ -53,6 +53,14 @@
             "period": 60,
           },
         },
+        {
+          "name": "AI_RATE_LIMITER",
+          "namespace_id": "1005",
+          "simple": {
+            "limit": 60,
+            "period": 60,
+          },
+        },
       ],
       "secrets": {
         "required": [
@@ -61,6 +69,7 @@
           "GITHUB_CLIENT_SECRET",
           "AUDIT_IP_HASH_SECRET",
           "D1_EXPORT_API_TOKEN",
+          "AI_CREDENTIAL_KEYS",
         ],
       },
       "triggers": {
@@ -127,6 +136,14 @@
             "period": 60,
           },
         },
+        {
+          "name": "AI_RATE_LIMITER",
+          "namespace_id": "1006",
+          "simple": {
+            "limit": 60,
+            "period": 60,
+          },
+        },
       ],
       "observability": {
         "enabled": true,
@@ -147,6 +164,7 @@
           "GITHUB_CLIENT_SECRET",
           "AUDIT_IP_HASH_SECRET",
           "D1_EXPORT_API_TOKEN",
+          "AI_CREDENTIAL_KEYS",
         ],
       },
       "triggers": {
@@ -211,6 +229,14 @@
         "period": 60,
       },
     },
+    {
+      "name": "AI_RATE_LIMITER",
+      "namespace_id": "1007",
+      "simple": {
+        "limit": 60,
+        "period": 60,
+      },
+    },
   ],
   "observability": {
     "enabled": true,
@@ -237,6 +263,7 @@
       "GITHUB_CLIENT_SECRET",
       "AUDIT_IP_HASH_SECRET",
       "D1_EXPORT_API_TOKEN",
+      "AI_CREDENTIAL_KEYS",
     ],
   },
   "r2_buckets": [

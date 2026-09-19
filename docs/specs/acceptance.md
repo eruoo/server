@@ -179,7 +179,7 @@ Desktop 延后实施；后续客户端切片将 A7/A8 扩展为 [协议规格 §
 
 每片验收包含“已启用成功、未启用拒绝”：直接请求未来片的接口不能执行 handler 或触发 Auth/D1，前端深链不能挂载未来片面板。相关表、插件、binding、secret 和维护规则只随能力加入；R3 的清理仅覆盖当时已有数据类型，R5 再加入 OAuth 清理。页面范围、实际路由注册、生成文档与部署所需配置必须一致。恢复规划器同样按当前 schema 的实际表集清除安全状态，不要求 R3 创建尚未启用的 OAuth/API Key 表。
 
-局部调整（2026-09-18，owner 指定切分）：AI 状态存储、有界清理与恢复规则先于 AI 能力开放合入——`ai_connections`、`ai_authorization_sessions`、`ai_models`、`ai_invocations` 四张表随 0002 迁移与每日清理、恢复规划器清理一起加入。PR 3（2026-09-19）继续交付固定 Codex 连接器、凭证加密与刷新、设备授权编排和模型发现；PR 4（2026-09-19）交付 Responses 请求子集校验与共用 SSE/JSON 协议解析；PR 5（2026-09-19）交付网络调用编排（凭证阶段、上游调用与预算、401 重发、终态落库）；PR 6（2026-09-19）开放 AI Key 配置档（`purpose=ai`、`modelIds`、按连接 UUID 的模型许可与网关白名单，五个 api-key 契约随之更新）并交付模型授权解析。该档位由既有 api-key 网关直接服务（无环境开关）：在远端 AI 表迁移与部署配置落地前，`purpose=ai` 创建会因缺少 AI 表以 503 失败关闭，不会产生半成品 Key；AI HTTP 路由（§6.1/§6.2）与管理页面仍未注册、不执行 AI handler，OpenAPI 除既有 api-key 契约的档位扩展外不发布 AI 接口。表、连接器、协议、编排与 Key 档代码的存在不代表 AI 服务可用；“未启用拒绝”对 AI 路径继续适用。
+局部调整（2026-09-18，owner 指定切分）：AI 状态存储、有界清理与恢复规则先于 AI 能力开放合入——`ai_connections`、`ai_authorization_sessions`、`ai_models`、`ai_invocations` 四张表随 0002 迁移与每日清理、恢复规划器清理一起加入。PR 3（2026-09-19）继续交付固定 Codex 连接器、凭证加密与刷新、设备授权编排和模型发现；PR 4（2026-09-19）交付 Responses 请求子集校验与共用 SSE/JSON 协议解析；PR 5（2026-09-19）交付网络调用编排（凭证阶段、上游调用与预算、401 重发、终态落库）；PR 6（2026-09-19）开放 AI Key 配置档（`purpose=ai`、`modelIds`、按连接 UUID 的模型许可与网关白名单，五个 api-key 契约随之更新）并交付模型授权解析。该档位由既有 api-key 网关直接服务（无环境开关）：在远端 AI 表迁移与部署配置落地前，`purpose=ai` 创建会因缺少 AI 表以 503 失败关闭，不会产生半成品 Key；PR 7（进行中，2026-09-19）注册 §6.2 调用端点（`GET /api/ai/models`、`POST /api/ai/responses`，含准入、`AI_RATE_LIMITER`、8 MiB/15 秒读体与 OpenAPI 契约）并落地部署配置声明（`AI_CREDENTIAL_KEYS`、`AI_RATE_LIMITER`、`enable_request_signal`）；§6.1 管理端点与管理页面仍未注册。表、连接器、协议、编排与 Key 档代码的存在不代表 AI 服务可用；“未启用拒绝”对 AI 路径继续适用。
 
 ## 6. 设计验收与本轮范围
 

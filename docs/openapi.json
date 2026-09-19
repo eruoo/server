@@ -1373,6 +1373,94 @@
           }
         }
       }
+    },
+    "/api/ai/models": {
+      "get": {
+        "operationId": "listAiModels",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Models this API key may invoke",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "models": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "capabilities": {},
+                          "displayName": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "id": {
+                            "type": "string"
+                          },
+                          "discoveredAt": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "displayName",
+                          "id",
+                          "discoveredAt"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "models"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/responses": {
+      "post": {
+        "operationId": "createAiResponse",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Responses subset as an SSE stream or a JSON terminal"
+          },
+          "default": {
+            "description": "Request rejected or dependency unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "webhooks": {}

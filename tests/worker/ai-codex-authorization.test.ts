@@ -1204,14 +1204,18 @@ describe("model snapshot reset on reauthorization", () => {
 })
 
 describe("AI formal entries stay closed", () => {
-  it("rejects every /api/ai route in the production root assembly", async () => {
+  it("keeps the unregistered /api/ai management routes closed", async () => {
+    // §6.2 invocation endpoints are registered (they answer 401 without a
+    // key); the §6.1 management endpoints stay unregistered until they land.
     for (const [method, path] of [
       ["GET", "/api/ai/providers"],
       ["GET", "/api/ai/connections"],
       ["POST", "/api/ai/connections"],
-      ["GET", "/api/ai/models"],
-      ["POST", "/api/ai/responses"],
       ["GET", "/api/ai/invocations"],
+      [
+        "POST",
+        "/api/ai/connections/11111111-1111-1111-1111-111111111111/disconnect",
+      ],
     ] as const) {
       const context = createExecutionContext()
       const response = await worker.fetch(
@@ -1221,6 +1225,19 @@ describe("AI formal entries stay closed", () => {
       )
       await waitOnExecutionContext(context)
       expect(response.status, `${method} ${path}`).toBe(404)
+    }
+    for (const [method, path] of [
+      ["GET", "/api/ai/models"],
+      ["POST", "/api/ai/responses"],
+    ] as const) {
+      const context = createExecutionContext()
+      const response = await worker.fetch(
+        new Request(`http://local.test${path}`, { method }),
+        env,
+        context,
+      )
+      await waitOnExecutionContext(context)
+      expect(response.status, `${method} ${path}`).toBe(401)
     }
   })
 })

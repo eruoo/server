@@ -49,13 +49,14 @@ it("serves discovery without D1 or resource initialization and keeps documentati
   const document = await (
     await call("/api/openapi.json", { headers: { cookie: session.cookie } })
   ).json<{ paths: Record<string, Record<string, unknown>> }>()
-  // 5 个自有 API + 5 个应用侧 API Key 网关契约；不导出未开放的 AI 档。
+  // 5 个自有 API + 5 个应用侧 API Key 网关契约 + 2 个已注册的 AI 调用
+  // 端点（§6.2）；§6.1 管理端点尚未注册，不进入生成文档。
   expect(
     Object.values(document.paths).reduce(
       (sum, path) => sum + Object.keys(path).length,
       0,
     ),
-  ).toBe(10)
+  ).toBe(12)
 })
 it("rejects ambiguous carriers and OAuth coarse limiting before D1", async () => {
   let queries = 0
