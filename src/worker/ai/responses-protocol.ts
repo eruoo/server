@@ -688,6 +688,9 @@ export async function consumeResponsesUpstream(
     await reader.cancel().catch(() => undefined)
     return terminal
   } catch (error) {
+    // Every early exit releases the upstream connection, not just the reader's
+    // lock: a protocol failure must not leave the upstream body open.
+    await reader.cancel().catch(() => undefined)
     if (error instanceof ResponsesProtocolError) {
       return { kind: "protocol-failure", code: error.code }
     }

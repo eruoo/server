@@ -16,6 +16,7 @@ import { validateResponsesRequest } from "../../src/worker/ai/responses-request"
 import {
   ResponsesSseWriter,
   runResponsesSsePipeline,
+  type ResponsesWriteOutcome,
 } from "../../src/worker/ai/responses-sse"
 
 afterEach(() => vi.restoreAllMocks())
@@ -840,7 +841,7 @@ describe("downstream SSE writer", () => {
     // stream itself may buffer a chunk before backpressure kicks in.
     const frameCount = 10
     const frame = "z".repeat(16 * 1_024)
-    const writes: Array<Promise<boolean>> = []
+    const writes: Array<Promise<ResponsesWriteOutcome>> = []
     for (let index = 0; index < frameCount; index++) {
       // The pipeline awaits each write before producing the next frame;
       // mirror that sequential invocation so the space check observes the
@@ -862,18 +863,51 @@ describe("downstream SSE writer", () => {
     writer.close()
     const text = await drained
     expect(text.length).toBe(frameCount * (frame.length + 8))
-    for (const write of writes) await expect(write).resolves.toBe(true)
+    for (const write of writes) await expect(write).resolves.toBe("written")
   })
 
   it("stops writing once the consumer cancels", async () => {
     const writer = new ResponsesSseWriter()
     await writer.writeEvent("response.created", "{}")
     await writer.stream.cancel()
-    // Writes after cancellation are no-ops that report success.
+    // Writes after cancellation are dropped, not queued.
     await expect(writer.writeEvent("response.completed", "{}")).resolves.toBe(
-      true,
+      "dropped",
     )
     expect(writer.isCancelled()).toBe(true)
+  })
+
+  it("ends a backpressured write when delivery is terminated", async () => {
+    const writer = new ResponsesSseWriter()
+    const frame = "z".repeat(16 * 1_024)
+    const writes: Array<Promise<ResponsesWriteOutcome>> = []
+    for (let index = 0; index < 10; index++) {
+      writes.push(writer.writeEvent(null, frame))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    // No consumer: the last write waits for space that never comes.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const settledEarly = await Promise.race([
+      writes.at(-1)!.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 20)),
+    ])
+    expect(settledEarly).toBe(false)
+
+    // Terminating delivery resolves every waiter and ends the stream: the
+    // frame that was waiting for space is dropped, never delivered, and a
+    // consumer that starts reading now still sees the end of the stream.
+    writer.terminate()
+    const outcomes = await Promise.all(writes)
+    expect(outcomes.at(-1)).toBe("dropped")
+    expect(outcomes).not.toContain("budget-exceeded")
+    expect(writer.isTerminated()).toBe(true)
+    const delivered = await Promise.race([
+      readAll(writer.stream),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve("<still-open>"), 50),
+      ),
+    ])
+    expect(delivered).not.toBe("<still-open>")
   })
 })
 
@@ -916,15 +950,56 @@ describe("SSE pipeline end to end", () => {
         text.indexOf("\n\n", terminalIndex),
       ),
     )
+    // The terminal keeps the Responses event envelope: the payload carries the
+    // event type and the completed result under `response`.
     expect(terminalPayload).toMatchObject({
-      id: "resp_1",
-      output: [messageItem("msg_0", "hello")],
-      status: "completed",
+      response: {
+        id: "resp_1",
+        output: [messageItem("msg_0", "hello")],
+        status: "completed",
+      },
+      type: "response.completed",
     })
     // Exactly one terminal and a clean close after it.
     expect(text.indexOf("event: response.completed", terminalIndex + 1)).toBe(
       -1,
     )
+  })
+
+  it("keeps the incomplete terminal envelope on the wire", async () => {
+    const writer = new ResponsesSseWriter()
+    const done = runResponsesSsePipeline({
+      requestId: "req-incomplete",
+      upstream: streamFromText(
+        terminalEvent("response.incomplete", {
+          id: "resp_2",
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [],
+          status: "incomplete",
+        }),
+      ),
+      writer,
+    })
+    const text = await readAll(writer.stream)
+    const result = await done
+    expect(result).toMatchObject({ kind: "incomplete" })
+    const terminalFrame = "event: response.incomplete\ndata: "
+    const terminalIndex = text.indexOf(terminalFrame)
+    expect(terminalIndex).toBeGreaterThan(-1)
+    const payload = JSON.parse(
+      text.slice(
+        terminalIndex + terminalFrame.length,
+        text.indexOf("\n\n", terminalIndex),
+      ),
+    )
+    expect(payload).toMatchObject({
+      response: {
+        id: "resp_2",
+        incomplete_details: { reason: "max_output_tokens" },
+        status: "incomplete",
+      },
+      type: "response.incomplete",
+    })
   })
 
   it("emits one sanitized error event for upstream failures without leaking bodies", async () => {
@@ -1053,6 +1128,173 @@ describe("SSE pipeline end to end", () => {
     expect(writer.isCancelled()).toBe(true)
     // The true terminal still resolves for the invocation record.
     expect(result).toMatchObject({ kind: "completed" })
+  })
+
+  it("settles at the deadline while a slow consumer stops reading", async () => {
+    const writer = new ResponsesSseWriter()
+    const deadline = new AbortController()
+    // Legitimate large deltas fill the downstream buffer past its high-water
+    // mark; the consumer never reads, so only the deadline can end the call.
+    const bigDelta = dataEvent(
+      { delta: "a".repeat(100_000), type: "response.output_text.delta" },
+      "response.output_text.delta",
+    )
+    const upstream = streamFromText(
+      bigDelta.repeat(4) +
+        terminalEvent("response.completed", {
+          id: "resp_1",
+          output: [],
+          status: "completed",
+        }),
+    )
+    const done = runResponsesSsePipeline({
+      deadlineSignal: deadline.signal,
+      requestId: "req-deadline",
+      upstream,
+      writer,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    deadline.abort()
+
+    const settled = await Promise.race([
+      done,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 200)),
+    ])
+    expect(settled).not.toBeNull()
+    // A deadline that cut the delivery is a timeout, never a success.
+    expect(settled).toMatchObject({
+      failure: { kind: "unavailable" },
+      kind: "failed",
+    })
+    expect(writer.isTerminated()).toBe(true)
+  })
+
+  it("does not report success when the deadline drops the terminal frame", async () => {
+    const writer = new ResponsesSseWriter()
+    const deadline = new AbortController()
+    // The first delta is dispatched to the stream, the second stays in the
+    // writer's queue just above its high-water mark, so the *terminal* write is
+    // the one that has to wait for space. The deadline then ends delivery while
+    // that frame is in flight.
+    const smallDelta = dataEvent(
+      { delta: "a".repeat(1_000), type: "response.output_text.delta" },
+      "response.output_text.delta",
+    )
+    const bigDelta = dataEvent(
+      { delta: "a".repeat(100_000), type: "response.output_text.delta" },
+      "response.output_text.delta",
+    )
+    const upstream = streamFromText(
+      smallDelta +
+        bigDelta +
+        terminalEvent("response.completed", {
+          id: "resp_1",
+          output: [],
+          status: "completed",
+        }),
+    )
+    const done = runResponsesSsePipeline({
+      deadlineSignal: deadline.signal,
+      requestId: "req-terminal-drop",
+      upstream,
+      writer,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    deadline.abort()
+
+    const settled = await Promise.race([
+      done,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 200)),
+    ])
+    expect(settled).toMatchObject({
+      failure: { kind: "unavailable" },
+      kind: "failed",
+    })
+    expect(writer.isTerminated()).toBe(true)
+  })
+
+  it("ends a backpressured pipeline when the client cancels", async () => {
+    const writer = new ResponsesSseWriter()
+    const client = new AbortController()
+    // Legitimate large deltas fill the downstream buffer past its high-water
+    // mark; the consumer never reads, so only the deadline can end the call.
+    const bigDelta = dataEvent(
+      { delta: "a".repeat(100_000), type: "response.output_text.delta" },
+      "response.output_text.delta",
+    )
+    const upstream = streamFromText(
+      bigDelta.repeat(4) +
+        terminalEvent("response.completed", {
+          id: "resp_1",
+          output: [],
+          status: "completed",
+        }),
+    )
+    const done = runResponsesSsePipeline({
+      requestId: "req-cancel",
+      signal: client.signal,
+      upstream,
+      writer,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    client.abort()
+    await writer.stream.cancel()
+
+    const settled = await Promise.race([
+      done,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 200)),
+    ])
+    expect(settled).toMatchObject({ kind: "aborted" })
+    // Delivery ended: the writer closed the downstream stream.
+    expect(writer.isTerminated()).toBe(true)
+  })
+
+  it("cancels the upstream read after rejecting a malformed event", async () => {
+    const writer = new ResponsesSseWriter()
+    let cancelled = false
+    const upstream = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true
+      },
+      pull(controller) {
+        controller.enqueue(encode("data: {not json}\n\n"))
+      },
+    })
+    const result = await runResponsesSsePipeline({
+      requestId: "req-6",
+      upstream,
+      writer,
+    })
+    expect(result).toMatchObject({
+      code: "unparseable-event",
+      kind: "protocol-failure",
+    })
+    // Releasing the reader's lock is not cancelling the upstream connection.
+    expect(cancelled).toBe(true)
+  })
+
+  it("cancels the upstream read after rejecting an oversized event", async () => {
+    const writer = new ResponsesSseWriter()
+    let cancelled = false
+    const oversized = `data: ${"y".repeat(4 * 1_048_576 + 1)}\n\n`
+    const upstream = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true
+      },
+      pull(controller) {
+        controller.enqueue(encode(oversized))
+      },
+    })
+    const result = await runResponsesSsePipeline({
+      requestId: "req-7",
+      upstream,
+      writer,
+    })
+    expect(result).toMatchObject({
+      code: "event-oversize",
+      kind: "protocol-failure",
+    })
+    expect(cancelled).toBe(true)
   })
 
   it("fails the stream when the downstream transfer budget is exhausted", async () => {
@@ -1254,6 +1496,9 @@ describe("SSE pipeline end to end", () => {
         text.indexOf("\n\n", terminalIndex),
       ),
     )
-    expect(ssePayload).toEqual(jsonResult.response)
+    expect(ssePayload).toEqual({
+      response: jsonResult.response,
+      type: "response.completed",
+    })
   })
 })

@@ -674,6 +674,57 @@ describe("responses transport", () => {
     })
   })
 
+  it("settles and records a timeout when a stalled consumer meets the deadline", async () => {
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(Date.now() + 3_600_000),
+      expiresAtMs: Date.now() + 3_600_000,
+    })
+    const startedAt = Date.now()
+    await reserve({ deadlineAt: startedAt + 60_000, startedAt })
+    const bigDelta = sseFrame("response.output_text.delta", {
+      delta: "a".repeat(100_000),
+      type: "response.output_text.delta",
+    })
+    installUpstreamMock({
+      responses: () =>
+        sseUpstream([
+          ...Array.from({ length: 4 }, () => bigDelta),
+          ...completedFrames.slice(-1),
+        ]),
+    })
+
+    const delivery = await invokeCodexResponses({
+      apiKeyId,
+      budgets: { noDataIntervalMs: 30_000 },
+      connectionId,
+      credentialKeys: keyringRaw,
+      database: env.DB,
+      deadlineAt: Date.now() + 80,
+      environment,
+      request: requestBody(),
+      requestId,
+      startedAt,
+      upstreamModelId,
+    })
+    expect(delivery.response.status).toBe(200)
+
+    // Nobody reads the body: the deadline must still settle the invocation
+    // instead of waiting for a consumer that never resumes.
+    const settled = await Promise.race([
+      delivery.settled.then(() => "settled"),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve("pending"), 1_000),
+      ),
+    ])
+    expect(settled).toBe("settled")
+    const row = await readAiInvocation(env.DB, requestId, Date.now())
+    expect(row).toMatchObject({
+      errorCode: "ai-upstream-unavailable",
+      status: "failed",
+      usage: null,
+    })
+  })
+
   it("records an oversized usage as unknown rather than failing the commit", async () => {
     await createConnectedConnection({
       accessToken: fakeAccessToken(Date.now() + 3_600_000),
@@ -851,6 +902,42 @@ describe("responses transport", () => {
       errorCode: "request-timeout",
       status: "failed",
     })
+  })
+
+  it("starts no upstream call when the deadline has already passed", async () => {
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(Date.now() + 3_600_000),
+      expiresAtMs: Date.now() + 3_600_000,
+    })
+    const startedAt = Date.now() - 10_000
+    await reserve({ deadlineAt: startedAt + 5_000, startedAt })
+    const mock = installUpstreamMock({})
+
+    const delivery = await invokeCodexResponses({
+      apiKeyId,
+      budgets: { firstResponseMs: 30_000 },
+      connectionId,
+      credentialKeys: keyringRaw,
+      database: env.DB,
+      deadlineAt: startedAt + 5_000,
+      environment,
+      request: requestBody(),
+      requestId,
+      startedAt,
+      upstreamModelId,
+    })
+
+    expect(delivery.response.status).toBe(504)
+    const problem = (await delivery.response.json()) as { type: string }
+    expect(problem.type).toContain("request-timeout")
+    expect(mock.calls.length).toBe(0)
+    await delivery.settled
+    expect(await readAiInvocation(env.DB, requestId, Date.now())).toMatchObject(
+      {
+        errorCode: "request-timeout",
+        status: "failed",
+      },
+    )
   })
 
   it("clamps an over-long deadline to the shared 300-second policy", async () => {
