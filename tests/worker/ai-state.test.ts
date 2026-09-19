@@ -924,7 +924,16 @@ describe("AI state storage", () => {
         credentialExpiresAt: now + 7_200_000,
         now: now + 3_000,
       }),
-    ).toEqual({ committed: true })
+    ).toMatchObject({
+      committed: true,
+      connection: {
+        authorizationStatus: "connected",
+        credentialCiphertext: "credential-package-refreshed",
+        credentialExpiresAt: now + 7_200_000,
+        credentialVersion: 2,
+        refreshClaimId: null,
+      },
+    })
     expect(await getAiConnection(env.DB, connectionId)).toMatchObject({
       credentialVersion: 2,
       credentialCiphertext: "credential-package-refreshed",
@@ -2041,7 +2050,15 @@ describe("AI state storage", () => {
         credentialExpiresAt: now + 7_200_000,
         now: now + AI_CREDENTIAL_REFRESH_CLAIM_TTL_MS - 1,
       }),
-    ).resolves.toEqual({ committed: true })
+    ).resolves.toMatchObject({
+      committed: true,
+      connection: {
+        authorizationStatus: "connected",
+        credentialCiphertext: "credential-package-refreshed-1",
+        credentialVersion: 2,
+        refreshClaimId: null,
+      },
+    })
     expect(await getAiConnection(env.DB, connectionId)).toMatchObject({
       credentialVersion: 2,
       credentialCiphertext: "credential-package-refreshed-1",

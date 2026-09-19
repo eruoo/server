@@ -377,16 +377,35 @@ async function readPersistedAuthorization(
  * Resumes a pending session from the persisted state (§5.1): after the page was
  * reopened, and after the owner re-verified an authorization the server refused
  * to commit. The round it belongs to must still be the current one — a late
- * read must never overwrite an authorization started in the meantime.
+ * read must never overwrite an authorization started in the meantime. A read
+ * that the server definitively refuses (the session is bound to a previous
+ * owner session, or no longer exists) ends the round: no re-verification can
+ * recover it, so the stale view, the polling state and the re-verification
+ * prompt are cleared together. A transient read failure keeps the round and
+ * its persisted id, so a later verification or reload can still resume it.
  */
 async function resumePendingAuthorization() {
   const pending = readPendingAuthorization()
   if (pending === null) return
   const ownGeneration = generation
-  const status = await readPersistedAuthorization(pending.authorizationId)
+  let status: Awaited<ReturnType<typeof getAiAuthorization>> | null = null
+  let readError: unknown = null
+  try {
+    status = await getAiAuthorization(
+      pending.authorizationId,
+      new AbortController().signal,
+    )
+  } catch (error) {
+    readError = error
+  }
   if (disposed || generation !== ownGeneration) return
   if (status === null) {
-    forgetPendingAuthorization()
+    if (isTerminalApiError(readError)) {
+      forgetAuthorization()
+      authorizationMessage.value =
+        "授权会话已失效（登录会话已变化），请重新开始授权。"
+      return
+    }
     return
   }
   if (status.status !== "pending") {

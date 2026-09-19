@@ -32,7 +32,7 @@ export type AiCredentialRefreshClaimResult =
     }
 
 export type AiCredentialRefreshCommitResult =
-  | { committed: true }
+  | { committed: true; connection: AiConnectionRecord }
   | {
       committed: false
       reason:
@@ -384,6 +384,12 @@ export async function commitAiCredentialRefresh(
   )
   requireEpochMilliseconds(input.now, "The AI credential commit time")
 
+  // RETURNING yields the row exactly as this commit wrote it: the refreshed
+  // ciphertext, its expiry, and the version this write created are one atomic
+  // snapshot of this operation's own result. A reauthorization or another
+  // writer that lands after the statement cannot substitute its state into
+  // the returned snapshot, so a caller that replays this refresh's token can
+  // only ever invalidate the version that token belongs to.
   const result = await database
     .prepare(
       `UPDATE "ai_connections"
@@ -397,7 +403,11 @@ export async function commitAiCredentialRefresh(
          AND "authorizationStatus" = 'connected'
          AND "credentialVersion" = ?2
          AND "refreshClaimId" = ?6
-         AND "refreshClaimExpiresAt" > ?5`,
+         AND "refreshClaimExpiresAt" > ?5
+       RETURNING "id", "slug", "name", "providerType", "enabled",
+         "authorizationStatus", "upstreamAccountId", "credentialVersion",
+         "credentialCiphertext", "credentialExpiresAt", "refreshClaimId",
+         "refreshClaimExpiresAt", "createdAt", "updatedAt"`,
     )
     .bind(
       input.connectionId,
@@ -407,10 +417,14 @@ export async function commitAiCredentialRefresh(
       input.now,
       input.claimId,
     )
-    .run()
+    .all<AiCredentialClaimRow>()
 
-  if (readChanges(result, "refresh commit") === 1) {
-    return { committed: true }
+  const commitChanges = readChanges(result, "refresh commit")
+  if (commitChanges === 1 && result.results.length === 1) {
+    return { committed: true, connection: toRecord(result.results[0]) }
+  }
+  if (commitChanges !== 0 || result.results.length !== 0) {
+    throw new TypeError("The AI credential refresh commit result is invalid.")
   }
 
   const connection = await getAiConnection(database, input.connectionId)
