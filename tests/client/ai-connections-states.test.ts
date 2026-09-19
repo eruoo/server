@@ -62,10 +62,10 @@ const baseConnection = {
   upstreamAccount: "ac…main",
 }
 
-function mountPanel() {
+function mountPanel(session = createSessionController()) {
   return mount(AiConnectionsPanel, {
     global: {
-      provide: { [sessionKey as symbol]: createSessionController() },
+      provide: { [sessionKey as symbol]: session },
       stubs: {
         ConfirmAction: {
           emits: ["confirm"],
@@ -79,6 +79,7 @@ function mountPanel() {
 
 afterEach(() => {
   vi.clearAllMocks()
+  vi.restoreAllMocks()
   vi.useRealTimers()
   sessionStorage.clear()
 })
@@ -417,6 +418,178 @@ it("clears the session when the server reports a terminal poll status", async ()
   expect(sessionStorage.getItem("ai-pending-authorization")).toBeNull()
   await vi.advanceTimersByTimeAsync(30_000)
   expect(vi.mocked(pollAiAuthorization)).toHaveBeenCalledTimes(1)
+})
+
+it("keeps polling a replacement authorization while the previous poll is in flight", async () => {
+  vi.useFakeTimers()
+  vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+  const firstPoll = defer<Awaited<ReturnType<typeof pollAiAuthorization>>>()
+  vi.mocked(startAiAuthorization)
+    .mockResolvedValueOnce(startedAuthorization)
+    .mockResolvedValueOnce({
+      ...startedAuthorization,
+      authorizationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    })
+  vi.mocked(pollAiAuthorization)
+    .mockReturnValueOnce(firstPoll.promise)
+    .mockResolvedValue({ status: "pending" })
+
+  const wrapper = mountPanel()
+  await flushPromises()
+  const authorize = () =>
+    wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("开始设备授权"))
+  await authorize()?.trigger("click")
+  await flushPromises()
+  await vi.advanceTimersByTimeAsync(5_000)
+  expect(vi.mocked(pollAiAuthorization)).toHaveBeenCalledTimes(1)
+
+  // The owner replaces the round while the first poll never came back.
+  await authorize()?.trigger("click")
+  await flushPromises()
+  await vi.advanceTimersByTimeAsync(5_000)
+  firstPoll.resolve({ status: "pending" })
+  await flushPromises()
+  await vi.advanceTimersByTimeAsync(30_000)
+
+  // The replaced round's late request must not have killed the new loop: B
+  // polls once on its schedule and keeps re-arming from there.
+  const polled = vi
+    .mocked(pollAiAuthorization)
+    .mock.calls.map((call) => call[0])
+  expect(
+    polled.filter((id) => id === "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").length,
+  ).toBeGreaterThanOrEqual(2)
+  wrapper.unmount()
+})
+
+it("ignores a stale authorization restore once another authorization started", async () => {
+  vi.useFakeTimers()
+  sessionStorage.setItem(
+    "ai-pending-authorization",
+    JSON.stringify({
+      authorizationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      connectionId: baseConnection.id,
+    }),
+  )
+  const restored = defer<Awaited<ReturnType<typeof getAiAuthorization>>>()
+  vi.mocked(getAiAuthorization).mockReturnValue(restored.promise)
+  vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+  vi.mocked(startAiAuthorization).mockResolvedValue({
+    ...startedAuthorization,
+    authorizationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    userCode: "NEW-CODE",
+  })
+
+  const wrapper = mountPanel()
+  await flushPromises()
+  const authorize = wrapper
+    .findAll("button")
+    .find((button) => button.text().includes("开始设备授权"))
+  await authorize?.trigger("click")
+  await flushPromises()
+  const code = () =>
+    (
+      wrapper.get('input[aria-label="设备授权代码"]')
+        .element as HTMLInputElement
+    ).value
+  expect(code()).toBe("NEW-CODE")
+
+  // The page-reopen read lands after the replacement round started: it must
+  // not overwrite the code, the state, the storage or the new timer.
+  restored.resolve({
+    expiresAt: Date.now() + 600_000,
+    nextPollAt: Date.now() + 5_000,
+    status: "pending",
+  })
+  await flushPromises()
+
+  expect(code()).toBe("NEW-CODE")
+  expect(wrapper.text()).not.toContain("已恢复进行中的授权会话")
+  expect(
+    JSON.parse(sessionStorage.getItem("ai-pending-authorization") ?? "null")
+      ?.authorizationId,
+  ).toBe("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+  await vi.advanceTimersByTimeAsync(5_000)
+  expect(
+    vi.mocked(pollAiAuthorization).mock.calls.map((call) => call[0]),
+  ).toEqual(["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"])
+  wrapper.unmount()
+})
+
+it("surfaces a recent-authentication refusal instead of masking it with a read-back", async () => {
+  vi.useFakeTimers()
+  vi.mocked(listAiConnections).mockResolvedValue([baseConnection] as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+  vi.mocked(startAiAuthorization).mockResolvedValue(startedAuthorization)
+  vi.mocked(pollAiAuthorization).mockRejectedValue(
+    new ApiError(
+      403,
+      "https://auth.eruoo.me/problems/recent-authentication-required",
+      "Reauthenticate",
+    ),
+  )
+  // A read-back would report the session as pending; it must not be used to
+  // hide the refusal behind an endless poll.
+  vi.mocked(getAiAuthorization).mockResolvedValue({
+    expiresAt: Date.now() + 600_000,
+    nextPollAt: Date.now() + 5_000,
+    status: "pending",
+  })
+
+  const session = createSessionController()
+  const wrapper = mountPanel(session)
+  await flushPromises()
+  const authorize = wrapper
+    .findAll("button")
+    .find((button) => button.text().includes("开始设备授权"))
+  await authorize?.trigger("click")
+  await flushPromises()
+  await vi.advanceTimersByTimeAsync(5_000)
+  await flushPromises()
+
+  expect(wrapper.text()).toContain("重新验证")
+  expect(wrapper.text()).not.toContain("尚未完成")
+  expect(vi.mocked(getAiAuthorization)).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(60_000)
+  expect(vi.mocked(pollAiAuthorization)).toHaveBeenCalledTimes(1)
+
+  // Once the owner re-verified, the round continues from the persisted state.
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    Response.json({
+      session: { id: "session", userId: "owner" },
+      user: { id: "owner", name: "Owner" },
+    }),
+  )
+  await session.refresh(true)
+  await flushPromises()
+  expect(vi.mocked(getAiAuthorization)).toHaveBeenCalledWith(
+    "22222222-2222-2222-2222-222222222222",
+    expect.anything(),
+  )
+  await vi.advanceTimersByTimeAsync(5_000)
+  expect(vi.mocked(pollAiAuthorization)).toHaveBeenCalledTimes(2)
+  wrapper.unmount()
+})
+
+it("keeps the create form disabled until the panel's own load settles", async () => {
+  const connections = defer<never[]>()
+  vi.mocked(listAiConnections).mockReturnValue(connections.promise as never)
+  vi.mocked(listAiProviders).mockResolvedValue([])
+
+  const wrapper = mountPanel()
+  const slugInput = () => wrapper.get('input[placeholder="codex-main"]')
+  // The form must not be editable in the panel's first render: a field that is
+  // enabled while the panel's own read is still on its way would be disabled
+  // again by that read and drop what was typed meanwhile.
+  expect(slugInput().attributes("disabled")).toBeDefined()
+
+  connections.resolve([] as never)
+  await flushPromises()
+  expect(slugInput().attributes("disabled")).toBeUndefined()
 })
 
 it("labels a disabled connection and does not claim models when the catalog is empty", async () => {

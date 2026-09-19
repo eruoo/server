@@ -37,6 +37,51 @@ it("keeps mutation success distinct from its one failed list refresh", async () 
   expect(list.message.value).toContain("操作已成功，列表未刷新")
   wrapper.unmount()
 })
+it("drops the previous scope's items and prompt on reset", async () => {
+  const read = vi
+    .fn<(signal: AbortSignal) => Promise<string[]>>()
+    .mockResolvedValue(["kept"])
+  const { list, wrapper } = mountedList(read)
+  await list.load()
+  await list.mutate(async () => {
+    throw new ApiError(
+      403,
+      "/problems/recent-authentication-required",
+      "reauthenticate",
+    )
+  })
+  expect(list.items.value).toEqual(["kept"])
+  expect(list.needsReauthentication.value).toBe(true)
+
+  // A scope change must not leave the previous scope's data or prompt behind.
+  list.reset()
+  expect(list.items.value).toEqual([])
+  expect(list.needsReauthentication.value).toBe(false)
+  expect(list.message.value).toBe("")
+  wrapper.unmount()
+})
+
+it("ignores a read that a reset replaced and recovers on the next load", async () => {
+  let resolveStale!: (value: string[]) => void
+  const read = vi
+    .fn<(signal: AbortSignal) => Promise<string[]>>()
+    .mockReturnValueOnce(
+      new Promise<string[]>((resolve) => {
+        resolveStale = resolve
+      }),
+    )
+    .mockResolvedValue(["fresh"])
+  const { list, wrapper } = mountedList(read)
+  const stale = list.load()
+  list.reset()
+  resolveStale(["stale"])
+  await stale
+  expect(list.items.value).toEqual([])
+
+  await list.load()
+  expect(list.items.value).toEqual(["fresh"])
+  wrapper.unmount()
+})
 it("requires an explicit retry after recent-auth failure and ignores an unmounted result", async () => {
   const read = vi
     .fn<(signal: AbortSignal) => Promise<string[]>>()

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, shallowRef } from "vue"
+import { computed, onMounted, onUnmounted, shallowRef, watch } from "vue"
 
 import ConfirmAction from "../../components/security/ConfirmAction.vue"
 import { useManagedList } from "../../composables/managed-list"
@@ -37,8 +37,28 @@ const authorization = shallowRef<AiAuthorizationStart | null>(null)
 const authorizationConnection = shallowRef<string | null>(null)
 const authorizationMessage = shallowRef("")
 const provider = shallowRef<AiProviderDefinition | null>(null)
-/** Guards against overlapping polls without sharing the list's busy gate. */
-const pollInFlight = shallowRef(false)
+/**
+ * True while the panel loads the data its controls depend on (the connection
+ * list and the provider definition). The create form stays disabled for that
+ * whole window: a field that is enabled while a read is still on its way would
+ * be disabled again by that read and silently drop what was typed.
+ */
+const loadingPanel = shallowRef(true)
+const panelBusy = computed(() => list.busy.value || loadingPanel.value)
+/**
+ * The authorization round whose poll request is in flight, if any. Polls are
+ * bound to their round: a replaced round's late request must neither drop the
+ * new round's scheduled poll nor release the new round's guard.
+ */
+let pollInFlightGeneration: number | null = null
+/** Set when the server refuses the exchange until the owner re-verifies. */
+const authorizationReauthenticationRequired = shallowRef(false)
+/** The round-level refusal joins the list's own re-authentication prompt. */
+const needsReauthentication = computed(
+  () =>
+    list.needsReauthentication.value ||
+    authorizationReauthenticationRequired.value,
+)
 let pollFailures = 0
 /** Bounded retries: a dead session must not be polled forever (§5.1). */
 const AI_POLL_FAILURE_LIMIT = 5
@@ -118,6 +138,7 @@ function forgetAuthorization() {
   generation++
   stopPolling()
   forgetPendingAuthorization()
+  authorizationReauthenticationRequired.value = false
   authorization.value = null
   authorizationConnection.value = null
   authorizationMessage.value = ""
@@ -173,9 +194,11 @@ async function beginAuthorization(id: string) {
 async function poll() {
   stopPolling()
   const started = authorization.value
-  if (!started || disposed || pollInFlight.value) return
-  pollInFlight.value = true
+  if (!started || disposed) return
   const ownGeneration = generation
+  // A poll of this round is already running; it re-arms the timer itself.
+  if (pollInFlightGeneration === ownGeneration) return
+  pollInFlightGeneration = ownGeneration
   try {
     let result: Awaited<ReturnType<typeof pollAiAuthorization>>
     try {
@@ -183,6 +206,20 @@ async function poll() {
       pollFailures = 0
     } catch (error) {
       if (disposed || generation !== ownGeneration) return
+      if (
+        error instanceof ApiError &&
+        error.type.endsWith("/recent-authentication-required")
+      ) {
+        // §5.1: the exchange was consumed and the server refuses to commit it
+        // until the owner authenticates again. Reading the persisted session
+        // here would report it as pending and hide the refusal behind an
+        // endless poll, so the round stops and the owner re-verifies instead.
+        authorizationReauthenticationRequired.value = true
+        stopPolling()
+        authorizationMessage.value =
+          "需要重新验证身份，验证后会按持久状态继续检查授权。"
+        return
+      }
       // Design §6.1: after a client timeout the persisted session is read back
       // instead of replaying the exchange.
       const persisted = await readPersistedAuthorization(
@@ -207,6 +244,7 @@ async function poll() {
       result = persisted
     }
     if (disposed || generation !== ownGeneration) return
+    authorizationReauthenticationRequired.value = false
     switch (result.status) {
       case "completed": {
         // §5.1 step 8: the client issues its own catalog refresh after the
@@ -245,7 +283,7 @@ async function poll() {
         authorizationMessage.value = "授权未完成，请重试或取消后重新开始。"
     }
   } finally {
-    pollInFlight.value = false
+    if (pollInFlightGeneration === ownGeneration) pollInFlightGeneration = null
   }
 }
 
@@ -335,11 +373,18 @@ async function readPersistedAuthorization(
   }
 }
 
-/** Resumes a pending session after the page was closed (§5.1). */
+/**
+ * Resumes a pending session from the persisted state (§5.1): after the page was
+ * reopened, and after the owner re-verified an authorization the server refused
+ * to commit. The round it belongs to must still be the current one — a late
+ * read must never overwrite an authorization started in the meantime.
+ */
 async function resumePendingAuthorization() {
   const pending = readPendingAuthorization()
   if (pending === null) return
+  const ownGeneration = generation
   const status = await readPersistedAuthorization(pending.authorizationId)
+  if (disposed || generation !== ownGeneration) return
   if (status === null) {
     forgetPendingAuthorization()
     return
@@ -349,26 +394,53 @@ async function resumePendingAuthorization() {
     if (status.status === "completed") await list.load()
     return
   }
-  authorizationConnection.value = pending.connectionId
-  authorizationMessage.value = "已恢复进行中的授权会话，继续自动检查。"
-  authorization.value = {
-    authorizationId: pending.authorizationId,
-    expiresAt: status.expiresAt ?? Date.now(),
-    intervalMs: 5_000,
-    userCode: "",
-    verificationUrl: provider.value?.deviceVerificationUrl ?? "",
+  if (authorization.value === null) {
+    // Reopened page: the round view is rebuilt from the persisted session. An
+    // in-page resume keeps the code the owner already has on screen.
+    authorizationConnection.value = pending.connectionId
+    authorization.value = {
+      authorizationId: pending.authorizationId,
+      expiresAt: status.expiresAt ?? Date.now(),
+      intervalMs: 5_000,
+      userCode: "",
+      verificationUrl: provider.value?.deviceVerificationUrl ?? "",
+    }
   }
+  authorizationReauthenticationRequired.value = false
+  authorizationMessage.value = "已恢复进行中的授权会话，继续自动检查。"
   schedulePoll(readAiPollDelayMs(status, Date.now()))
 }
 
-onMounted(async () => {
-  await list.load()
+// A re-verified owner may continue the round, but only from the state the
+// server persisted: the consumed exchange is never replayed on its own.
+watch(session.status, (status) => {
+  if (status !== "authenticated") return
+  if (!authorizationReauthenticationRequired.value) return
+  void resumePendingAuthorization()
+})
+
+/**
+ * Loads the data the panel's controls depend on under one busy window. The
+ * pending-authorization read that follows is not part of it: it neither feeds
+ * the controls nor may it hold the form closed while it is in flight.
+ */
+async function loadPanelView() {
+  loadingPanel.value = true
   try {
-    provider.value =
-      (await listAiProviders(new AbortController().signal))[0] ?? null
-  } catch {
-    provider.value = null
+    await list.load()
+    try {
+      provider.value =
+        (await listAiProviders(new AbortController().signal))[0] ?? null
+    } catch {
+      provider.value = null
+    }
+  } finally {
+    loadingPanel.value = false
   }
+}
+
+onMounted(async () => {
+  await loadPanelView()
   await resumePendingAuthorization()
 })
 onUnmounted(() => {
@@ -392,21 +464,19 @@ onUnmounted(() => {
           maxlength="64"
           pattern="[a-z0-9]+(-[a-z0-9]+)*"
           placeholder="codex-main"
-          :disabled="list.busy.value"
+          :disabled="panelBusy"
       /></label>
       <label
         >名称<input
           v-model="name"
           required
           maxlength="200"
-          :disabled="list.busy.value"
+          :disabled="panelBusy"
       /></label>
-      <button class="primary pressable" :disabled="list.busy.value">
-        新建连接
-      </button>
+      <button class="primary pressable" :disabled="panelBusy">新建连接</button>
     </form>
     <p role="status">{{ list.message.value }}</p>
-    <template v-if="list.needsReauthentication.value"
+    <template v-if="needsReauthentication"
       ><button class="pressable" @click="session.signInPasskey">
         使用 Passkey 重新验证</button
       ><button class="pressable" @click="session.signIn">
@@ -441,7 +511,7 @@ onUnmounted(() => {
           >名称<input
             :value="connection.name"
             maxlength="200"
-            :disabled="list.busy.value"
+            :disabled="panelBusy"
             @change="
               list.mutate(() =>
                 renameAiConnection(
@@ -479,7 +549,7 @@ onUnmounted(() => {
         </p>
         <button
           class="pressable"
-          :disabled="list.busy.value"
+          :disabled="panelBusy"
           @click="
             list.mutate(() =>
               setAiConnectionEnabled(connection.id, !connection.enabled),
@@ -490,28 +560,28 @@ onUnmounted(() => {
         </button>
         <button
           class="pressable"
-          :disabled="list.busy.value"
+          :disabled="panelBusy"
           @click="beginAuthorization(connection.id)"
         >
           开始设备授权
         </button>
         <button
           class="pressable"
-          :disabled="list.busy.value"
+          :disabled="panelBusy"
           @click="refresh(connection.id)"
         >
           刷新模型
         </button>
         <ConfirmAction
           action-label="断开"
-          :busy="list.busy.value"
+          :busy="panelBusy"
           title="断开连接"
           description="断开后清空凭证，需要重新授权才能继续调用。"
           @confirm="disconnect(connection.id)"
         />
         <ConfirmAction
           action-label="删除"
-          :busy="list.busy.value"
+          :busy="panelBusy"
           title="删除连接"
           description="删除会移除连接与模型快照；已签发的 Key 对该连接的模型许可随之失效。"
           @confirm="remove(connection.id)"
@@ -538,12 +608,12 @@ onUnmounted(() => {
         autocomplete="off"
         spellcheck="false"
       />
-      <button class="pressable" :disabled="list.busy.value" @click="poll">
+      <button class="pressable" :disabled="panelBusy" @click="poll">
         检查授权状态
       </button>
       <button
         class="pressable"
-        :disabled="list.busy.value"
+        :disabled="panelBusy"
         @click="cancelAuthorization"
       >
         取消授权
@@ -556,7 +626,7 @@ onUnmounted(() => {
     >
       {{ authorizationMessage }}
     </p>
-    <button class="pressable" :disabled="list.busy.value" @click="list.load">
+    <button class="pressable" :disabled="panelBusy" @click="list.load">
       刷新列表
     </button>
   </section>

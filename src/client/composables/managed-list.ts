@@ -16,8 +16,33 @@ export function useManagedList<T>(read: (signal: AbortSignal) => Promise<T[]>) {
     reader?.abort()
     reader = new AbortController()
     const ownGeneration = ++generation
-    const result = await read(reader.signal)
-    if (!disposed && ownGeneration === generation) items.value = result
+    try {
+      const result = await read(reader.signal)
+      if (disposed || ownGeneration !== generation) return
+      items.value = result
+    } catch (error) {
+      // A read that a newer read (or a reset) replaced no longer describes the
+      // current scope, so only the surviving read reports errors.
+      if (disposed || ownGeneration !== generation) return
+      throw error
+    }
+  }
+  /**
+   * Drops everything the previous read scope produced: the items, the message
+   * and the re-authentication prompt. A caller whose read scope changed
+   * (another profile, another filter) uses this so the previous scope's data
+   * can never be shown again or acted on with the new scope.
+   *
+   * Call it while the list is idle (no read or mutation in flight): a scope
+   * change is a user-facing switch, and the caller's own busy gate covers it.
+   */
+  function reset() {
+    generation++
+    reader?.abort()
+    reader = undefined
+    items.value = []
+    message.value = ""
+    needsReauthentication.value = false
   }
   async function load() {
     if (busy.value || disposed) return
@@ -86,5 +111,6 @@ export function useManagedList<T>(read: (signal: AbortSignal) => Promise<T[]>) {
     needsReauthentication: readonly(needsReauthentication),
     load,
     mutate,
+    reset,
   }
 }
