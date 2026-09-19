@@ -82,7 +82,11 @@ async function encryptPackage(input: {
 }
 
 interface RefreshMock {
-  calls: Array<{ body: string | null; url: string }>
+  calls: Array<{
+    authorization: string | null
+    body: string | null
+    url: string
+  }>
   refresh: (init?: RequestInit) => Response | Promise<Response>
   models: () => Response | Promise<Response>
 }
@@ -129,6 +133,7 @@ function installUpstreamMock(
       const request = new Request(input, init)
       const url = new URL(request.url)
       mock.calls.push({
+        authorization: request.headers.get("authorization"),
         body: typeof init?.body === "string" ? init.body : null,
         url: request.url,
       })
@@ -1054,6 +1059,221 @@ describe("model catalog discovery and read", () => {
     expect(
       mock.calls.some((call) => call.url.includes("/backend-api/codex/models")),
     ).toBe(true)
+  })
+
+  it("recovers a first catalog 401 with one forced refresh and one replay", async () => {
+    const firstToken = fakeAccessToken(now + 3_600_000)
+    await createConnectedConnection({
+      accessToken: firstToken,
+      expiresAtMs: now + 3_600_000,
+    })
+    const refreshedToken = fakeAccessToken(now + 3_600_000, "refreshed")
+    let modelsCalls = 0
+    const mock = installUpstreamMock({
+      models: () => {
+        modelsCalls += 1
+        return modelsCalls === 1
+          ? jsonResponse({ detail: "Unauthorized" }, 401)
+          : jsonResponse({
+              models: [
+                {
+                  display_name: "GPT Test",
+                  slug: "gpt-test",
+                  supported_in_api: true,
+                  visibility: "list",
+                },
+              ],
+            })
+      },
+      refresh: () =>
+        jsonResponse({
+          access_token: refreshedToken,
+          refresh_token: "refresh-token-2",
+        }),
+    })
+    const result = await refreshCodexModelCatalog(context, {
+      connectionId,
+      deadlineAt: stageDeadlineAt,
+      now,
+    })
+    expect(result).toEqual({ modelCount: 1, status: "committed" })
+    const refreshCalls = mock.calls.filter((call) =>
+      call.url.includes("/oauth/token"),
+    )
+    expect(refreshCalls).toHaveLength(1)
+    expect(refreshCalls[0]?.body).toContain('"grant_type":"refresh_token"')
+    const modelsCallsRecorded = mock.calls.filter((call) =>
+      call.url.includes("/backend-api/codex/models"),
+    )
+    expect(modelsCallsRecorded).toHaveLength(2)
+    // The replay carried the rotated access token, not the rejected one.
+    expect(modelsCallsRecorded[0]?.authorization).toBe(`Bearer ${firstToken}`)
+    expect(modelsCallsRecorded[1]?.authorization).toBe(
+      `Bearer ${refreshedToken}`,
+    )
+  })
+
+  it("reports reauthorization without state changes when a rotated token is still rejected", async () => {
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(now + 3_600_000),
+      expiresAtMs: now + 3_600_000,
+    })
+    const mock = installUpstreamMock({
+      models: () => jsonResponse({ detail: "Unauthorized" }, 401),
+      refresh: () =>
+        jsonResponse({
+          access_token: fakeAccessToken(now + 3_600_000, "refreshed"),
+          refresh_token: "refresh-token-2",
+        }),
+    })
+    const result = await refreshCodexModelCatalog(context, {
+      connectionId,
+      deadlineAt: stageDeadlineAt,
+      now,
+    })
+    expect(result).toEqual({
+      reason: "upstream-rejected",
+      status: "reauthentication-required",
+    })
+    // The catalog refresh is a management-plane read: a rejected token is
+    // reported, but the connection itself is not transitioned.
+    const connection = await getAiConnection(env.DB, connectionId)
+    expect(connection).toMatchObject({
+      authorizationStatus: "connected",
+      credentialCiphertext: expect.any(String),
+    })
+    expect(
+      mock.calls.filter((call) => call.url.includes("/oauth/token")),
+    ).toHaveLength(1)
+    expect(
+      mock.calls.filter((call) =>
+        call.url.includes("/backend-api/codex/models"),
+      ),
+    ).toHaveLength(2)
+  })
+
+  it("maps a failed recovery refresh to its reauthentication reason", async () => {
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(now + 3_600_000),
+      expiresAtMs: now + 3_600_000,
+    })
+    installUpstreamMock({
+      models: () => jsonResponse({ detail: "Unauthorized" }, 401),
+      refresh: () =>
+        jsonResponse(
+          { error: "invalid_grant", error_description: "expired" },
+          400,
+        ),
+    })
+    const result = await refreshCodexModelCatalog(context, {
+      connectionId,
+      deadlineAt: stageDeadlineAt,
+      now,
+    })
+    expect(result).toEqual({
+      reason: "invalid-grant",
+      status: "reauthentication-required",
+    })
+  })
+
+  it("treats a recovery refresh that cannot be sent as unavailability", async () => {
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(now + 3_600_000),
+      expiresAtMs: now + 3_600_000,
+    })
+    const mock = installUpstreamMock({
+      models: () => jsonResponse({ detail: "Unauthorized" }, 401),
+      refresh: () =>
+        jsonResponse({
+          access_token: fakeAccessToken(now + 3_600_000, "refreshed"),
+          refresh_token: "refresh-token-2",
+        }),
+    })
+    // The stage deadline is already past when the recovery would run: the
+    // forced refresh is provably not sent, and no replay happens.
+    const result = await refreshCodexModelCatalog(context, {
+      connectionId,
+      deadlineAt: now - 1,
+      now,
+    })
+    expect(result).toEqual({
+      keptSnapshot: true,
+      reason: "unavailable",
+      status: "upstream-failure",
+    })
+    expect(
+      mock.calls.filter((call) =>
+        call.url.includes("/backend-api/codex/models"),
+      ),
+    ).toHaveLength(1)
+    expect(
+      mock.calls.filter((call) => call.url.includes("/oauth/token")),
+    ).toHaveLength(0)
+    // The claim was released; the stored credential survives untouched.
+    const connection = await getAiConnection(env.DB, connectionId)
+    expect(connection).toMatchObject({
+      authorizationStatus: "connected",
+      credentialCiphertext: expect.any(String),
+      credentialVersion: 1,
+      refreshClaimId: null,
+    })
+  })
+
+  it("classifies a replay that fails after a successful recovery as transient", async () => {
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(now + 3_600_000),
+      expiresAtMs: now + 3_600_000,
+    })
+    let modelsCalls = 0
+    installUpstreamMock({
+      models: () => {
+        modelsCalls += 1
+        return modelsCalls === 1
+          ? jsonResponse({ detail: "Unauthorized" }, 401)
+          : jsonResponse({ error: "down" }, 500)
+      },
+      refresh: () =>
+        jsonResponse({
+          access_token: fakeAccessToken(now + 3_600_000, "refreshed"),
+          refresh_token: "refresh-token-2",
+        }),
+    })
+    const result = await refreshCodexModelCatalog(context, {
+      connectionId,
+      deadlineAt: stageDeadlineAt,
+      now,
+    })
+    expect(result).toEqual({
+      keptSnapshot: false,
+      reason: "unavailable",
+      status: "upstream-failure",
+    })
+    expect(modelsCalls).toBe(2)
+  })
+
+  it("still classifies a catalog 403 as a protocol failure without recovery", async () => {
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(now + 3_600_000),
+      expiresAtMs: now + 3_600_000,
+    })
+    const mock = installUpstreamMock({
+      models: () => jsonResponse({ detail: "Forbidden" }, 403),
+    })
+    const result = await refreshCodexModelCatalog(context, {
+      connectionId,
+      deadlineAt: stageDeadlineAt,
+      now,
+    })
+    expect(result).toEqual({
+      keptSnapshot: false,
+      reason: "protocol",
+      status: "upstream-failure",
+    })
+    expect(
+      mock.calls.filter((call) =>
+        call.url.includes("/backend-api/codex/models"),
+      ),
+    ).toHaveLength(1)
   })
 
   it("requires reauthorization before discovery on a disconnected connection", async () => {
