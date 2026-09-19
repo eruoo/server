@@ -17,6 +17,7 @@ import {
 import { acquireAiCredentialRefreshClaim } from "../../src/worker/ai/credentials"
 import {
   readAiInvocation,
+  assignAiInvocationIdentity,
   reserveAiInvocation,
 } from "../../src/worker/ai/invocations"
 import type { ResponsesRequestBody } from "../../src/worker/ai/responses-request"
@@ -155,13 +156,20 @@ async function reserve(input: {
 }): Promise<void> {
   const reserved = await reserveAiInvocation(env.DB, {
     apiKeyId,
-    connectionId,
     deadlineAt: input.deadlineAt,
     requestId,
     startedAt: input.startedAt,
-    upstreamModelId,
   })
   expect(reserved).toMatchObject({ reserved: true })
+  // The transport is invoked directly here, so the identity the route records
+  // after resolving the model is recorded by the fixture.
+  expect(
+    await assignAiInvocationIdentity(env.DB, {
+      connectionId,
+      requestId,
+      upstreamModelId,
+    }),
+  ).toEqual({ assigned: true })
 }
 
 function sseFrame(event: string, data: unknown): string {

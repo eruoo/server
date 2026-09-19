@@ -3,7 +3,8 @@ import { requestJson } from "../../lib/http"
 /** Invocation history metadata (no inputs, outputs, images, or tokens). */
 export interface AiInvocationRecord {
   apiKeyId: string
-  connectionId: string
+  /** Null while the invocation was still waiting to be identified. */
+  connectionId: string | null
   deadlineAt: number
   effectiveStatus: string
   endedAt: number | null
@@ -12,7 +13,7 @@ export interface AiInvocationRecord {
   requestId: string
   startedAt: number
   status: string
-  upstreamModelId: string
+  upstreamModelId: string | null
   upstreamRequestId: string | null
   usage: string | null
 }

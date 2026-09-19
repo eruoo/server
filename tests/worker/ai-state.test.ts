@@ -30,9 +30,11 @@ import {
   releaseAiCredentialRefreshClaim,
 } from "../../src/worker/ai/credentials"
 import {
+  assignAiInvocationIdentity,
   commitAiInvocationOutcome,
   listAiInvocationHistory,
   readAiInvocation,
+  releaseAiInvocationReservation,
   reserveAiInvocation,
 } from "../../src/worker/ai/invocations"
 import { commitAiModelSnapshot, listAiModels } from "../../src/worker/ai/models"
@@ -213,6 +215,7 @@ describe("AI state storage", () => {
     expect(migrations.results.map(({ name }) => name)).toEqual([
       "0001_foundation.sql",
       "0002_ai_service.sql",
+      "0003_invocation_admission.sql",
     ])
 
     const columns = await env.DB.prepare(
@@ -388,11 +391,16 @@ describe("AI state storage", () => {
     await reserveAiInvocation(env.DB, {
       requestId: invocationRequestId(1),
       apiKeyId: "key-history",
-      connectionId,
-      upstreamModelId: "gpt-6-astra",
       startedAt: now,
       deadlineAt: now + 300_000,
     })
+    expect(
+      await assignAiInvocationIdentity(env.DB, {
+        connectionId,
+        requestId: invocationRequestId(1),
+        upstreamModelId: "gpt-6-astra",
+      }),
+    ).toEqual({ assigned: true })
     await commitAiInvocationOutcome(env.DB, {
       requestId: invocationRequestId(1),
       status: "succeeded",
@@ -1132,20 +1140,30 @@ describe("AI state storage", () => {
     const first = await reserveAiInvocation(env.DB, {
       requestId: invocationRequestId(1),
       apiKeyId: "key-a",
-      connectionId,
-      upstreamModelId: "gpt-6-astra",
       startedAt: now,
       deadlineAt: now + 300_000,
     })
+    expect(
+      await assignAiInvocationIdentity(env.DB, {
+        connectionId,
+        requestId: invocationRequestId(1),
+        upstreamModelId: "gpt-6-astra",
+      }),
+    ).toEqual({ assigned: true })
     expect(first).toEqual({ reserved: true })
     const second = await reserveAiInvocation(env.DB, {
       requestId: invocationRequestId(2),
       apiKeyId: "key-b",
-      connectionId,
-      upstreamModelId: "gpt-6-astra",
       startedAt: now,
       deadlineAt: now + 300_000,
     })
+    expect(
+      await assignAiInvocationIdentity(env.DB, {
+        connectionId,
+        requestId: invocationRequestId(2),
+        upstreamModelId: "gpt-6-astra",
+      }),
+    ).toEqual({ assigned: true })
     expect(second).toEqual({ reserved: true })
 
     // The global quota is full: no third reservation is inserted.
@@ -1153,8 +1171,6 @@ describe("AI state storage", () => {
     const third = await reserveAiInvocation(env.DB, {
       requestId: invocationRequestId(3),
       apiKeyId: "key-c",
-      connectionId,
-      upstreamModelId: "gpt-6-astra",
       startedAt: now,
       deadlineAt: now + 300_000,
     })
@@ -1174,11 +1190,16 @@ describe("AI state storage", () => {
     const afterTerminal = await reserveAiInvocation(env.DB, {
       requestId: invocationRequestId(3),
       apiKeyId: "key-c",
-      connectionId,
-      upstreamModelId: "gpt-6-astra",
       startedAt: now + 6_000,
       deadlineAt: now + 306_000,
     })
+    expect(
+      await assignAiInvocationIdentity(env.DB, {
+        connectionId,
+        requestId: invocationRequestId(3),
+        upstreamModelId: "gpt-6-astra",
+      }),
+    ).toEqual({ assigned: true })
     expect(afterTerminal).toEqual({ reserved: true })
 
     // Per-key quota: the same key cannot hold two in-flight slots while the
@@ -1187,8 +1208,6 @@ describe("AI state storage", () => {
       await reserveAiInvocation(env.DB, {
         requestId: invocationRequestId(4),
         apiKeyId: "key-c",
-        connectionId,
-        upstreamModelId: "gpt-6-astra",
         startedAt: now + 7_000,
         deadlineAt: now + 307_000,
       }),
@@ -1200,8 +1219,6 @@ describe("AI state storage", () => {
         reserveAiInvocation(env.DB, {
           requestId: invocationRequestId(seed),
           apiKeyId: `key-race-${seed}`,
-          connectionId,
-          upstreamModelId: "gpt-6-astra",
           startedAt: now + 8_000,
           deadlineAt: now + 308_000,
         }),
@@ -1254,12 +1271,79 @@ describe("AI state storage", () => {
       reserveAiInvocation(env.DB, {
         requestId: invocationRequestId(9),
         apiKeyId: "key-expired",
-        connectionId,
-        upstreamModelId: "gpt-6-astra",
         startedAt: now,
         deadlineAt: now + 300_000,
       }),
     ).resolves.toMatchObject({ reserved: true })
+  })
+
+  it("identifies and releases only unidentified reservations", async () => {
+    await createConnectedConnection(connectionId, "main")
+    const requestId = invocationRequestId(1)
+
+    // Nothing to identify or release before the reservation exists.
+    expect(await releaseAiInvocationReservation(env.DB, requestId)).toEqual({
+      reason: "invocation-not-found",
+      released: false,
+    })
+    expect(
+      await assignAiInvocationIdentity(env.DB, {
+        connectionId,
+        requestId,
+        upstreamModelId: "gpt-6-astra",
+      }),
+    ).toEqual({ assigned: false, reason: "invocation-not-found" })
+
+    // A reservation that never started is given back immediately.
+    await reserveAiInvocation(env.DB, {
+      requestId,
+      apiKeyId: "key-release",
+      startedAt: now,
+      deadlineAt: now + 300_000,
+    })
+    expect(await releaseAiInvocationReservation(env.DB, requestId)).toEqual({
+      released: true,
+    })
+    expect(await readAiInvocation(env.DB, requestId, now)).toBeNull()
+
+    // Identity is recorded once, and a second writer cannot overwrite it.
+    await reserveAiInvocation(env.DB, {
+      requestId,
+      apiKeyId: "key-release",
+      startedAt: now,
+      deadlineAt: now + 300_000,
+    })
+    expect(
+      await assignAiInvocationIdentity(env.DB, {
+        connectionId,
+        requestId,
+        upstreamModelId: "gpt-6-astra",
+      }),
+    ).toEqual({ assigned: true })
+    expect(
+      await assignAiInvocationIdentity(env.DB, {
+        connectionId,
+        requestId,
+        upstreamModelId: "other-model",
+      }),
+    ).toEqual({ assigned: false, reason: "invocation-already-identified" })
+
+    // A call that already ran is never deleted by a late release, and its
+    // identity is preserved.
+    await commitAiInvocationOutcome(env.DB, {
+      requestId,
+      status: "succeeded",
+      endedAt: now + 1_000,
+    })
+    expect(await releaseAiInvocationReservation(env.DB, requestId)).toEqual({
+      reason: "invocation-not-reserved",
+      released: false,
+    })
+    expect(await readAiInvocation(env.DB, requestId, now)).toMatchObject({
+      connectionId,
+      status: "succeeded",
+      upstreamModelId: "gpt-6-astra",
+    })
   })
 
   it("uses the partial in-flight indexes for quota and cleanup predicates", async () => {

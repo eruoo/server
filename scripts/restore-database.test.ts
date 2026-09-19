@@ -28,12 +28,17 @@ const aiServiceSql = await readFile(
   path.resolve("migrations/0002_ai_service.sql"),
   "utf8",
 )
+const invocationAdmissionSql = await readFile(
+  path.resolve("migrations/0003_invocation_admission.sql"),
+  "utf8",
+)
 const repositoryMigrations = [
   { name: "0001_foundation.sql", sql: foundationSql },
 ] as const
 const fullRepositoryMigrations = [
   { name: "0001_foundation.sql", sql: foundationSql },
   { name: "0002_ai_service.sql", sql: aiServiceSql },
+  { name: "0003_invocation_admission.sql", sql: invocationAdmissionSql },
 ] as const
 
 function descriptor() {
@@ -84,6 +89,8 @@ async function createDump(
 
 const aiLedgerSql = `INSERT INTO "d1_migrations" ("id", "name", "applied_at") VALUES (1, '0001_foundation.sql', '2026-09-17 00:00:00');
 INSERT INTO "d1_migrations" ("id", "name", "applied_at") VALUES (2, '0002_ai_service.sql', '2026-09-18 00:00:00');`
+const aiAdmissionLedgerSql = `${aiLedgerSql}
+INSERT INTO "d1_migrations" ("id", "name", "applied_at") VALUES (3, '0003_invocation_admission.sql', '2026-09-19 00:00:00');`
 
 const connectedConnectionId = "33333333-3333-4333-8333-333333333330"
 const freshConnectionId = "33333333-3333-4333-8333-333333333331"
@@ -115,6 +122,37 @@ const aiSeedSql = [
   aiModelSeedSql,
   aiInvocationSeedSql,
 ].join("\n")
+
+/**
+ * An admission-era reservation that was admitted before the model was
+ * resolved: it carries no identity at all, which only the nullable columns of
+ * the admission migration can represent.
+ */
+const aiUnidentifiedInvocationSeedSql = `INSERT INTO "ai_invocations" VALUES ('88888888-8888-4888-8888-888888888882', 'key-3', NULL, NULL, 1799991000000, 1799994000000, 1799994030000, 'reserved', NULL, NULL, NULL, NULL);`
+
+const aiAdmissionSeedSql = `${aiSeedSql}\n${aiUnidentifiedInvocationSeedSql}`
+
+/**
+ * The AI schema exactly as the three migrations leave it, in the statement
+ * shape a snapshot carries. The admission migration rebuilds the table in
+ * place, so the resulting schema cannot be sliced out of the migration text.
+ */
+function admissionEraAiSchemaSql(): string {
+  const database = new DatabaseSync(":memory:")
+  try {
+    database.exec(foundationSql)
+    database.exec(aiServiceSql)
+    database.exec(invocationAdmissionSql)
+    const rows = database
+      .prepare(
+        "SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name LIKE 'ai!_%' ESCAPE '!' ORDER BY type DESC, name",
+      )
+      .all() as { sql: string }[]
+    return rows.map((row) => `${row.sql};`).join("\n")
+  } finally {
+    database.close()
+  }
+}
 
 async function writeSql(sql: string): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "eruoo-restore-test-"))
@@ -537,6 +575,140 @@ describe("AI-era restore planning", () => {
     },
   )
 
+  it("preserves invocation rows and their identity while the admission migration relaxes the identity columns", async () => {
+    const database = new DatabaseSync(":memory:")
+    try {
+      // The migration is applied forward to a database that already holds the
+      // 0002-era rows, which is what a production upgrade does.
+      database.exec(foundationSql)
+      database.exec(aiServiceSql)
+      database.exec(aiSeedSql)
+      database.exec(invocationAdmissionSql)
+
+      expect(
+        database
+          .prepare(
+            'SELECT "requestId", "connectionId", "upstreamModelId", "status", "endedAt", "upstreamRequestId", "usage" FROM "ai_invocations" ORDER BY "requestId"',
+          )
+          .all(),
+      ).toEqual([
+        {
+          connectionId: connectedConnectionId,
+          endedAt: null,
+          requestId: "88888888-8888-4888-8888-888888888880",
+          status: "reserved",
+          upstreamModelId: "gpt-6-astra",
+          upstreamRequestId: null,
+          usage: null,
+        },
+        {
+          connectionId: connectedConnectionId,
+          endedAt: 1799983000000,
+          requestId: "88888888-8888-4888-8888-888888888881",
+          status: "succeeded",
+          upstreamModelId: "gpt-6-astra",
+          upstreamRequestId: "req_upstream_1",
+          usage: '{"input_tokens":12,"output_tokens":34}',
+        },
+      ])
+
+      // The identity columns are nullable now, and an unidentified
+      // reservation is exactly that: no identity, never a fabricated one.
+      const columns = database
+        .prepare('PRAGMA main.table_xinfo("ai_invocations")')
+        .all() as { name: string; notnull: number }[]
+      expect(
+        columns
+          .filter(
+            (column) =>
+              column.name === "connectionId" ||
+              column.name === "upstreamModelId",
+          )
+          .map((column) => column.notnull),
+      ).toEqual([0, 0])
+      database.exec(aiUnidentifiedInvocationSeedSql)
+
+      // The rebuilt table keeps its indexes and its checks.
+      expect(
+        database
+          .prepare(
+            "SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'ai_invocations' AND name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY name",
+          )
+          .all(),
+      ).toEqual([
+        { name: "ai_invocations_inflight_apiKey_lease_idx" },
+        { name: "ai_invocations_inflight_lease_idx" },
+        { name: "ai_invocations_startedAt_requestId_idx" },
+      ])
+      expect(() =>
+        database.exec(
+          `INSERT INTO "ai_invocations" VALUES ('88888888-8888-4888-8888-888888888883', 'key-4', NULL, NULL, 1799991000000, 1799994000000, 1799994030000, 'unknown', NULL, NULL, NULL, NULL);`,
+        ),
+      ).toThrow(/CHECK constraint failed/u)
+    } finally {
+      database.close()
+    }
+  })
+
+  it.each([false, true])(
+    "validates an admission-era snapshot against the full manifest (deployment receipt: %s)",
+    async (hasDeploymentReceipt) => {
+      const extraSql =
+        aiAdmissionSeedSql +
+        (hasDeploymentReceipt
+          ? migrationReceiptTableSql +
+            `INSERT INTO deployment_migrations VALUES (1,'source-db','{}');`
+          : "")
+      const snapshot = await writeSql(
+        await createDump(
+          extraSql,
+          aiAdmissionLedgerSql,
+          admissionEraAiSchemaSql(),
+        ),
+      )
+
+      const inspection = await inspectBackupSql(
+        snapshot,
+        fullRepositoryMigrations,
+      )
+      expect(inspection.hasAiApplicationTables).toBe(true)
+      expect(inspection.migration).toMatchObject({
+        count: 3,
+        latestId: 3,
+        latestName: "0003_invocation_admission.sql",
+      })
+
+      // The scrub runs on the snapshot's original schema, which is the
+      // admission-era schema here: it must stay executable against it.
+      const scrub = createCredentialScrubSql({
+        hasAiApplicationTables: true,
+        hasDeploymentReceipt: hasDeploymentReceipt,
+      })
+      const database = new DatabaseSync(":memory:")
+      try {
+        database.exec(foundationSql)
+        database.exec(aiServiceSql)
+        database.exec(invocationAdmissionSql)
+        database.exec(aiAdmissionSeedSql)
+        if (hasDeploymentReceipt) database.exec(migrationReceiptTableSql)
+        database.exec(`BEGIN IMMEDIATE;\n${scrub}\nCOMMIT;`)
+        expect(
+          database
+            .prepare(
+              "SELECT status, endedAt, connectionId FROM ai_invocations WHERE requestId = '88888888-8888-4888-8888-888888888882'",
+            )
+            .get(),
+        ).toEqual({
+          connectionId: null,
+          endedAt: 1799994030000,
+          status: "unknown",
+        })
+      } finally {
+        database.close()
+      }
+    },
+  )
+
   it("rejects AI tables in a snapshot whose ledger claims only 0001", async () => {
     const snapshot = await writeSql(
       await createDump(aiSeedSql, undefined, aiServiceSql),
@@ -642,6 +814,9 @@ describe("AI-era restore planning", () => {
       )
       expect(plan.generatedSql.targetMigrationReceipt).toContain(
         "0002_ai_service.sql",
+      )
+      expect(plan.generatedSql.targetMigrationReceipt).toContain(
+        "0003_invocation_admission.sql",
       )
 
       // The plan's step order must match the local semantic validation:

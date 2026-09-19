@@ -77,7 +77,10 @@ onUnmounted(() => {
     <p v-if="!busy && records.length === 0">最近 30 天没有调用记录。</p>
     <ul class="credential-list">
       <li v-for="record in records" :key="record.requestId">
-        <h2>{{ record.effectiveStatus }} · {{ record.upstreamModelId }}</h2>
+        <h2>
+          {{ record.effectiveStatus }} ·
+          {{ record.upstreamModelId ?? "模型未识别" }}
+        </h2>
         <p>
           {{ formatTime(record.startedAt) }} → {{ formatTime(record.endedAt) }}
         </p>
