@@ -15,6 +15,25 @@ const cookie = {
   httpOnly: true,
   sameSite: "Lax" as const,
 }
+// Runs before the Passkey test below, which logs out and deletes the session
+// row this cookie depends on. The AI reads hit the real worker routes.
+test("signed-in AI deep links mount the management panels", async ({
+  page,
+  context,
+}) => {
+  await context.addCookies([cookie])
+  await page.goto("/security/ai-connections")
+  await expect(page.getByRole("heading", { name: "AI 连接" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "新建连接" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "请先登录" })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "刷新列表" })).toBeVisible()
+
+  await page.goto("/security/ai-invocations")
+  await expect(page.getByRole("heading", { name: "调用记录" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "请先登录" })).toHaveCount(0)
+  await expect(page.getByText("最近 30 天没有调用记录。")).toBeVisible()
+})
+
 test("Web management and complete Passkey registration/login/logout", async ({
   page,
   context,
