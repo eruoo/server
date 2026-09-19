@@ -475,7 +475,22 @@ export interface ConsumeResponsesUpstreamInput {
   onEvent?: UpstreamFrameSink
   /** Optional heartbeat owner (downstream SSE mode only). */
   heartbeatSink?: ResponsesHeartbeatSink
+  /** Client cancellation; yields `aborted` and delivers nothing. */
   signal?: AbortSignal
+  /**
+   * Upstream silence budget in milliseconds. When no body chunk arrives for
+   * this long the call fails as unavailable — a transport timeout, not a
+   * client abort, so a writable downstream still receives its terminal. The
+   * timer starts with each awaited read and is reset by data, never by a
+   * heartbeat.
+   */
+  noDataIntervalMs?: number
+  /**
+   * Absolute transport deadline. Firing it fails the call as unavailable for
+   * the same reason as the silence budget; client cancellation is expressed
+   * through `signal` instead.
+   */
+  deadlineSignal?: AbortSignal
 }
 
 class CancellableSleep {
@@ -513,18 +528,84 @@ export async function consumeResponsesUpstream(
   let terminal: ResponsesTerminalResult | null = null
   let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>> | null = null
   let pendingSleep: CancellableSleep | null = null
+  let pendingNoData: CancellableSleep | null = null
+  const timeoutFailure = (): ResponsesTerminalResult => ({
+    failure: { kind: "unavailable" },
+    kind: "failed",
+  })
+  // The deadline is a race participant, not just a loop-boundary check: a
+  // stalled read must end the call even when the runtime does not error the
+  // body stream on abort.
+  const deadlinePromise =
+    input.deadlineSignal === undefined
+      ? null
+      : new Promise<"deadline">((resolve) => {
+          if (input.deadlineSignal?.aborted) resolve("deadline")
+          else {
+            input.deadlineSignal?.addEventListener(
+              "abort",
+              () => resolve("deadline"),
+              { once: true },
+            )
+          }
+        })
   try {
     while (terminal === null) {
       if (input.signal?.aborted) {
         await reader.cancel()
         return { kind: "aborted" }
       }
+      if (input.deadlineSignal?.aborted) {
+        await reader.cancel().catch(() => undefined)
+        return timeoutFailure()
+      }
       const heartbeatDelay = input.heartbeatSink?.heartbeatDelayMs() ?? null
       if (heartbeatDelay === null || heartbeatDelay > 0) {
-        if (pendingRead === null) pendingRead = reader.read()
+        if (pendingRead === null) {
+          pendingRead = reader.read()
+          // The silence budget starts with each awaited read; heartbeats
+          // never reset it, so a chatty downstream cannot mask a silent
+          // upstream.
+          if (
+            input.noDataIntervalMs !== undefined &&
+            input.noDataIntervalMs > 0
+          ) {
+            pendingNoData = new CancellableSleep(input.noDataIntervalMs)
+          }
+        }
         if (heartbeatDelay === null) {
-          const { done, value } = await pendingRead
+          const racers = [
+            pendingRead.then((result) => ({
+              kind: "read" as const,
+              result,
+            })),
+            ...(pendingNoData === null
+              ? []
+              : [
+                  pendingNoData.promise.then(() => ({
+                    kind: "no-data" as const,
+                  })),
+                ]),
+            ...(deadlinePromise === null
+              ? []
+              : [
+                  deadlinePromise.then(() => ({
+                    kind: "deadline" as const,
+                  })),
+                ]),
+          ]
+          const winner =
+            racers.length === 1
+              ? { kind: "read" as const, result: await pendingRead }
+              : await Promise.race(racers)
+          if (winner.kind === "no-data" || winner.kind === "deadline") {
+            await reader.cancel().catch(() => undefined)
+            return timeoutFailure()
+          }
+          pendingNoData?.cancel()
+          pendingNoData = null
           pendingRead = null
+          const { done, value } = winner.result
           if (done) break
           readBytes += value.byteLength
           if (readBytes > AI_RESPONSES_STREAM_MAX_BYTES) {
@@ -544,13 +625,33 @@ export async function consumeResponsesUpstream(
         pendingSleep = new CancellableSleep(heartbeatDelay)
         const winner = await Promise.race([
           pendingRead.then((result) => ({ kind: "read" as const, result })),
-          pendingSleep.promise.then((kind) => ({ kind })),
+          pendingSleep.promise.then(() => ({ kind: "timer" as const })),
+          ...(pendingNoData === null
+            ? []
+            : [
+                pendingNoData.promise.then(() => ({
+                  kind: "no-data" as const,
+                })),
+              ]),
+          ...(deadlinePromise === null
+            ? []
+            : [
+                deadlinePromise.then(() => ({
+                  kind: "deadline" as const,
+                })),
+              ]),
         ])
         pendingSleep.cancel()
+        if (winner.kind === "no-data" || winner.kind === "deadline") {
+          await reader.cancel().catch(() => undefined)
+          return timeoutFailure()
+        }
         if (winner.kind === "timer") {
           await input.heartbeatSink?.sendHeartbeatIfDue()
           continue
         }
+        pendingNoData?.cancel()
+        pendingNoData = null
         pendingRead = null
         const { done, value } = winner.result
         if (done) break
@@ -593,10 +694,16 @@ export async function consumeResponsesUpstream(
     if (input.signal?.aborted) {
       return { kind: "aborted" }
     }
+    if (input.deadlineSignal?.aborted) {
+      // The transport deadline aborted the body under this read; that is a
+      // timeout, not a malformed upstream stream.
+      return timeoutFailure()
+    }
     // Reader errors (network drops) are abnormal stream ends.
     return { kind: "protocol-failure", code: "missing-terminal" }
   } finally {
     pendingSleep?.cancel()
+    pendingNoData?.cancel()
     reader.releaseLock()
   }
 }
