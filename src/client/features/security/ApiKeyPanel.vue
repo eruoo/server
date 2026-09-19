@@ -30,10 +30,19 @@ const session = useSession()
 const name = shallowRef("")
 const days = shallowRef(180)
 const selectedModels = shallowRef<string[]>([])
-const grantDraft = shallowRef<Record<string, string[]>>({})
+/** The raw text of each edited grant field; parsing happens on save only. */
+const grantDraft = shallowRef<Record<string, string>>({})
 const catalogLoaded = shallowRef(false)
 const secret = shallowRef<{ id: string; value: string } | null>(null)
 const copyMessage = shallowRef("")
+/**
+ * True while the panel loads its own view: the connection catalog plus the key
+ * list of the active profile. The form and the rows stay disabled for that
+ * whole window — a field that is enabled while a read is still on its way
+ * would be disabled again by that read and silently drop what was typed.
+ */
+const loadingProfile = shallowRef(true)
+const panelBusy = computed(() => list.busy.value || loadingProfile.value)
 const aiProfile = computed(() => profile.value === API_KEY_AI_CONFIG_ID)
 const availableModels = computed(() =>
   connections.value.flatMap((connection) =>
@@ -61,14 +70,30 @@ async function loadConnections() {
     catalogLoaded.value = false
   }
 }
+/**
+ * Loads everything the active profile's view needs under one busy window.
+ * Both reads handle their own failures and always resolve, so the combined
+ * wait never rejects.
+ */
+async function loadProfileView() {
+  loadingProfile.value = true
+  try {
+    await Promise.all([loadConnections(), list.load()])
+  } finally {
+    loadingProfile.value = false
+  }
+}
 async function switchProfile(next: string) {
-  if (next === profile.value) return
+  if (next === profile.value || panelBusy.value) return
   forget()
+  // The visible list belongs to the profile that is being left: drop it before
+  // the first await, so a failed read can neither show the previous profile's
+  // keys nor let a row action reach them with the new configId.
+  list.reset()
   profile.value = next
   selectedModels.value = []
   grantDraft.value = {}
-  if (next === API_KEY_AI_CONFIG_ID) await loadConnections()
-  await list.load()
+  await loadProfileView()
 }
 async function create() {
   forget()
@@ -124,16 +149,21 @@ function grantedModels(key: KeyWithGrants): string[] {
     })
 }
 function draftFor(key: KeyWithGrants): string {
-  return (grantDraft.value[key.id] ?? grantedModels(key)).join(", ")
+  return grantDraft.value[key.id] ?? grantedModels(key).join(", ")
 }
 function updateDraft(key: KeyWithGrants, value: string) {
-  grantDraft.value = {
-    ...grantDraft.value,
-    [key.id]: value
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0),
-  }
+  grantDraft.value = { ...grantDraft.value, [key.id]: value }
+}
+/**
+ * The draft keeps the owner's raw text, separators included, so typing a comma
+ * or a space never rewrites the field. Saving parses it: an empty field saves
+ * an empty list, which is how every model grant is revoked.
+ */
+function parseGrantDraft(draft: string): string[] {
+  return draft
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
 }
 async function saveGrants(key: KeyWithGrants) {
   const draft = grantDraft.value[key.id]
@@ -141,7 +171,7 @@ async function saveGrants(key: KeyWithGrants) {
   // connection cannot be resolved, so it stays disabled instead.
   if (draft === undefined || !catalogLoaded.value) return
   await list.mutate(async () => {
-    await updateAiKeyModelGrants(key.id, key.name ?? "", draft)
+    await updateAiKeyModelGrants(key.id, key.name ?? "", parseGrantDraft(draft))
     const next = { ...grantDraft.value }
     delete next[key.id]
     grantDraft.value = next
@@ -158,10 +188,7 @@ async function copy() {
       copyMessage.value = "复制失败，请手动选择并复制。"
   }
 }
-onMounted(async () => {
-  await loadConnections()
-  await list.load()
-})
+onMounted(loadProfileView)
 onUnmounted(() => {
   disposed = true
   forget()
@@ -180,7 +207,7 @@ onUnmounted(() => {
         class="pressable"
         :aria-selected="!aiProfile"
         role="tab"
-        :disabled="list.busy.value"
+        :disabled="panelBusy"
         @click="switchProfile(API_KEY_DEFAULT_CONFIG_ID)"
       >
         状态密钥
@@ -189,7 +216,7 @@ onUnmounted(() => {
         class="pressable"
         :aria-selected="aiProfile"
         role="tab"
-        :disabled="list.busy.value"
+        :disabled="panelBusy"
         @click="switchProfile(API_KEY_AI_CONFIG_ID)"
       >
         AI 密钥
@@ -202,7 +229,7 @@ onUnmounted(() => {
           data-testid="key-name"
           required
           maxlength="100"
-          :disabled="list.busy.value"
+          :disabled="panelBusy"
       /></label>
       <label
         >有效天数<input
@@ -212,12 +239,12 @@ onUnmounted(() => {
           min="1"
           max="365"
           step="1"
-          :disabled="list.busy.value"
+          :disabled="panelBusy"
       /></label>
       <button
         class="primary pressable"
         :disabled="
-          list.busy.value ||
+          panelBusy ||
           (aiProfile && selectedModels.length === 0) ||
           (aiProfile && availableModels.length === 0)
         "
@@ -238,7 +265,7 @@ onUnmounted(() => {
         <input
           type="checkbox"
           :checked="selectedModels.includes(model)"
-          :disabled="list.busy.value"
+          :disabled="panelBusy"
           @change="toggleModel(model)"
         />
         {{ model }}
@@ -272,7 +299,7 @@ onUnmounted(() => {
           >名称<input
             :value="key.name ?? ''"
             maxlength="100"
-            :disabled="list.busy.value"
+            :disabled="panelBusy"
             @change="
               list.mutate(() =>
                 renameApiKeyInProfile(
@@ -296,14 +323,14 @@ onUnmounted(() => {
             >模型许可<input
               :value="draftFor(key)"
               data-testid="key-grant"
-              :disabled="list.busy.value"
+              :disabled="panelBusy"
               @input="
                 updateDraft(key, ($event.target as HTMLInputElement).value)
               "
           /></label>
           <button
             class="pressable"
-            :disabled="list.busy.value || !catalogLoaded"
+            :disabled="panelBusy || !catalogLoaded"
             @click="saveGrants(key)"
           >
             保存模型许可
@@ -314,14 +341,14 @@ onUnmounted(() => {
         </template>
         <ConfirmAction
           action-label="撤销"
-          :busy="list.busy.value || session.status.value !== 'authenticated'"
+          :busy="panelBusy || session.status.value !== 'authenticated'"
           title="撤销 API Key"
           description="撤销后，此密钥立即停止访问服务。"
           @confirm="revoke(key.id)"
         />
       </li>
     </ul>
-    <button class="pressable" :disabled="list.busy.value" @click="list.load">
+    <button class="pressable" :disabled="panelBusy" @click="list.load">
       刷新列表
     </button>
   </section>
