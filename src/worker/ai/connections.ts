@@ -92,6 +92,21 @@ export async function getAiConnection(
   return row === null ? null : toAiConnectionRecord(row)
 }
 
+/** Resolves one connection by its immutable unique slug. */
+export async function getAiConnectionBySlug(
+  database: D1Database,
+  slug: string,
+): Promise<AiConnectionRecord | null> {
+  if (!isAiConnectionSlug(slug)) {
+    throw new RangeError("The AI connection slug is invalid.")
+  }
+  const row = await database
+    .prepare('SELECT * FROM "ai_connections" WHERE "slug" = ?1')
+    .bind(slug)
+    .first<AiConnectionRow>()
+  return row === null ? null : toAiConnectionRecord(row)
+}
+
 export async function listAiConnections(
   database: D1Database,
 ): Promise<AiConnectionRecord[]> {

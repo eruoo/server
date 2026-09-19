@@ -7,6 +7,11 @@ import { APIError } from "better-auth/api"
 import { jwt } from "better-auth/plugins"
 
 import {
+  API_KEY_AI_CONFIG_ID,
+  API_KEY_AI_OPERATIONS,
+  API_KEY_DEFAULT_CONFIG_ID,
+} from "../shared/api-key"
+import {
   enabledOAuthClientIds,
   oauthScopes,
   OAUTH_REFRESH_TOKEN_MAX_TTL_SECONDS,
@@ -258,24 +263,51 @@ export function createAuthOptions(
         scopes: [...oauthScopes],
         storeTokens: "hashed",
       }),
-      apiKey({
-        apiKeyHeaders: "x-api-key",
-        configId: "default",
-        defaultPrefix: "eruoo_",
-        deferUpdates: false,
-        disableKeyHashing: false,
-        enableSessionForAPIKeys: false,
-        keyExpiration: {
-          defaultExpiresIn: 180 * DAYS_IN_SECONDS,
-          disableCustomExpiresTime: false,
-          minExpiresIn: 1,
-          maxExpiresIn: 365,
+      // Two application profiles share one plugin: `default` (status) and
+      // `ai` (invocation). The plugin resolves an unknown configId to the
+      // default profile, so every profile the gateway accepts must be
+      // declared here; the gateway rejects anything else before it reaches
+      // the plugin. AI model grants are per key and built server-side.
+      apiKey([
+        {
+          apiKeyHeaders: "x-api-key",
+          configId: API_KEY_DEFAULT_CONFIG_ID,
+          defaultPrefix: "eruoo_",
+          deferUpdates: false,
+          disableKeyHashing: false,
+          enableSessionForAPIKeys: false,
+          keyExpiration: {
+            defaultExpiresIn: 180 * DAYS_IN_SECONDS,
+            disableCustomExpiresTime: false,
+            minExpiresIn: 1,
+            maxExpiresIn: 365,
+          },
+          permissions: { defaultPermissions: { status: ["read"] } },
+          rateLimit: { enabled: true, maxRequests: 60, timeWindow: 60_000 },
+          requireName: true,
+          storage: "database",
         },
-        permissions: { defaultPermissions: { status: ["read"] } },
-        rateLimit: { enabled: true, maxRequests: 60, timeWindow: 60_000 },
-        requireName: true,
-        storage: "database",
-      }),
+        {
+          apiKeyHeaders: "x-api-key",
+          configId: API_KEY_AI_CONFIG_ID,
+          defaultPrefix: "eruoo_",
+          deferUpdates: false,
+          disableKeyHashing: false,
+          enableSessionForAPIKeys: false,
+          keyExpiration: {
+            defaultExpiresIn: 180 * DAYS_IN_SECONDS,
+            disableCustomExpiresTime: false,
+            minExpiresIn: 1,
+            maxExpiresIn: 365,
+          },
+          permissions: {
+            defaultPermissions: { ai: [...API_KEY_AI_OPERATIONS] },
+          },
+          rateLimit: { enabled: true, maxRequests: 60, timeWindow: 60_000 },
+          requireName: true,
+          storage: "database",
+        },
+      ]),
       passkey({
         rpID: origin.hostname,
         rpName: "eruoo",

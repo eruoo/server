@@ -3,9 +3,15 @@ import type { OpenAPIHono } from "@hono/zod-openapi"
 import type { Context } from "hono"
 
 import {
+  API_KEY_AI_CONFIG_ID,
+  API_KEY_AI_PURPOSE,
   API_KEY_DEFAULT_CONFIG_ID,
   API_KEY_STATUS_PURPOSE,
 } from "../../shared/api-key"
+import {
+  buildAiKeyPermissions,
+  resolveAiModelSelection,
+} from "../ai/model-authorization"
 import { problem, problemSchema } from "../http/response"
 import type { AppBindings, OwnerSession } from "../http/types"
 import { duplicateTopLevelJsonKeys } from "./json-duplicate-keys"
@@ -43,7 +49,7 @@ export function isApiKeyManagementOperation(
 
 /** 当前开放的应用侧配置档；未知档拒绝，不交给插件回退到默认档。 */
 const apiKeyConfigIdSchema = z
-  .enum([API_KEY_DEFAULT_CONFIG_ID])
+  .enum([API_KEY_DEFAULT_CONFIG_ID, API_KEY_AI_CONFIG_ID])
   .meta({ description: "API key configuration profile." })
 
 const apiKeyNameSchema = z
@@ -61,10 +67,17 @@ const createApiKeyBodySchema = z
   .object({
     name: apiKeyNameSchema,
     expiresIn: expiresInSchema.optional(),
-    purpose: z.literal(API_KEY_STATUS_PURPOSE).optional().meta({
+    modelIds: z.array(z.string().min(1)).min(1).max(200).optional().meta({
       description:
-        "Usage selector. Omitted or `status` maps to the default profile; other usages are not open yet.",
+        "External model IDs (`connection-slug/upstream-model-id`). Required for the ai profile; rejected for the default profile.",
     }),
+    purpose: z
+      .enum([API_KEY_STATUS_PURPOSE, API_KEY_AI_PURPOSE])
+      .optional()
+      .meta({
+        description:
+          "Usage selector. Omitted or `status` maps to the default profile; `ai` maps to the ai profile.",
+      }),
   })
   .strict()
 
@@ -73,6 +86,10 @@ const updateApiKeyBodySchema = z
     keyId: z.string().min(1).meta({ description: "API key ID." }),
     configId: apiKeyConfigIdSchema.optional(),
     name: apiKeyNameSchema,
+    modelIds: z.array(z.string().min(1)).max(200).optional().meta({
+      description:
+        "Replacement model grant for the ai profile. Omitted keeps the current grant; an empty array revokes every model. Rejected for the default profile.",
+    }),
   })
   .strict()
 
@@ -168,7 +185,7 @@ const createApiKeyRoute = createRoute({
     default: apiKeyManagementErrorResponse,
     200: {
       description:
-        "API key created for the default profile; the raw key is returned only here",
+        "API key created inside one configuration profile; the raw key is returned only here",
       content: { "application/json": { schema: createdApiKeySchema } },
     },
   },
@@ -218,7 +235,8 @@ const updateApiKeyRoute = createRoute({
   responses: {
     default: apiKeyManagementErrorResponse,
     200: {
-      description: "API key renamed inside one configuration profile",
+      description:
+        "API key renamed, and for the ai profile re-granted, inside one configuration profile",
       content: { "application/json": { schema: apiKeySchema } },
     },
   },
@@ -312,14 +330,32 @@ async function handleCreate(
         : "validation-failed",
       requestId,
     )
+  const aiProfile = parsed.data.purpose === API_KEY_AI_PURPOSE
+  // The ai profile requires a model selection; the default profile rejects
+  // the field instead of ignoring it.
+  if (aiProfile && parsed.data.modelIds === undefined)
+    return problem("validation-failed", requestId)
+  if (!aiProfile && parsed.data.modelIds !== undefined)
+    return problem("validation-failed", requestId)
+
+  let permissions: Record<string, string[]> | undefined
+  if (aiProfile) {
+    const resolved = await resolveAiModelSelection(
+      c.env.DB,
+      parsed.data.modelIds ?? [],
+    )
+    if (!resolved.ok) return problem("validation-failed", requestId)
+    permissions = buildAiKeyPermissions(resolved.entries)
+  }
   return callPluginApi(c, () =>
     getRequestAuth(c).api.createApiKey({
       body: {
-        configId: API_KEY_DEFAULT_CONFIG_ID,
+        configId: aiProfile ? API_KEY_AI_CONFIG_ID : API_KEY_DEFAULT_CONFIG_ID,
         name: parsed.data.name,
         ...(parsed.data.expiresIn === undefined
           ? {}
           : { expiresIn: parsed.data.expiresIn }),
+        ...(permissions === undefined ? {} : { permissions }),
         userId: owner.subject,
       },
       asResponse: true,
@@ -369,12 +405,30 @@ async function handleUpdate(
   if (!body.ok) return problem("invalid-request", requestId)
   const parsed = updateApiKeyBodySchema.safeParse(body.body)
   if (!parsed.success) return problem("validation-failed", requestId)
+  const configId = parsed.data.configId ?? API_KEY_DEFAULT_CONFIG_ID
+  // Model grants exist only in the ai profile; the default profile rejects
+  // the field rather than silently dropping it.
+  if (configId !== API_KEY_AI_CONFIG_ID && parsed.data.modelIds !== undefined)
+    return problem("validation-failed", requestId)
+
+  let permissions: Record<string, string[]> | undefined
+  if (configId === API_KEY_AI_CONFIG_ID && parsed.data.modelIds !== undefined) {
+    const resolved = await resolveAiModelSelection(
+      c.env.DB,
+      parsed.data.modelIds,
+    )
+    if (!resolved.ok) return problem("validation-failed", requestId)
+    // An empty selection revokes every model grant while keeping the fixed
+    // operations, so the key stays valid but can invoke nothing.
+    permissions = buildAiKeyPermissions(resolved.entries)
+  }
   return callPluginApi(c, () =>
     getRequestAuth(c).api.updateApiKey({
       body: {
-        configId: parsed.data.configId ?? API_KEY_DEFAULT_CONFIG_ID,
+        configId,
         keyId: parsed.data.keyId,
         name: parsed.data.name,
+        ...(permissions === undefined ? {} : { permissions }),
         userId: owner.subject,
       },
       asResponse: true,
