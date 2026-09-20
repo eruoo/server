@@ -52,7 +52,7 @@ const CODEX_UPSTREAM_ORIGINATOR = "eruoo"
 const CODEX_UPSTREAM_USER_AGENT = "eruoo/1"
 
 const CODEX_UPSTREAM_RESPONSE_BODY_LIMIT = 1_048_576
-/** Bounded prefix of an upstream error body kept for internal classification. */
+/** Error bodies exceeding this bound are discarded, never truncated. */
 const CODEX_UPSTREAM_ERROR_BODY_LIMIT = 4_096
 
 export interface CodexProviderDefinition {
@@ -80,14 +80,68 @@ export interface CodexUpstreamCallOptions {
   timeoutMs: number
 }
 
+/** Internal, allowlisted metadata; never part of the public API or audit data. */
+export interface CodexModelResponseDiagnostics {
+  cfMitigated: "challenge" | "absent" | "other"
+  contentType: "json" | "html" | "other" | "absent"
+  cfRay?: string
+  upstreamRequestId?: string
+}
+
+function readModelResponseDiagnostics(
+  headers: Headers,
+): CodexModelResponseDiagnostics {
+  const mitigated = headers.get("cf-mitigated")
+  const rawContentType = headers.get("content-type")
+  const mediaType =
+    rawContentType !== null && rawContentType.length <= 256
+      ? rawContentType.split(";", 1)[0]?.trim().toLowerCase()
+      : undefined
+  const cfRay = headers.get("cf-ray")
+  const requestId = headers.get("x-request-id")
+  return {
+    cfMitigated:
+      mitigated === null
+        ? "absent"
+        : mitigated === "challenge"
+          ? "challenge"
+          : "other",
+    contentType:
+      rawContentType === null
+        ? "absent"
+        : mediaType === "application/json"
+          ? "json"
+          : mediaType === "text/html"
+            ? "html"
+            : "other",
+    ...(cfRay !== null &&
+    cfRay.length === 20 &&
+    /^[a-fA-F0-9]{16}-[A-Z]{3}$/.test(cfRay)
+      ? { cfRay }
+      : {}),
+    ...(requestId !== null &&
+    requestId.length <= 68 &&
+    /^(?:[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}|req_[a-zA-Z0-9]{16,64})$/.test(
+      requestId,
+    )
+      ? { upstreamRequestId: requestId }
+      : {}),
+  }
+}
+
 export type CodexUpstreamFailure =
   | { kind: "network"; cause: string }
   /**
-   * Non-2xx outcome. `body` carries a bounded prefix of the upstream error
+   * Non-2xx outcome. `body` carries a bounded upstream error
    * body for internal classification only (the refresh rejection codes); it
    * is never surfaced in results, responses, or logs.
    */
-  | { kind: "http"; status: number; body?: string }
+  | {
+      kind: "http"
+      status: number
+      body?: string
+      modelResponseDiagnostics?: CodexModelResponseDiagnostics
+    }
   | { kind: "protocol"; detail: string }
 
 export type CodexUpstreamCallResult<T> =
@@ -152,6 +206,7 @@ async function fetchUpstream(
     headers?: Record<string, string>
   },
   options: CodexUpstreamCallOptions,
+  diagnosticScope?: "model-catalog",
 ): Promise<CodexUpstreamCallResult<string>> {
   try {
     const response = await fetch(url, {
@@ -168,7 +223,11 @@ async function fetchUpstream(
       signal: composeAbortSignal(options),
     })
     if (!(response.status >= 200 && response.status <= 299)) {
-      // A bounded error-body prefix is kept for internal classification; the
+      const modelResponseDiagnostics =
+        diagnosticScope === "model-catalog"
+          ? readModelResponseDiagnostics(response.headers)
+          : undefined
+      // A bounded error body is kept for internal classification; the
       // text itself is never surfaced: upstream error bodies are not part of
       // the fixed contract and must not leak into results or logs.
       let body: string | undefined
@@ -179,7 +238,14 @@ async function fetchUpstream(
       }
       return {
         ok: false,
-        failure: { body, kind: "http", status: response.status },
+        failure: {
+          body,
+          kind: "http",
+          status: response.status,
+          ...(modelResponseDiagnostics === undefined
+            ? {}
+            : { modelResponseDiagnostics }),
+        },
       }
     }
     return {
@@ -578,6 +644,7 @@ export async function listCodexModels(
       method: "GET",
     },
     options,
+    "model-catalog",
   )
   if (!response.ok) return response
   const parsed = parseJsonPayload(response.value)
