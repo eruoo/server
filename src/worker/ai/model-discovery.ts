@@ -214,6 +214,12 @@ export async function refreshCodexModelCatalog(
             catalogAttempt.value.failure.kind === "http"
               ? catalogAttempt.value.failure.modelResponseDiagnostics
               : undefined,
+          bodyFeatureDiagnostics:
+            catalogAttempt.ok &&
+            !catalogAttempt.value.ok &&
+            catalogAttempt.value.failure.kind === "http"
+              ? catalogAttempt.value.failure.modelBodyFeatureDiagnostics
+              : undefined,
         }),
       )
       // A freshly rotated token was still rejected: report reauthorization,
@@ -246,8 +252,9 @@ export async function refreshCodexModelCatalog(
       (catalog.failure.kind === "http" &&
         (catalog.failure.status >= 500 || catalog.failure.status === 429))
     // A terminal catalog failure emits one controlled operational event.
-    // Only local correlation, classification and allowlisted response
-    // diagnostics are recorded; upstream bodies never enter logs.
+    // Only local correlation, classification, allowlisted response
+    // diagnostics, and the controlled body-feature classification are
+    // recorded; upstream bodies never enter logs.
     // Discoveries that never reach the catalog call (credential-stage
     // failures, an exhausted budget) do not emit this event.
     console.warn(
@@ -263,6 +270,10 @@ export async function refreshCodexModelCatalog(
         responseDiagnostics:
           catalog.failure.kind === "http"
             ? catalog.failure.modelResponseDiagnostics
+            : undefined,
+        bodyFeatureDiagnostics:
+          catalog.failure.kind === "http"
+            ? catalog.failure.modelBodyFeatureDiagnostics
             : undefined,
       }),
     )

@@ -54,6 +54,15 @@ const CODEX_UPSTREAM_USER_AGENT = "eruoo/1"
 const CODEX_UPSTREAM_RESPONSE_BODY_LIMIT = 1_048_576
 /** Error bodies exceeding this bound are discarded, never truncated. */
 const CODEX_UPSTREAM_ERROR_BODY_LIMIT = 4_096
+/**
+ * Bound for the model-catalog error-body feature scan. The retained error
+ * body keeps the 4096-byte rule above, but the blocked-site page observed on
+ * staging carries its markers past that point (about 6.6 KB), so the catalog
+ * error path scans up to this many bytes for the allowlisted page markers and
+ * cancels the stream at this bound. Nothing but the marker booleans and the
+ * read outcome is retained from the scan.
+ */
+const CODEX_MODEL_CATALOG_FEATURE_SCAN_LIMIT_BYTES = 16_384
 
 export interface CodexProviderDefinition {
   authorizationKind: "device-code"
@@ -86,6 +95,25 @@ export interface CodexModelResponseDiagnostics {
   contentType: "json" | "html" | "other" | "absent"
   cfRay?: string
   upstreamRequestId?: string
+}
+
+/**
+ * Controlled body-feature classification for the model-catalog error path.
+ *
+ * The booleans record only that a marker was detected within the bytes the
+ * bounded scan read. They never identify the layer that produced the response
+ * (an OpenAI-branded page does not exclude a Cloudflare custom block
+ * response), and when `readOutcome` is not "complete" a false marker means
+ * "not detected in the scanned prefix", never "definitely absent". Matching
+ * these features only confirms response characteristics, not a root cause.
+ */
+export interface CodexModelCatalogBodyFeatureDiagnostics {
+  /** "Unable to load site" / "If you are using a VPN…" page markers. */
+  openAiBlockedSitePageMarkers: boolean
+  /** Known Cloudflare challenge/block page markers. */
+  cloudflarePageMarkers: boolean
+  /** How the bounded feature read ended. */
+  readOutcome: "complete" | "limit-exceeded" | "failed"
 }
 
 function readModelResponseDiagnostics(
@@ -129,6 +157,71 @@ function readModelResponseDiagnostics(
   }
 }
 
+/** Page markers of the blocked-site page observed on the staging probes. */
+const OPENAI_BLOCKED_SITE_PAGE_MARKER_PATTERN =
+  /Unable to load site|If you are using a VPN, try turning it off/i
+/** Known Cloudflare challenge/block page markers. */
+const CLOUDFLARE_PAGE_MARKER_PATTERN =
+  /Just a moment|Enable JavaScript and cookies to continue|challenge-platform|challenge-error-text|Sorry, you have been blocked|Attention Required|You are unable to access|cf-error-details|Performance & security by Cloudflare/i
+/**
+ * Carry that keeps markers detectable across chunk boundaries. It must stay
+ * at or above the longest marker's length ("If you are using a VPN, try
+ * turning it off", 42 characters); the tests split every marker at every
+ * offset to pin this.
+ */
+const PAGE_MARKER_CARRY_CHARS = 64
+
+/**
+ * Streaming page-marker detector. Raw response chunks are fed in decode
+ * order through `feed`; a small carry keeps text that straddles a chunk
+ * boundary readable for one more scan. The detector retains nothing but the
+ * two booleans.
+ */
+class StreamingPageMarkerDetector {
+  private carry = ""
+  private readonly decoder = new TextDecoder()
+  openAiBlockedSitePageMarkers = false
+  cloudflarePageMarkers = false
+
+  feed(chunk: Uint8Array): void {
+    if (this.openAiBlockedSitePageMarkers && this.cloudflarePageMarkers) return
+    this.scan(`${this.carry}${this.decoder.decode(chunk, { stream: true })}`)
+  }
+
+  /** Flushes the decoder tail once the stream has ended. */
+  finish(): void {
+    if (this.openAiBlockedSitePageMarkers && this.cloudflarePageMarkers) return
+    this.scan(`${this.carry}${this.decoder.decode()}`)
+    this.carry = ""
+  }
+
+  diagnostics(
+    readOutcome: CodexModelCatalogBodyFeatureDiagnostics["readOutcome"],
+  ): CodexModelCatalogBodyFeatureDiagnostics {
+    return {
+      openAiBlockedSitePageMarkers: this.openAiBlockedSitePageMarkers,
+      cloudflarePageMarkers: this.cloudflarePageMarkers,
+      readOutcome,
+    }
+  }
+
+  private scan(text: string): void {
+    if (
+      !this.openAiBlockedSitePageMarkers &&
+      OPENAI_BLOCKED_SITE_PAGE_MARKER_PATTERN.test(text)
+    ) {
+      this.openAiBlockedSitePageMarkers = true
+    }
+    if (
+      !this.cloudflarePageMarkers &&
+      CLOUDFLARE_PAGE_MARKER_PATTERN.test(text)
+    ) {
+      this.cloudflarePageMarkers = true
+    }
+    this.carry = text.slice(-PAGE_MARKER_CARRY_CHARS)
+  }
+}
+
 export type CodexUpstreamFailure =
   | { kind: "network"; cause: string }
   /**
@@ -141,6 +234,8 @@ export type CodexUpstreamFailure =
       status: number
       body?: string
       modelResponseDiagnostics?: CodexModelResponseDiagnostics
+      /** Model-catalog error calls only: controlled body-feature markers. */
+      modelBodyFeatureDiagnostics?: CodexModelCatalogBodyFeatureDiagnostics
     }
   | { kind: "protocol"; detail: string }
 
@@ -157,6 +252,51 @@ function composeAbortSignal(
     : AbortSignal.any([options.signal, timeout])
 }
 
+/**
+ * Accumulates a response body under the connector's single bounded-retention
+ * rule: at most `limitBytes` are kept, and once a chunk crosses the limit
+ * everything retained so far is discarded without a prefix. Shared by the
+ * plain bounded read and the model-catalog error read so the rule lives in
+ * exactly one place.
+ */
+class BoundedRetainedBody {
+  private readonly chunks: Uint8Array[] = []
+  private retainedBytes = 0
+  private discarded = false
+
+  constructor(private readonly limitBytes: number) {}
+
+  /** Records one chunk; false once the retention limit has been exceeded. */
+  add(chunk: Uint8Array): boolean {
+    if (this.discarded) return false
+    this.retainedBytes += chunk.byteLength
+    if (this.retainedBytes > this.limitBytes) {
+      this.discard()
+      return false
+    }
+    this.chunks.push(chunk)
+    return true
+  }
+
+  /** Drops everything retained so far (limit exceeded or read failed). */
+  discard(): void {
+    this.discarded = true
+    this.chunks.length = 0
+  }
+
+  /** The retained text, or undefined once discarded. */
+  text(): string | undefined {
+    if (this.discarded) return undefined
+    const bytes = new Uint8Array(this.retainedBytes)
+    let offset = 0
+    for (const chunk of this.chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return new TextDecoder().decode(bytes)
+  }
+}
+
 async function readBoundedText(
   response: Response,
   limitBytes: number,
@@ -165,35 +305,121 @@ async function readBoundedText(
   // the single-call budget includes the response body as the design requires.
   const reader = response.body?.getReader()
   if (reader === undefined) return response.text()
-  const chunks: Uint8Array[] = []
-  let size = 0
+  const retained = new BoundedRetainedBody(limitBytes)
   try {
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      size += value.byteLength
-      if (size > limitBytes) {
+      if (!retained.add(value)) {
         await reader.cancel()
         throw new UpstreamBodyLimitError()
       }
-      chunks.push(value)
     }
   } finally {
     reader.releaseLock()
   }
-  const body = new Uint8Array(size)
-  let offset = 0
-  for (const chunk of chunks) {
-    body.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return new TextDecoder().decode(body)
+  // Overflow throws inside the loop, so the retained text always exists here.
+  return retained.text() ?? ""
 }
 
 class UpstreamBodyLimitError extends Error {
   constructor() {
     super("upstream response body exceeds the connector limit")
     this.name = "UpstreamBodyLimitError"
+  }
+}
+
+interface ModelCatalogErrorBodyRead {
+  body: string | undefined
+  featureDiagnostics: CodexModelCatalogBodyFeatureDiagnostics
+}
+
+/**
+ * Reads one model-catalog error body in a single streaming pass.
+ *
+ * The retained body keeps the connector's error-body rule unchanged: at most
+ * CODEX_UPSTREAM_ERROR_BODY_LIMIT bytes, discarded without a prefix once the
+ * limit is exceeded. The same pass separately scans the stream for the
+ * allowlisted page markers up to CODEX_MODEL_CATALOG_FEATURE_SCAN_LIMIT_BYTES
+ * — beyond the retention bound, because the observed blocked-site page
+ * carries its markers past it — and cancels the stream the moment that bound
+ * is reached, so limit-exceeded also covers a body that ends at exactly the
+ * bound without its EOF having been confirmed.
+ *
+ * The read never throws: a stream error or abort keeps the markers found so
+ * far, reports readOutcome "failed", and discards the retained body, so the
+ * outcome stays an HTTP failure exactly as before.
+ */
+async function readModelCatalogErrorBody(
+  response: Response,
+): Promise<ModelCatalogErrorBodyRead> {
+  const detector = new StreamingPageMarkerDetector()
+  const reader = response.body?.getReader()
+  if (reader === undefined) {
+    // Defensive: workerd always exposes a stream for fetch responses, so
+    // this only covers stream-less (null-body) responses, whose text read
+    // is empty.
+    try {
+      const text = await response.text()
+      detector.feed(new TextEncoder().encode(text))
+      detector.finish()
+      return {
+        body: text,
+        featureDiagnostics: detector.diagnostics("complete"),
+      }
+    } catch {
+      return {
+        body: undefined,
+        featureDiagnostics: detector.diagnostics("failed"),
+      }
+    }
+  }
+  const retained = new BoundedRetainedBody(CODEX_UPSTREAM_ERROR_BODY_LIMIT)
+  let scannedBytes = 0
+  let readOutcome: CodexModelCatalogBodyFeatureDiagnostics["readOutcome"] =
+    "complete"
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      retained.add(value)
+      // Feed at most the remaining scan budget, so the scan covers exactly
+      // the first CODEX_MODEL_CATALOG_FEATURE_SCAN_LIMIT_BYTES bytes and a
+      // single oversized chunk is never decoded past the bound.
+      const remainingScanBytes =
+        CODEX_MODEL_CATALOG_FEATURE_SCAN_LIMIT_BYTES - scannedBytes
+      detector.feed(
+        value.byteLength > remainingScanBytes
+          ? value.slice(0, remainingScanBytes)
+          : value,
+      )
+      scannedBytes += value.byteLength
+      // Reaching the bound cancels immediately, without reading another
+      // chunk to confirm EOF: a stalled upstream must not hold the call open
+      // until the abort timeout, and an exactly-at-bound body records
+      // limit-exceeded because its completeness was never confirmed.
+      if (scannedBytes >= CODEX_MODEL_CATALOG_FEATURE_SCAN_LIMIT_BYTES) {
+        readOutcome = "limit-exceeded"
+        try {
+          await reader.cancel()
+        } catch {
+          // The scan bound is the recorded outcome even if the cancel fails.
+        }
+        break
+      }
+    }
+    if (readOutcome === "complete") detector.finish()
+  } catch {
+    // A stream error or abort: keep the markers found so far, discard the
+    // retained body, and report the read as failed.
+    readOutcome = "failed"
+    retained.discard()
+  } finally {
+    reader.releaseLock()
+  }
+  return {
+    body: retained.text(),
+    featureDiagnostics: detector.diagnostics(readOutcome),
   }
 }
 
@@ -227,6 +453,22 @@ async function fetchUpstream(
         diagnosticScope === "model-catalog"
           ? readModelResponseDiagnostics(response.headers)
           : undefined
+      if (diagnosticScope === "model-catalog") {
+        // The catalog error path reads the body once for both the bounded
+        // retention rule and the controlled feature classification. The read
+        // never throws, so the outcome stays an HTTP failure as before.
+        const read = await readModelCatalogErrorBody(response)
+        return {
+          ok: false,
+          failure: {
+            body: read.body,
+            kind: "http",
+            modelBodyFeatureDiagnostics: read.featureDiagnostics,
+            modelResponseDiagnostics,
+            status: response.status,
+          },
+        }
+      }
       // A bounded error body is kept for internal classification; the
       // text itself is never surfaced: upstream error bodies are not part of
       // the fixed contract and must not leak into results or logs.
@@ -242,9 +484,6 @@ async function fetchUpstream(
           body,
           kind: "http",
           status: response.status,
-          ...(modelResponseDiagnostics === undefined
-            ? {}
-            : { modelResponseDiagnostics }),
         },
       }
     }
