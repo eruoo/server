@@ -840,7 +840,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
           database: c.env.DB,
           environment: c.env.APP_ORIGIN,
         },
-        { connectionId: id, ...stageBudget(Date.now()) },
+        { connectionId: id, requestId, ...stageBudget(Date.now()) },
       )
       switch (result.status) {
         case "committed":

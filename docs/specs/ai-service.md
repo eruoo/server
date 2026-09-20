@@ -123,6 +123,10 @@ AI HTTP 入口
 
 模型能力取“连接器能支持的能力”与“该模型已确认的能力”的交集。图片、结构化输出、函数工具、推理参数等缺失信息标记为未确认，不能根据模型名称猜测。新出现的模型不会自动加入已签发 Key 的许可集合。
 
+模型目录最终失败的 `ai_model_refresh_failed` 运维事件关联本地 `requestId`、`connectionId`、失败类别、HTTP 状态及 `attemptPhase`（`initial` / `replay`）。仅该目录调用在读取非 2xx 正文前提取 `responseDiagnostics`：`cfMitigated` 为 `challenge` / `absent` / `other`；`contentType` 将 `application/json`、`text/html`（忽略大小写与参数，原值至多 256 字符）归为 `json`、`html`，其余为 `other` 或 `absent`。`cfRay` 仅接受 16 位十六进制加连字符与 3 位大写机房代码；`upstreamRequestId` 仅接受 UUID 形态或 `req_` 加 16–64 位 ASCII 字母数字，最长 68 字符，无效值直接丢弃。错误正文仍最多读取 4096 字节，溢出取消读取、不保留前缀；溢出或读取失败不丢失已取得的状态与头诊断。诊断不进入公开响应、审计或数据库，不增加网络请求、重试或改变恢复和预算语义。
+
+按 [Cloudflare 官方说明](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/)，`cf-mitigated: challenge` 是 Challenge Page 的直接证据；只有 403、HTML 或 `cf-ray` 不足以判断。确认 challenge 也不能推出出口 IP、TLS 指纹或令牌是否被评估；标记缺失不能证明响应来自应用层。真实来源与根因仍以 staging 取证结果为准。
+
 ### 4.3 调用授权
 
 复用现有 API Key 插件，新增 `ai` 配置档；现有默认 Key 继续只拥有原来的权限。

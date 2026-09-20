@@ -3,12 +3,18 @@ import {
   env,
   waitOnExecutionContext,
 } from "cloudflare:test"
-import { beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import worker from "../../src/worker"
+import {
+  encryptAiSecret,
+  parseAiCredentialKeyring,
+} from "../../src/worker/ai/credential-cipher"
+import { problem } from "../../src/worker/http/response"
 import { ownerSession } from "./fixtures/session"
 
 let sequence = 0
+afterEach(() => vi.restoreAllMocks())
 async function call(
   path: string,
   options: {
@@ -56,6 +62,96 @@ beforeEach(async () => {
 })
 
 describe("AI management routes", () => {
+  it("correlates catalog diagnostics with the local request without changing public errors or audits", async () => {
+    const session = await ownerSession()
+    const created = await call("/api/ai/connections", {
+      body: { name: "Diagnostic", slug: "diagnostic" },
+      cookie: session.cookie,
+    })
+    const { connection } = await created.json<{ connection: { id: string } }>()
+    const credentialCiphertext = await encryptAiSecret(
+      await parseAiCredentialKeyring(env.AI_CREDENTIAL_KEYS),
+      JSON.stringify({
+        accessToken: "secret-route-access",
+        refreshToken: "secret-route-refresh",
+      }),
+      {
+        connectionId: connection.id,
+        environment: env.APP_ORIGIN,
+        providerType: "openai-codex",
+        purpose: "credential-package",
+      },
+    )
+    await env.DB.prepare(
+      "UPDATE ai_connections SET authorizationStatus = ?, credentialCiphertext = ?, credentialExpiresAt = ? WHERE id = ?",
+    )
+      .bind(
+        "connected",
+        credentialCiphertext,
+        Date.now() + 3_600_000,
+        connection.id,
+      )
+      .run()
+    const auditsBefore = await env.DB.prepare(
+      "SELECT * FROM security_audit_events ORDER BY id",
+    ).all()
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("secret-upstream-body", {
+        status: 403,
+        headers: {
+          "cf-mitigated": "challenge",
+          "content-type": "text/html",
+          "cf-ray": "abcdef0123456789-SJC",
+          "x-request-id": "req_0123456789abcdef",
+          "set-cookie": "secret-upstream-cookie",
+        },
+      }),
+    )
+    const response = await call(
+      `/api/ai/connections/${connection.id}/models/refresh`,
+      {
+        method: "POST",
+        cookie: session.cookie,
+        headers: { "x-request-id": "untrusted-client-request" },
+      },
+    )
+    const requestId = response.headers.get("x-request-id")!
+    expect(requestId).not.toBe("untrusted-client-request")
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual(
+      await problem("ai-upstream-protocol-error", requestId).json(),
+    )
+    for (const header of ["cf-mitigated", "cf-ray"])
+      expect(response.headers.has(header)).toBe(false)
+    expect(response.headers.get("set-cookie") ?? "").not.toContain(
+      "secret-upstream-cookie",
+    )
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({
+        connectionId: connection.id,
+        requestId,
+        attemptPhase: "initial",
+        event: "ai_model_refresh_failed",
+        failureKind: "http",
+        httpStatus: 403,
+        reason: "protocol",
+        responseDiagnostics: {
+          cfMitigated: "challenge",
+          contentType: "html",
+          cfRay: "abcdef0123456789-SJC",
+          upstreamRequestId: "req_0123456789abcdef",
+        },
+      }),
+    )
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(
+      await env.DB.prepare(
+        "SELECT * FROM security_audit_events ORDER BY id",
+      ).all(),
+    ).toEqual(auditsBefore)
+  })
+
   it("requires an owner session on every management route", async () => {
     // Every registered §6.1 operation is covered, including the
     // authorization and model-refresh entries.

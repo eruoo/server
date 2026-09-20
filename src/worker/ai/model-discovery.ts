@@ -112,6 +112,7 @@ export async function refreshCodexModelCatalog(
   context: AiCredentialServiceContext,
   input: {
     connectionId: string
+    requestId: string
     now: number
     deadlineAt: number
     signal?: AbortSignal
@@ -178,6 +179,7 @@ export async function refreshCodexModelCatalog(
     attempt.value.failure.status === 401
 
   let catalogAttempt = await callCatalog(credentials)
+  let attemptPhase: "initial" | "replay" = "initial"
   // A 401 from the models endpoint gets the same recovery the pinned codex-rs
   // catalog session and this service's own invocation transport apply to
   // /responses: one forced credential refresh and one replay. A device-flow
@@ -194,15 +196,24 @@ export async function refreshCodexModelCatalog(
     })
     if (refreshed.status !== "usable") return credentialFailure(refreshed)
     credentials = refreshed
+    attemptPhase = "replay"
     catalogAttempt = await callCatalog(credentials)
     if (rejectedWith401(catalogAttempt)) {
       console.warn(
         JSON.stringify({
           connectionId: connection.id,
+          requestId: input.requestId,
+          attemptPhase,
           event: "ai_model_refresh_failed",
           failureKind: "http",
           httpStatus: 401,
           reason: "upstream-rejected",
+          responseDiagnostics:
+            catalogAttempt.ok &&
+            !catalogAttempt.value.ok &&
+            catalogAttempt.value.failure.kind === "http"
+              ? catalogAttempt.value.failure.modelResponseDiagnostics
+              : undefined,
         }),
       )
       // A freshly rotated token was still rejected: report reauthorization,
@@ -234,19 +245,25 @@ export async function refreshCodexModelCatalog(
       catalog.failure.kind === "network" ||
       (catalog.failure.kind === "http" &&
         (catalog.failure.status >= 500 || catalog.failure.status === 429))
-    // Every failed catalog attempt emits exactly one controlled operational
-    // event: only the connection, the failure kind, the HTTP status, and the
-    // classification are recorded; upstream bodies never leave the connector.
+    // A terminal catalog failure emits one controlled operational event.
+    // Only local correlation, classification and allowlisted response
+    // diagnostics are recorded; upstream bodies never enter logs.
     // Discoveries that never reach the catalog call (credential-stage
     // failures, an exhausted budget) do not emit this event.
     console.warn(
       JSON.stringify({
         connectionId: connection.id,
+        requestId: input.requestId,
+        attemptPhase,
         event: "ai_model_refresh_failed",
         failureKind: catalog.failure.kind,
         httpStatus:
           catalog.failure.kind === "http" ? catalog.failure.status : null,
         reason: transient ? "unavailable" : "protocol",
+        responseDiagnostics:
+          catalog.failure.kind === "http"
+            ? catalog.failure.modelResponseDiagnostics
+            : undefined,
       }),
     )
     if (transient) {

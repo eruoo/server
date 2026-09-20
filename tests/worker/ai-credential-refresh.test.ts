@@ -7,6 +7,7 @@ import {
   completeAiAuthorization,
   createAiAuthorizationSession,
 } from "../../src/worker/ai/authorizations"
+import { refreshCodexAccessToken } from "../../src/worker/ai/codex-connector"
 import {
   createAiConnection,
   disconnectAiConnection,
@@ -285,6 +286,30 @@ async function createConnectedConnection(input: {
 }
 
 describe("credential access and refresh", () => {
+  it("does not attach model diagnostics or log responses on the shared token path", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
+    installUpstreamMock({
+      refresh: () =>
+        new Response('"secret-token-error"', {
+          status: 403,
+          headers: {
+            "cf-mitigated": "challenge",
+            "cf-ray": "abcdef0123456789-SJC",
+          },
+        }),
+    })
+    expect(
+      await refreshCodexAccessToken(
+        { refreshToken: "secret-refresh" },
+        { timeoutMs: 10_000 },
+      ),
+    ).toEqual({
+      ok: false,
+      failure: { body: '"secret-token-error"', kind: "http", status: 403 },
+    })
+    expect(warning).not.toHaveBeenCalled()
+  })
+
   it("uses a still-valid credential without any upstream call", async () => {
     await createConnectedConnection({
       accessToken: fakeAccessToken(now + 3_600_000),
@@ -947,6 +972,214 @@ describe("credential access and refresh", () => {
 })
 
 describe("model catalog discovery and read", () => {
+  it.each<{
+    name: string
+    headers: Record<string, string>
+    diagnostics: Record<string, string>
+  }>([
+    {
+      name: "challenge HTML",
+      headers: {
+        "cf-mitigated": "challenge",
+        "content-type": "text/html; charset=utf-8",
+        "cf-ray": "abcdef0123456789-SJC",
+        "x-request-id": "12345678-1234-1234-1234-123456789abc",
+      },
+      diagnostics: {
+        cfMitigated: "challenge",
+        contentType: "html",
+        cfRay: "abcdef0123456789-SJC",
+        upstreamRequestId: "12345678-1234-1234-1234-123456789abc",
+      },
+    },
+    {
+      name: "unmarked HTML",
+      headers: { "content-type": "text/html" },
+      diagnostics: { cfMitigated: "absent", contentType: "html" },
+    },
+    {
+      name: "unmarked JSON",
+      headers: {
+        "content-type": "application/json",
+        "x-request-id": "req_0123456789abcdef",
+      },
+      diagnostics: {
+        cfMitigated: "absent",
+        contentType: "json",
+        upstreamRequestId: "req_0123456789abcdef",
+      },
+    },
+    {
+      name: "missing headers",
+      headers: {},
+      diagnostics: { cfMitigated: "absent", contentType: "absent" },
+    },
+    {
+      name: "malformed headers",
+      headers: {
+        "cf-mitigated": "secret-header-sentinel",
+        "content-type": "secret-header-sentinel",
+        "cf-ray": "secret-header-sentinel",
+        "x-request-id": "Bearer secret-header-sentinel",
+      },
+      diagnostics: { cfMitigated: "other", contentType: "other" },
+    },
+    {
+      name: "overlong headers",
+      headers: {
+        "cf-mitigated": "challenge" + "x".repeat(300),
+        "content-type": "text/html;" + "x".repeat(300),
+        "cf-ray": "a".repeat(300),
+        "x-request-id": "req_" + "a".repeat(300),
+      },
+      diagnostics: { cfMitigated: "other", contentType: "other" },
+    },
+  ])(
+    "records only allowlisted metadata for $name 403",
+    async ({ headers, diagnostics }) => {
+      const accessToken = fakeAccessToken(
+        now + 3_600_000,
+        "secret-access-sentinel",
+      )
+      await createConnectedConnection({
+        accessToken,
+        expiresAtMs: now + 3_600_000,
+        refreshToken: "secret-refresh-sentinel",
+      })
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
+      const body =
+        "secret-body-sentinel secret-device-sentinel secret-user-code-sentinel"
+      const mock = installUpstreamMock({
+        models: () =>
+          new Response(new TextEncoder().encode(body), {
+            status: 403,
+            headers: { ...headers, "set-cookie": "secret-cookie-sentinel" },
+          }),
+      })
+      expect(
+        await refreshCodexModelCatalog(context, {
+          connectionId,
+          requestId: "local-diagnostic-request",
+          deadlineAt: stageDeadlineAt,
+          now,
+        }),
+      ).toEqual({
+        status: "upstream-failure",
+        reason: "protocol",
+        keptSnapshot: false,
+      })
+      expect(warning).toHaveBeenCalledExactlyOnceWith(
+        JSON.stringify({
+          connectionId,
+          requestId: "local-diagnostic-request",
+          attemptPhase: "initial",
+          event: "ai_model_refresh_failed",
+          failureKind: "http",
+          httpStatus: 403,
+          reason: "protocol",
+          responseDiagnostics: diagnostics,
+        }),
+      )
+      expect(mock.calls).toHaveLength(1)
+      expect(mock.calls[0]?.authorization).toBe(`Bearer ${accessToken}`)
+      const logged = JSON.stringify(warning.mock.calls)
+      for (const secret of [
+        accessToken,
+        "secret-refresh-sentinel",
+        body,
+        "secret-cookie-sentinel",
+        "secret-header-sentinel",
+      ])
+        expect(logged).not.toContain(secret)
+    },
+  )
+
+  it.each(["overflow", "read-error"])(
+    "retains replay diagnostics after body %s and preserves the snapshot",
+    async (bodyFailure) => {
+      await createConnectedConnection({
+        accessToken: fakeAccessToken(now + 3_600_000),
+        expiresAtMs: now + 3_600_000,
+      })
+      const mock = installUpstreamMock({
+        refresh: () =>
+          jsonResponse({
+            access_token: fakeAccessToken(now + 3_600_000, "refreshed"),
+            refresh_token: "secret-rotated-refresh",
+          }),
+      })
+      await refreshCodexModelCatalog(context, {
+        connectionId,
+        requestId: "seed-request",
+        deadlineAt: stageDeadlineAt,
+        now,
+      })
+      const snapshot = await readCodexModelCatalog(env.DB, { connectionId })
+      mock.calls.length = 0
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
+      const cancelled = vi.fn<() => void>()
+      let calls = 0
+      mock.models = () => {
+        if (++calls === 1)
+          return jsonResponse({ detail: "secret-first-body" }, 401)
+        const stream = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (bodyFailure === "read-error")
+              controller.error(new Error("secret-read-error"))
+            else
+              controller.enqueue(
+                new TextEncoder().encode("secret-large-body".repeat(300)),
+              )
+          },
+          cancel: cancelled,
+        })
+        return new Response(stream, {
+          status: 403,
+          headers: {
+            "cf-mitigated": "challenge",
+            "content-type": "text/html",
+            "cf-ray": "abcdef0123456789-LAX",
+          },
+        })
+      }
+      expect(
+        await refreshCodexModelCatalog(context, {
+          connectionId,
+          requestId: "replay-request",
+          deadlineAt: stageDeadlineAt,
+          now,
+        }),
+      ).toEqual({
+        status: "upstream-failure",
+        reason: "protocol",
+        keptSnapshot: true,
+      })
+      expect(warning).toHaveBeenCalledExactlyOnceWith(
+        JSON.stringify({
+          connectionId,
+          requestId: "replay-request",
+          attemptPhase: "replay",
+          event: "ai_model_refresh_failed",
+          failureKind: "http",
+          httpStatus: 403,
+          reason: "protocol",
+          responseDiagnostics: {
+            cfMitigated: "challenge",
+            contentType: "html",
+            cfRay: "abcdef0123456789-LAX",
+          },
+        }),
+      )
+      expect(mock.calls).toHaveLength(3)
+      expect(await readCodexModelCatalog(env.DB, { connectionId })).toEqual(
+        snapshot,
+      )
+      expect(cancelled).toHaveBeenCalledTimes(
+        bodyFailure === "overflow" ? 1 : 0,
+      )
+    },
+  )
+
   it("commits a discovered snapshot with exact ids and reported capabilities", async () => {
     await createConnectedConnection({
       accessToken: fakeAccessToken(now + 3_600_000),
@@ -954,6 +1187,7 @@ describe("model catalog discovery and read", () => {
     })
     const mock = installUpstreamMock()
     const result = await refreshCodexModelCatalog(context, {
+      requestId: "catalog-test-request",
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -989,6 +1223,7 @@ describe("model catalog discovery and read", () => {
     installUpstreamMock()
     expect(
       await refreshCodexModelCatalog(context, {
+        requestId: "catalog-test-request",
         connectionId,
         deadlineAt: stageDeadlineAt,
         now,
@@ -996,6 +1231,7 @@ describe("model catalog discovery and read", () => {
     ).toEqual({ modelCount: 1, status: "committed" })
     installUpstreamMock({ models: () => jsonResponse({ error: "down" }, 500) })
     const failed = await refreshCodexModelCatalog(context, {
+      requestId: "catalog-test-request",
       connectionId,
       deadlineAt: stageDeadlineAt,
       now: now + 1_000,
@@ -1021,6 +1257,7 @@ describe("model catalog discovery and read", () => {
       models: () => jsonResponse({ models: "broken" }, 200),
     })
     const failed = await refreshCodexModelCatalog(context, {
+      requestId: "catalog-test-request",
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -1048,6 +1285,7 @@ describe("model catalog discovery and read", () => {
         }),
     })
     const result = await refreshCodexModelCatalog(context, {
+      requestId: "catalog-test-request",
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -1092,6 +1330,7 @@ describe("model catalog discovery and read", () => {
         }),
     })
     const result = await refreshCodexModelCatalog(context, {
+      requestId: "catalog-test-request",
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -1114,6 +1353,7 @@ describe("model catalog discovery and read", () => {
   })
 
   it("reports reauthorization without state changes when a rotated token is still rejected", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
     await createConnectedConnection({
       accessToken: fakeAccessToken(now + 3_600_000),
       expiresAtMs: now + 3_600_000,
@@ -1127,6 +1367,7 @@ describe("model catalog discovery and read", () => {
         }),
     })
     const result = await refreshCodexModelCatalog(context, {
+      requestId: "catalog-test-request",
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -1135,6 +1376,18 @@ describe("model catalog discovery and read", () => {
       reason: "upstream-rejected",
       status: "reauthentication-required",
     })
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({
+        connectionId,
+        requestId: "catalog-test-request",
+        attemptPhase: "replay",
+        event: "ai_model_refresh_failed",
+        failureKind: "http",
+        httpStatus: 401,
+        reason: "upstream-rejected",
+        responseDiagnostics: { cfMitigated: "absent", contentType: "json" },
+      }),
+    )
     // The catalog refresh is a management-plane read: a rejected token is
     // reported, but the connection itself is not transitioned.
     const connection = await getAiConnection(env.DB, connectionId)
@@ -1166,6 +1419,7 @@ describe("model catalog discovery and read", () => {
         ),
     })
     const result = await refreshCodexModelCatalog(context, {
+      requestId: "catalog-test-request",
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -1192,6 +1446,7 @@ describe("model catalog discovery and read", () => {
     // The stage deadline is already past when the recovery would run: the
     // forced refresh is provably not sent, and no replay happens.
     const result = await refreshCodexModelCatalog(context, {
+      requestId: "catalog-test-request",
       connectionId,
       deadlineAt: now - 1,
       now,
@@ -1239,6 +1494,7 @@ describe("model catalog discovery and read", () => {
         }),
     })
     const result = await refreshCodexModelCatalog(context, {
+      requestId: "catalog-test-request",
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -1260,6 +1516,7 @@ describe("model catalog discovery and read", () => {
       models: () => jsonResponse({ detail: "Forbidden" }, 403),
     })
     const result = await refreshCodexModelCatalog(context, {
+      requestId: "catalog-test-request",
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -1283,6 +1540,7 @@ describe("model catalog discovery and read", () => {
     })
     await disconnectAiConnection(env.DB, { id: connectionId, now: now + 1_000 })
     const result = await refreshCodexModelCatalog(context, {
+      requestId: "catalog-test-request",
       connectionId,
       deadlineAt: stageDeadlineAt,
       now: now + 2_000,
@@ -1304,6 +1562,7 @@ describe("model catalog discovery and read", () => {
     installUpstreamMock()
     expect(
       await refreshCodexModelCatalog(context, {
+        requestId: "catalog-test-request",
         connectionId,
         deadlineAt: stageDeadlineAt,
         now,
@@ -1381,6 +1640,7 @@ describe("model catalog discovery and read", () => {
     installUpstreamMock()
     expect(
       await refreshCodexModelCatalog(context, {
+        requestId: "catalog-test-request",
         connectionId,
         deadlineAt: stageDeadlineAt,
         now: now + 6_000,
@@ -1409,6 +1669,7 @@ describe("model catalog discovery and read", () => {
       },
     })
     const result = await refreshCodexModelCatalog(context, {
+      requestId: "catalog-test-request",
       connectionId,
       deadlineAt: stageDeadlineAt,
       now,
@@ -1432,6 +1693,7 @@ describe("model catalog discovery and read", () => {
     expect(disabled).toMatchObject({ updated: true })
     expect(
       await refreshCodexModelCatalog(context, {
+        requestId: "catalog-test-request",
         connectionId,
         deadlineAt: stageDeadlineAt,
         now: now + 2_000,
@@ -1452,6 +1714,7 @@ describe("model catalog discovery and read", () => {
     })
     expect(
       await refreshCodexModelCatalog(context, {
+        requestId: "catalog-test-request",
         connectionId,
         deadlineAt: stageDeadlineAt,
         now: now + 4_000,
