@@ -1,8 +1,8 @@
+import { getAiConnection, type AiConnectionRecord } from "./connections"
 import {
   AI_CREDENTIAL_REFRESH_CLAIM_TTL_MS,
   isAiServerIdentifier,
-} from "../../shared/ai"
-import { getAiConnection, type AiConnectionRecord } from "./connections"
+} from "./policy"
 
 /**
  * Durable credential refresh coordination on the connection row.

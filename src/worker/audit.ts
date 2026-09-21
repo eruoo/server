@@ -36,7 +36,7 @@ export type AuditEventType = (typeof auditEventTypes)[number]
 
 const auditIpFingerprintDomain = "eruoo:audit-ip:v1"
 
-export class InvalidAuditSecretError extends Error {
+class InvalidAuditSecretError extends Error {
   override readonly name = "InvalidAuditSecretError"
 }
 
@@ -131,7 +131,7 @@ function auditMetadata(event: AuditEvent): string | null {
   return entries.length ? JSON.stringify(Object.fromEntries(entries)) : null
 }
 
-export async function recordAuditEvent(
+async function recordAuditEvent(
   env: Pick<Env, "AUDIT_IP_HASH_SECRET" | "DB">,
   ipAddress: string | null,
   requestId: string,

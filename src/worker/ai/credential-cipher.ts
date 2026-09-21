@@ -1,4 +1,4 @@
-import { AI_CREDENTIAL_CIPHERTEXT_MAX_LENGTH } from "../../shared/ai"
+import { AI_CREDENTIAL_CIPHERTEXT_MAX_LENGTH } from "./policy"
 
 /**
  * AES-256-GCM envelope encryption for AI upstream secrets.

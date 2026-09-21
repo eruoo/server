@@ -3,7 +3,7 @@ import {
   isAiProviderType,
   isAiServerIdentifier,
   type AiConnectionAuthorizationStatus,
-} from "../../shared/ai"
+} from "./policy"
 
 /**
  * Durable AI connection lifecycle operations.

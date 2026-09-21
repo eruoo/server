@@ -145,7 +145,7 @@ Better Auth 是 Session Cookie、JWE、登录 ceremony 和持久 Session 的唯�
 - Passkey 只能为已通过 owner 校验的账户注册；登录使用库验证的 credential→user 关系，再验证其 owner account 关联。不可把注册准入放到客户端。
 - 通用 API 先检查凭证载体是否唯一，再验证该载体，最后执行路由权限。禁止 Session 失败后试 API Key、Bearer 失败后试 Cookie。
 - 验证结果采用按载体区分的主体：Session 带 userId/sessionId；OAuth 带 subject/clientId/scopes/resource；API Key 带 ownerId/keyId/permissions。仅在请求内使用，不持久化一个重复的 Principal 表。
-- `requireOwnerSession` 与 `requireRecentOwnerSession` 是两个具体操作，共用一个读取实现。路由提前选择读取强度；强结果可满足同请求的普通读取，弱结果不可冒充强结果。
+- `readOwnerSession` 以参数区分普通与 recent 两种读取强度，是 owner Session 读取的唯一入口；路由提前选择读取强度。强结果可满足同请求的普通读取，弱结果不可冒充强结果。
 - 库读取产生的多条 Set-Cookie 必须完整透传；更新/清理缓存不能只发生在服务端内存。复用应用守卫的结果不允许跳过库内部维持事务一致性所需的验证，也不修改库的私有上下文来强行减少查询。
 - 权限通过同一份路由声明维护；handler 仍在查询中限定资源 owner。业务层不接收原始 Cookie/token。
 - D1/加密/网络异常表示无法判定身份，不能转成“未登录”。只有已证实缺失、过期、失效的凭证才进入相应 401/null 分支。
@@ -253,20 +253,20 @@ Vue 3 + `<script setup lang="ts">` + Vue Router。一个 Session 控制器管理
 
 ## 7. 数据与迁移
 
-| 数据                                                                                           | 所有者                                                  | 变更边界                                                                                                                                                                                                            |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| user/account/session/verification、Passkey、API Key、OAuth token/consent/client/resource、JWKS | Better Auth 与固定版本插件                              | 原生 adapter；库 schema 生成结果做 drift 校验，应用不复制模型实现                                                                                                                                                   |
-| OAuth family tombstone                                                                         | OAuth 撤销模块                                          | 与插件 token 状态通过 D1 原子 batch 和前后检查协作                                                                                                                                                                  |
-| security_audit_events                                                                          | 审计模块                                                | 应用 schema；append + 有界清理                                                                                                                                                                                      |
-| maintenance_lease、database_backup_health                                                      | 维护模块                                                | 只供备份协调与终态，不建设通用任务表                                                                                                                                                                                |
-| rateLimit                                                                                      | Better Auth 限流                                        | 只允许命中已登记 operation；不作为业务使用台账                                                                                                                                                                      |
-| ai_connections、ai_authorization_sessions、ai_models、ai_invocations                           | AI 存储模块（[AI 规格 §8](ai-service.md#8-存储与恢复)） | 应用 schema（0002 追加迁移）；凭证版本条件写、原子授权完成、有界刷新 claim、并发 reservation 与每日有界清理；表存在不代表 AI 服务已开放，AI HTTP 路由尚未注册；Key 配置档与上游连接器已实施（本地合成验证，未部署） |
+| 数据                                                                                           | 所有者                                                  | 变更边界                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| user/account/session/verification、Passkey、API Key、OAuth token/consent/client/resource、JWKS | Better Auth 与固定版本插件                              | 原生 adapter；库 schema 生成结果做 drift 校验，应用不复制模型实现                                                                                                                  |
+| OAuth family tombstone                                                                         | OAuth 撤销模块                                          | 与插件 token 状态通过 D1 原子 batch 和前后检查协作                                                                                                                                 |
+| security_audit_events                                                                          | 审计模块                                                | 应用 schema；append + 有界清理                                                                                                                                                     |
+| maintenance_lease、database_backup_health                                                      | 维护模块                                                | 只供备份协调与终态，不建设通用任务表                                                                                                                                               |
+| rateLimit                                                                                      | Better Auth 限流                                        | 只允许命中已登记 operation；不作为业务使用台账                                                                                                                                     |
+| ai_connections、ai_authorization_sessions、ai_models、ai_invocations                           | AI 存储模块（[AI 规格 §8](ai-service.md#8-存储与恢复)） | 应用 schema（0002/0003 迁移）；凭证版本条件写、原子授权完成、有界刷新 claim、并发 reservation 与每日有界清理；表存在不代表 AI 服务可用，开放与验收状态由实施记录维护，不在本文断言 |
 
 应用字段用 epoch milliseconds；库表保留 adapter 日期表示，只在边界转换。API 时间单位不得混用；OAuth NumericDate 按协议。所有查询参数化，资源查询限定 owner，分页有上限，已有索引优先复用。
 
 首次启用前可以替换当前 `0001_foundation.sql` 的历史 schema 基线，生成只包含当前已实现能力所需表的初始 migration，在全新本地/验证/生产 D1 上应用；不把新基线写进已应用旧 ledger 的数据库，不为省迁移工作直接在旧库删表。无需旧数据迁移、双 schema 读写、旧凭证保留或历史 ledger 对比。可用的新代码和测试继续保留，不因允许数据从零而再次清空仓库。
 
-首个真实使用版本确定后，该 migration 基线固定，后续只追加 migration；CI 直接检查上一已发布版本的 migration 文件未被改写，再在空库应用全部 migration。普通 schema 变更保持可回滚兼容，数据删除与不可逆结构变更单独审核。对应用表使用 Drizzle；静态客户端清单经 migration 登记，禁止请求时建表、修 schema 或 seed。新增表与插件按实际启用切片加入，不预先恢复全部旧表。
+首个真实使用版本确定后，该 migration 基线固定，后续只追加 migration；CI 直接检查上一已发布版本的 migration 文件未被改写，再在空库应用全部 migration。普通 schema 变更保持可回滚兼容，数据删除与不可逆结构变更单独审核。审计与备份健康表经 Drizzle 访问，AI 与维护表经各模块的参数化手写 SQL 访问；migration SQL 是全部应用表结构的唯一权威定义，静态客户端清单经 migration 登记，禁止请求时建表、修 schema 或 seed。新增表与插件按实际启用切片加入，不预先恢复全部旧表。
 
 ## 8. 简化决策与剩余风险
 

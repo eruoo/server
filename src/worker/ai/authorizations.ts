@@ -4,7 +4,7 @@ import {
   AI_AUTHORIZATION_SESSION_MAX_TTL_MS,
   isAiServerIdentifier,
   type AiAuthorizationSessionStatus,
-} from "../../shared/ai"
+} from "./policy"
 
 /**
  * Durable device-authorization session operations.

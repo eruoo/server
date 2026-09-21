@@ -1,11 +1,15 @@
 export const API_KEY_EXPIRATION_HEADER = "API-Key-Expires-At"
 export const API_KEY_EXPIRATION_WARNING_WINDOW_MS = 14 * 24 * 60 * 60 * 1_000
+
+/**
+ * 每把 key 的插件侧限流（Better Auth apiKey 插件配置的唯一事实源，
+ * 由 auth.ts 引用）。入口粗限流不在此维护：wrangler.jsonc 的 ratelimits
+ * 与发布脚本校验才是 5 次/60 秒入口限流的事实源。
+ */
 export const API_KEY_CREDENTIAL_RATE_LIMIT_MAX_REQUESTS = 60
 export const API_KEY_CREDENTIAL_RATE_LIMIT_WINDOW_SECONDS = 60
-export const API_KEY_STATUS_INGRESS_RATE_LIMIT_MAX_REQUESTS = 5
-export const API_KEY_STATUS_INGRESS_RATE_LIMIT_WINDOW_SECONDS = 60
 
-export const API_KEY_STATUS_PERMISSION = "status:read"
+/** default 档（status 用途）的固定权限，由 auth.ts 插件配置引用。 */
 export const API_KEY_DEFAULT_PERMISSIONS = {
   status: ["read"],
 } as const

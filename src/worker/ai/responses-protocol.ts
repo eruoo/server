@@ -1,8 +1,8 @@
+import type { ProblemSlug } from "../http/problem-registry"
 import {
   AI_RESPONSES_SINGLE_EVENT_MAX_BYTES,
   AI_RESPONSES_STREAM_MAX_BYTES,
-} from "../../shared/ai"
-import type { ProblemSlug } from "../http/problem-registry"
+} from "./policy"
 
 /**
  * Shared Responses-subset protocol for upstream SSE consumption.

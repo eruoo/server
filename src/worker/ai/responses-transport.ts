@@ -1,10 +1,3 @@
-import {
-  AI_CREDENTIAL_STAGE_BUDGET_MS,
-  AI_INVOCATION_FIRST_RESPONSE_BUDGET_MS,
-  AI_INVOCATION_NO_DATA_INTERVAL_MS,
-  AI_INVOCATION_TOTAL_DEADLINE_MS,
-} from "../../shared/ai"
-import type { AiTerminalInvocationStatus } from "../../shared/ai"
 import type { ProblemSlug } from "../http/problem-registry"
 import { problem } from "../http/response"
 import { buildCodexResponsesRequest } from "./codex-connector"
@@ -12,6 +5,13 @@ import type { AiCredentialServiceContext } from "./credential-lifecycle"
 import { accessCodexCredentials } from "./credential-lifecycle"
 import { markAiConnectionReauthenticationRequired } from "./credentials"
 import { commitAiInvocationOutcome } from "./invocations"
+import {
+  AI_CREDENTIAL_STAGE_BUDGET_MS,
+  AI_INVOCATION_FIRST_RESPONSE_BUDGET_MS,
+  AI_INVOCATION_NO_DATA_INTERVAL_MS,
+  AI_INVOCATION_TOTAL_DEADLINE_MS,
+} from "./policy"
+import type { AiTerminalInvocationStatus } from "./policy"
 import {
   consumeResponsesUpstream,
   responsesFailureProblemSlug,

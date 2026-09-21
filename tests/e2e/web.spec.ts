@@ -34,6 +34,24 @@ test("signed-in AI deep links mount the management panels", async ({
   await expect(page.getByText("最近 30 天没有调用记录。")).toBeVisible()
 })
 
+// Also depends on the pre-seeded session row and runs before the Passkey
+// logout test. Both panels hit the real worker routes without route mocks.
+test("signed-in authorized apps and backup status read the real routes", async ({
+  page,
+  context,
+}) => {
+  await context.addCookies([cookie])
+  await page.goto("/security/authorized-apps")
+  await expect(page.getByRole("heading", { name: "已授权应用" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "请先登录" })).toHaveCount(0)
+  await expect(page.getByText("尚未授权").first()).toBeVisible()
+  await expect(page.getByText("尚未开放").first()).toBeVisible()
+  await expect(page.getByRole("button", { name: "刷新列表" })).toBeVisible()
+
+  await page.getByRole("button", { name: "备份状态", exact: true }).click()
+  await expect(page.getByText("尚无备份记录。")).toBeVisible()
+})
+
 test("Web management and complete Passkey registration/login/logout", async ({
   page,
   context,

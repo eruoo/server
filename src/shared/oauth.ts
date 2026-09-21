@@ -1,4 +1,4 @@
-export const OAUTH_ISSUER = "https://auth.eruoo.me" as const
+const OAUTH_ISSUER = "https://auth.eruoo.me" as const
 export const OAUTH_RESOURCE = `${OAUTH_ISSUER}/api` as const
 export const OAUTH_REFRESH_TOKEN_MAX_TTL_SECONDS = 30 * 24 * 60 * 60
 export const OAUTH_USERINFO_RESOURCE =

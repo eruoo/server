@@ -1,4 +1,4 @@
-import type { Context, MiddlewareHandler } from "hono"
+import type { Context } from "hono"
 
 import { scheduleAuditEvent } from "../audit"
 import { createAuth } from "../auth"
@@ -99,20 +99,4 @@ export async function readOwnerSession(
   } catch {
     return problem("service-unavailable", c.get("requestId"))
   }
-}
-export const requireOwnerSession: MiddlewareHandler<AppBindings> = async (
-  c,
-  next,
-) => {
-  const result = await readOwnerSession(c)
-  if (result instanceof Response) return result
-  await next()
-}
-export const requireRecentOwnerSession: MiddlewareHandler<AppBindings> = async (
-  c,
-  next,
-) => {
-  const result = await readOwnerSession(c, true)
-  if (result instanceof Response) return result
-  await next()
 }

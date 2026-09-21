@@ -54,23 +54,11 @@ export const problemTypeRegistry = {
     status: 401,
     title: "Authentication required",
   },
-  conflict: {
-    description:
-      "The request conflicts with the current state of the resource.",
-    status: 409,
-    title: "Conflict",
-  },
   "insufficient-permission": {
     description:
       "The API key does not grant a permission required by the operation.",
     status: 403,
     title: "Insufficient permission",
-  },
-  "insufficient-scope": {
-    description:
-      "The OAuth access token does not grant a scope required by the operation.",
-    status: 403,
-    title: "Insufficient scope",
   },
   "internal-error": {
     description: "The service encountered an unclassified internal error.",

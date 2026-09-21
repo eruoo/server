@@ -74,7 +74,7 @@ export function oauthTokenServiceUnavailable(
   )
 }
 
-export function isCanonicalOAuthScope(value: string): boolean {
+function isCanonicalOAuthScope(value: string): boolean {
   const scopes = value.split(" ")
 
   return (

@@ -5,7 +5,7 @@ import {
   OAUTH_ACCESS_TOKEN_SIGNING_ALGORITHMS,
 } from "./access-token"
 
-export const OAUTH_JWKS_NEGATIVE_CACHE_TTL_MS = 30_000
+const OAUTH_JWKS_NEGATIVE_CACHE_TTL_MS = 30_000
 export const OAUTH_JWKS_POSITIVE_CACHE_TTL_MS = 5 * 60 * 1000
 
 const verificationGracePeriodMs = 7 * 24 * 60 * 60 * 1000

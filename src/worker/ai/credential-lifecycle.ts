@@ -1,9 +1,4 @@
 import {
-  AI_CREDENTIAL_REFRESH_LEAD_MS,
-  AI_CREDENTIAL_REFRESH_NETWORK_BUDGET_MS,
-  type AiClock,
-} from "../../shared/ai"
-import {
   isDefinitiveCodexRefreshRejection,
   readCodexAccessTokenExpiryMs,
   refreshCodexAccessToken,
@@ -23,6 +18,11 @@ import {
   markAiConnectionReauthenticationRequired,
   releaseAiCredentialRefreshClaim,
 } from "./credentials"
+import {
+  AI_CREDENTIAL_REFRESH_LEAD_MS,
+  AI_CREDENTIAL_REFRESH_NETWORK_BUDGET_MS,
+  type AiClock,
+} from "./policy"
 import type { AiStageUpstreamBudget } from "./stage-budget"
 
 /**

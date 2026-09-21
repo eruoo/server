@@ -1,7 +1,6 @@
 import { env } from "cloudflare:test"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { AI_CREDENTIAL_REFRESH_LEAD_MS } from "../../src/shared/ai"
 import {
   claimAiAuthorizationPoll,
   completeAiAuthorization,
@@ -27,6 +26,7 @@ import {
   readCodexModelCatalog,
   refreshCodexModelCatalog,
 } from "../../src/worker/ai/model-discovery"
+import { AI_CREDENTIAL_REFRESH_LEAD_MS } from "../../src/worker/ai/policy"
 import { AiStageUpstreamBudget } from "../../src/worker/ai/stage-budget"
 
 const now = 2_000_000_000_000

@@ -1,11 +1,5 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi"
 
-import {
-  AI_INVOCATION_HISTORY_DEFAULT_LIMIT,
-  AI_INVOCATION_HISTORY_MAX_LIMIT,
-  AI_MANAGEMENT_STAGE_BUDGET_MS,
-  isAiServerIdentifier,
-} from "../../shared/ai"
 import { scheduleAuditEvent } from "../audit"
 import { limitAuthEntry } from "../auth/entry-limit"
 import { readOwnerSession } from "../auth/session"
@@ -32,6 +26,12 @@ import {
 import { listAiInvocationHistory } from "./invocations"
 import { refreshCodexModelCatalog } from "./model-discovery"
 import { listAiModels } from "./models"
+import {
+  AI_INVOCATION_HISTORY_DEFAULT_LIMIT,
+  AI_INVOCATION_HISTORY_MAX_LIMIT,
+  AI_MANAGEMENT_STAGE_BUDGET_MS,
+  isAiServerIdentifier,
+} from "./policy"
 
 /**
  * AI management endpoints (§6.1).

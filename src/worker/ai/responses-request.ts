@@ -204,7 +204,7 @@ const toolChoiceSchema = z.union([
     .meta({ description: "Force one specific function." }),
 ])
 
-export const responsesRequestBodySchema = z
+const responsesRequestBodySchema = z
   .object({
     include: z
       .array(z.literal("reasoning.encrypted_content"))

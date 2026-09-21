@@ -2,7 +2,7 @@ import {
   AI_INVOCATIONS_TABLE,
   AI_AUTHORIZATION_SESSIONS_TABLE,
   createAiInvocationRetentionCutoff,
-} from "../../shared/ai"
+} from "./policy"
 
 /**
  * Daily bounded AI cleanup, joined to the existing 0 20 * * * schedule.

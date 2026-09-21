@@ -1,13 +1,6 @@
 import { createScheduledController, env } from "cloudflare:test"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import {
-  AI_AUTHORIZATION_SESSION_MAX_TTL_MS,
-  AI_CREDENTIAL_REFRESH_CLAIM_TTL_MS,
-  AI_INVOCATION_RETENTION_MS,
-  createAiInvocationRetentionCutoff,
-  isAiConnectionSlug,
-} from "../../src/shared/ai"
 import worker from "../../src/worker"
 import {
   cancelAiAuthorizationSession,
@@ -38,6 +31,13 @@ import {
   reserveAiInvocation,
 } from "../../src/worker/ai/invocations"
 import { commitAiModelSnapshot, listAiModels } from "../../src/worker/ai/models"
+import {
+  AI_AUTHORIZATION_SESSION_MAX_TTL_MS,
+  AI_CREDENTIAL_REFRESH_CLAIM_TTL_MS,
+  AI_INVOCATION_RETENTION_MS,
+  createAiInvocationRetentionCutoff,
+  isAiConnectionSlug,
+} from "../../src/worker/ai/policy"
 import { DAILY_CLEANUP_SCHEDULE } from "../../src/worker/schedules"
 
 const now = 2_000_000_000_000

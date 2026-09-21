@@ -8,7 +8,7 @@ import {
   isDatabaseBackupErrorCode,
 } from "./errors"
 
-export const DATABASE_BACKUP_HEALTH_NAME = "database-backup"
+const DATABASE_BACKUP_HEALTH_NAME = "database-backup"
 const maximumDateTimestamp = 8_640_000_000_000_000
 
 const epochMillisecondSchema = z
