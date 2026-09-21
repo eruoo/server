@@ -142,6 +142,11 @@ describe("AI management routes", () => {
           cfRay: "abcdef0123456789-SJC",
           upstreamRequestId: "req_0123456789abcdef",
         },
+        bodyFeatureDiagnostics: {
+          openAiBlockedSitePageMarkers: false,
+          cloudflarePageMarkers: false,
+          readOutcome: "complete",
+        },
       }),
     )
     expect(fetch).toHaveBeenCalledOnce()

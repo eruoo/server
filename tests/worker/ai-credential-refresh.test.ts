@@ -7,7 +7,10 @@ import {
   completeAiAuthorization,
   createAiAuthorizationSession,
 } from "../../src/worker/ai/authorizations"
-import { refreshCodexAccessToken } from "../../src/worker/ai/codex-connector"
+import {
+  listCodexModels,
+  refreshCodexAccessToken,
+} from "../../src/worker/ai/codex-connector"
 import {
   createAiConnection,
   disconnectAiConnection,
@@ -1078,6 +1081,11 @@ describe("model catalog discovery and read", () => {
           httpStatus: 403,
           reason: "protocol",
           responseDiagnostics: diagnostics,
+          bodyFeatureDiagnostics: {
+            openAiBlockedSitePageMarkers: false,
+            cloudflarePageMarkers: false,
+            readOutcome: "complete",
+          },
         }),
       )
       expect(mock.calls).toHaveLength(1)
@@ -1168,6 +1176,12 @@ describe("model catalog discovery and read", () => {
             contentType: "html",
             cfRay: "abcdef0123456789-LAX",
           },
+          bodyFeatureDiagnostics: {
+            openAiBlockedSitePageMarkers: false,
+            cloudflarePageMarkers: false,
+            readOutcome:
+              bodyFailure === "overflow" ? "limit-exceeded" : "failed",
+          },
         }),
       )
       expect(mock.calls).toHaveLength(3)
@@ -1177,6 +1191,510 @@ describe("model catalog discovery and read", () => {
       expect(cancelled).toHaveBeenCalledTimes(
         bodyFailure === "overflow" ? 1 : 0,
       )
+    },
+  )
+
+  /**
+   * A synthetic page shaped like the blocked-site page the staging probes
+   * observed: marker-free filler that already exceeds the 4096-byte
+   * error-body retention limit, then the page message, then a tail. The
+   * sentinels prove that no page content reaches any recorded output.
+   */
+  function blockedSitePageBody(): string {
+    const filler = `<svg viewBox="0 0 41 41"><path d="${"37.5324 ".repeat(700)}"/></svg>`
+    return `${filler}<div class="message">Unable to load site</div><div class="explanation">If you are using a VPN, try turning it off. [IP:secret-ip-sentinel | Ray ID:secret-ray-sentinel]</div>${"tail ".repeat(100)}`
+  }
+
+  async function callListCodexModels() {
+    return listCodexModels(
+      { accessToken: "synthetic-access-token", accountId: null },
+      { timeoutMs: 10_000 },
+    )
+  }
+
+  it("classifies the blocked-site page past the error-body retention limit", async () => {
+    installUpstreamMock({
+      models: () =>
+        new Response(new TextEncoder().encode(blockedSitePageBody()), {
+          status: 403,
+          headers: { "content-type": "text/html; charset=UTF-8" },
+        }),
+    })
+    const result = await callListCodexModels()
+    if (result.ok || result.failure.kind !== "http")
+      throw new Error("unreachable")
+    // The retention rule is unchanged: a body over 4096 bytes is discarded.
+    expect(result.failure.body).toBeUndefined()
+    expect(result.failure.modelResponseDiagnostics).toEqual({
+      cfMitigated: "absent",
+      contentType: "html",
+    })
+    expect(result.failure.modelBodyFeatureDiagnostics).toEqual({
+      openAiBlockedSitePageMarkers: true,
+      cloudflarePageMarkers: false,
+      readOutcome: "complete",
+    })
+    // The classification carries allowlisted fields only.
+    expect(
+      Object.keys(result.failure.modelBodyFeatureDiagnostics ?? {}).sort(),
+    ).toEqual([
+      "cloudflarePageMarkers",
+      "openAiBlockedSitePageMarkers",
+      "readOutcome",
+    ])
+    expect(
+      JSON.stringify(result.failure.modelBodyFeatureDiagnostics),
+    ).not.toContain("secret-ip-sentinel")
+  })
+
+  it("records the body-feature classification in the refresh failure event", async () => {
+    await createConnectedConnection({
+      accessToken: fakeAccessToken(now + 3_600_000),
+      expiresAtMs: now + 3_600_000,
+    })
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
+    installUpstreamMock({
+      models: () =>
+        new Response(new TextEncoder().encode(blockedSitePageBody()), {
+          status: 403,
+          headers: {
+            "content-type": "text/html; charset=UTF-8",
+            "cf-ray": "abcdef0123456789-LAX",
+          },
+        }),
+    })
+    expect(
+      await refreshCodexModelCatalog(context, {
+        connectionId,
+        requestId: "feature-request",
+        deadlineAt: stageDeadlineAt,
+        now,
+      }),
+    ).toEqual({
+      status: "upstream-failure",
+      reason: "protocol",
+      keptSnapshot: false,
+    })
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({
+        connectionId,
+        requestId: "feature-request",
+        attemptPhase: "initial",
+        event: "ai_model_refresh_failed",
+        failureKind: "http",
+        httpStatus: 403,
+        reason: "protocol",
+        responseDiagnostics: {
+          cfMitigated: "absent",
+          contentType: "html",
+          cfRay: "abcdef0123456789-LAX",
+        },
+        bodyFeatureDiagnostics: {
+          openAiBlockedSitePageMarkers: true,
+          cloudflarePageMarkers: false,
+          readOutcome: "complete",
+        },
+      }),
+    )
+    // No page content, marker text, or sentinel reaches the recorded event.
+    const logged = JSON.stringify(warning.mock.calls)
+    for (const secret of [
+      "secret-ip-sentinel",
+      "secret-ray-sentinel",
+      "Unable to load site",
+      "37.5324",
+    ])
+      expect(logged).not.toContain(secret)
+  })
+
+  it("detects markers split across stream chunk boundaries at every offset", async () => {
+    const cases: Array<{
+      cloudflare: boolean
+      openAi: boolean
+      text: string
+    }> = [
+      { cloudflare: false, openAi: true, text: "Unable to load site" },
+      {
+        cloudflare: false,
+        openAi: true,
+        text: "If you are using a VPN, try turning it off",
+      },
+      { cloudflare: true, openAi: false, text: "Just a moment" },
+      {
+        cloudflare: true,
+        openAi: false,
+        text: "Enable JavaScript and cookies to continue",
+      },
+      { cloudflare: true, openAi: false, text: "Sorry, you have been blocked" },
+      {
+        cloudflare: true,
+        openAi: false,
+        text: "Performance & security by Cloudflare",
+      },
+      { cloudflare: true, openAi: false, text: "cf-error-details" },
+      { cloudflare: true, openAi: false, text: "challenge-platform" },
+    ]
+    let nextModelsResponse: () => Response = () => {
+      throw new Error("response not configured")
+    }
+    installUpstreamMock({ models: () => nextModelsResponse() })
+    for (const { cloudflare, openAi, text } of cases) {
+      const page = `prefix-text ${text} suffix-text`
+      const markerStart = "prefix-text ".length
+      for (let split = 1; split < text.length; split++) {
+        nextModelsResponse = () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode(page.slice(0, markerStart + split)),
+                )
+                controller.enqueue(
+                  new TextEncoder().encode(page.slice(markerStart + split)),
+                )
+                controller.close()
+              },
+            }),
+            { status: 403, headers: { "content-type": "text/html" } },
+          )
+        const result = await callListCodexModels()
+        if (result.ok || result.failure.kind !== "http")
+          throw new Error(`marker not classified: ${text} split ${split}`)
+        expect(
+          result.failure.modelBodyFeatureDiagnostics,
+          `${text} split ${split}`,
+        ).toEqual({
+          openAiBlockedSitePageMarkers: openAi,
+          cloudflarePageMarkers: cloudflare,
+          readOutcome: "complete",
+        })
+      }
+    }
+  })
+
+  it("detects markers across a boundary that splits a multi-byte character", async () => {
+    const page = "前置说明… Unable to load site"
+    const bytes = new TextEncoder().encode(page)
+    // "前置说明" occupies bytes 0–11 and "…" starts at byte 12; splitting at
+    // 13 cuts the ellipsis in half and forces the streaming decoder to carry
+    // the partial sequence into the next chunk.
+    installUpstreamMock({
+      models: () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(bytes.slice(0, 13))
+              controller.enqueue(bytes.slice(13))
+              controller.close()
+            },
+          }),
+          { status: 403, headers: { "content-type": "text/html" } },
+        ),
+    })
+    const result = await callListCodexModels()
+    if (result.ok || result.failure.kind !== "http")
+      throw new Error("unreachable")
+    expect(result.failure.modelBodyFeatureDiagnostics).toEqual({
+      openAiBlockedSitePageMarkers: true,
+      cloudflarePageMarkers: false,
+      readOutcome: "complete",
+    })
+  })
+
+  it("keeps markers found before the feature-scan bound and cancels there", async () => {
+    const cancelled = vi.fn<() => void>()
+    const markerChunk = new TextEncoder().encode("Sorry, you have been blocked")
+    let enqueuedMarker = false
+    let enqueuedFillers = 0
+    installUpstreamMock({
+      models: () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (!enqueuedMarker) {
+                enqueuedMarker = true
+                controller.enqueue(markerChunk)
+              } else {
+                enqueuedFillers += 1
+                controller.enqueue(new TextEncoder().encode("f".repeat(4_096)))
+              }
+            },
+            cancel: cancelled,
+          }),
+          { status: 403, headers: { "content-type": "text/html" } },
+        ),
+    })
+    const result = await callListCodexModels()
+    if (result.ok || result.failure.kind !== "http")
+      throw new Error("unreachable")
+    expect(result.failure.modelBodyFeatureDiagnostics).toEqual({
+      openAiBlockedSitePageMarkers: false,
+      cloudflarePageMarkers: true,
+      readOutcome: "limit-exceeded",
+    })
+    // The marker chunk plus four 4096-byte fillers cross the 16384-byte scan
+    // bound; the stream is cancelled there instead of drained forever.
+    expect(enqueuedFillers).toBe(4)
+    expect(cancelled).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not claim absence when the scan bound stops before the markers", async () => {
+    // The marker only appears after the scan bound, so the recorded false
+    // means "not detected in the scanned prefix", never "definitely absent".
+    const cancelled = vi.fn<() => void>()
+    let enqueued = 0
+    installUpstreamMock({
+      models: () =>
+        new Response(
+          new ReadableStream<Uint8Array>(
+            {
+              pull(controller) {
+                enqueued += 1
+                if (enqueued <= 5)
+                  controller.enqueue(
+                    new TextEncoder().encode("f".repeat(4_096)),
+                  )
+                else
+                  controller.enqueue(
+                    new TextEncoder().encode("Unable to load site"),
+                  )
+              },
+              cancel: cancelled,
+            },
+            // A zero high-water mark keeps pulls tied to reads, so the
+            // enqueue counter matches what the reader actually consumed.
+            { highWaterMark: 0 },
+          ),
+          { status: 403, headers: { "content-type": "text/html" } },
+        ),
+    })
+    const result = await callListCodexModels()
+    if (result.ok || result.failure.kind !== "http")
+      throw new Error("unreachable")
+    expect(result.failure.modelBodyFeatureDiagnostics).toEqual({
+      openAiBlockedSitePageMarkers: false,
+      cloudflarePageMarkers: false,
+      readOutcome: "limit-exceeded",
+    })
+    // The fourth 4096-byte filler reaches the scan bound exactly and the
+    // read cancels there; the marker chunk is never pulled.
+    expect(enqueued).toBe(4)
+    expect(cancelled).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps markers found before a mid-stream read failure and discards the body", async () => {
+    installUpstreamMock({
+      models: () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  "Sorry, you have been blocked secret-body-sentinel",
+                ),
+              )
+            },
+            pull(controller) {
+              controller.error(new Error("secret-read-error"))
+            },
+          }),
+          { status: 403, headers: { "content-type": "text/html" } },
+        ),
+    })
+    const result = await callListCodexModels()
+    if (result.ok || result.failure.kind !== "http")
+      throw new Error("unreachable")
+    expect(result.failure.modelBodyFeatureDiagnostics).toEqual({
+      openAiBlockedSitePageMarkers: false,
+      cloudflarePageMarkers: true,
+      readOutcome: "failed",
+    })
+    // A failed read discards the retained body, exactly as before.
+    expect(result.failure.body).toBeUndefined()
+  })
+
+  it("keeps the error-body retention rule on the catalog error path", async () => {
+    const small = "<html><body>secret-body-sentinel</body></html>"
+    const large = `<html><body>${"y".repeat(4_097)}</body></html>`
+    let body = small
+    installUpstreamMock({
+      models: () =>
+        new Response(new TextEncoder().encode(body), {
+          status: 403,
+          headers: { "content-type": "text/html" },
+        }),
+    })
+    const smallResult = await callListCodexModels()
+    if (smallResult.ok || smallResult.failure.kind !== "http")
+      throw new Error("unreachable")
+    // An ordinary HTML body without markers is retained and unclassified.
+    expect(smallResult.failure.body).toBe(small)
+    expect(smallResult.failure.modelBodyFeatureDiagnostics).toEqual({
+      openAiBlockedSitePageMarkers: false,
+      cloudflarePageMarkers: false,
+      readOutcome: "complete",
+    })
+    body = large
+    const largeResult = await callListCodexModels()
+    if (largeResult.ok || largeResult.failure.kind !== "http")
+      throw new Error("unreachable")
+    // At most 4096 bytes are retained; an over-limit body is discarded
+    // without a prefix.
+    expect(largeResult.failure.body).toBeUndefined()
+    expect(largeResult.failure.modelBodyFeatureDiagnostics?.readOutcome).toBe(
+      "complete",
+    )
+  })
+
+  it("bounds the feature scan to exactly the first 16384 bytes", async () => {
+    const marker = "Sorry, you have been blocked"
+    const positions: Array<{ detected: boolean; markerAt: number }> = [
+      { detected: true, markerAt: 100 },
+      // The marker's last byte lands exactly on the final scanned byte …
+      { detected: true, markerAt: 16_384 - marker.length },
+      // … and one byte further it straddles the bound and must not be
+      // detected, like any marker entirely past the bound.
+      { detected: false, markerAt: 16_384 - marker.length + 1 },
+      { detected: false, markerAt: 17_000 },
+    ]
+    let nextModelsResponse: () => Response = () => {
+      throw new Error("response not configured")
+    }
+    installUpstreamMock({ models: () => nextModelsResponse() })
+    for (const { detected, markerAt } of positions) {
+      const body =
+        "f".repeat(markerAt) +
+        marker +
+        "f".repeat(20_000 - markerAt - marker.length)
+      nextModelsResponse = () =>
+        new Response(new TextEncoder().encode(body), {
+          status: 403,
+          headers: { "content-type": "text/html" },
+        })
+      const result = await callListCodexModels()
+      if (result.ok || result.failure.kind !== "http")
+        throw new Error(`marker not classified at offset ${markerAt}`)
+      // The retention rule discards the oversized body without a prefix.
+      expect(result.failure.body).toBeUndefined()
+      expect(
+        result.failure.modelBodyFeatureDiagnostics,
+        `marker at offset ${markerAt}`,
+      ).toEqual({
+        openAiBlockedSitePageMarkers: false,
+        cloudflarePageMarkers: detected,
+        readOutcome: "limit-exceeded",
+      })
+    }
+  })
+
+  it("cancels at the scan bound when exactly 16384 bytes arrive, without reading further", async () => {
+    // Four 4096-byte chunks reach the scan bound exactly; the upstream
+    // then stalls. The fixed read must cancel at the bound instead of
+    // waiting for a fifth chunk: in production the composed abort signal
+    // would only end that wait at the single-call timeout, spending the
+    // request budget. In this test the per-test timeout stands in for the
+    // abort, so a regression fails fast instead of hanging.
+    const cancelled = vi.fn<() => void>()
+    let pulls = 0
+    installUpstreamMock({
+      models: () =>
+        new Response(
+          new ReadableStream<Uint8Array>(
+            {
+              pull(controller) {
+                pulls += 1
+                if (pulls <= 4) {
+                  controller.enqueue(
+                    new TextEncoder().encode("f".repeat(4_096)),
+                  )
+                  return
+                }
+                // The stall: this pull never settles, so a read waiting
+                // for a fifth chunk would never resolve.
+                return new Promise(() => {})
+              },
+              cancel: cancelled,
+            },
+            // A zero high-water mark keeps pulls tied to reads, so the
+            // pull counter matches the chunks the reader consumed.
+            { highWaterMark: 0 },
+          ),
+          { status: 403, headers: { "content-type": "text/html" } },
+        ),
+    })
+    const result = await callListCodexModels()
+    if (result.ok || result.failure.kind !== "http")
+      throw new Error("unreachable")
+    expect(result.failure.modelBodyFeatureDiagnostics).toEqual({
+      openAiBlockedSitePageMarkers: false,
+      cloudflarePageMarkers: false,
+      readOutcome: "limit-exceeded",
+    })
+    // The bound was reached by the fourth chunk; no fifth pull began.
+    expect(pulls).toBe(4)
+    expect(cancelled).toHaveBeenCalledTimes(1)
+  }, 4_000)
+
+  it.each([
+    {
+      cancelledTimes: 0,
+      pulls: 2,
+      readOutcome: "complete",
+      total: 16_383,
+    },
+    {
+      cancelledTimes: 1,
+      pulls: 1,
+      readOutcome: "limit-exceeded",
+      total: 16_384,
+    },
+    {
+      cancelledTimes: 1,
+      pulls: 1,
+      readOutcome: "limit-exceeded",
+      total: 16_385,
+    },
+  ])(
+    "records $readOutcome for a $total-byte body that ends cleanly",
+    async ({ cancelledTimes, pulls, readOutcome, total }) => {
+      // Reaching the bound cancels without confirming EOF, so an exactly
+      // 16384-byte body records limit-exceeded; only a body below the bound
+      // that reaches EOF records complete.
+      const cancelled = vi.fn<() => void>()
+      let pullCount = 0
+      installUpstreamMock({
+        models: () =>
+          new Response(
+            new ReadableStream<Uint8Array>(
+              {
+                pull(controller) {
+                  pullCount += 1
+                  if (pullCount === 1) {
+                    controller.enqueue(
+                      new TextEncoder().encode("f".repeat(total)),
+                    )
+                    return
+                  }
+                  controller.close()
+                },
+                cancel: cancelled,
+              },
+              // A zero high-water mark keeps pulls tied to reads, so the
+              // pull counter matches the chunks the reader consumed.
+              { highWaterMark: 0 },
+            ),
+            { status: 403, headers: { "content-type": "text/html" } },
+          ),
+      })
+      const result = await callListCodexModels()
+      if (result.ok || result.failure.kind !== "http")
+        throw new Error("unreachable")
+      expect(result.failure.modelBodyFeatureDiagnostics?.readOutcome).toBe(
+        readOutcome,
+      )
+      // complete reads the closing pull; the bound cancels before it.
+      expect(pullCount).toBe(pulls)
+      expect(cancelled).toHaveBeenCalledTimes(cancelledTimes)
     },
   )
 
@@ -1386,6 +1904,11 @@ describe("model catalog discovery and read", () => {
         httpStatus: 401,
         reason: "upstream-rejected",
         responseDiagnostics: { cfMitigated: "absent", contentType: "json" },
+        bodyFeatureDiagnostics: {
+          openAiBlockedSitePageMarkers: false,
+          cloudflarePageMarkers: false,
+          readOutcome: "complete",
+        },
       }),
     )
     // The catalog refresh is a management-plane read: a rejected token is
