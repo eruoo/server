@@ -9,7 +9,10 @@ import { jwt } from "better-auth/plugins"
 import {
   API_KEY_AI_CONFIG_ID,
   API_KEY_AI_OPERATIONS,
+  API_KEY_CREDENTIAL_RATE_LIMIT_MAX_REQUESTS,
+  API_KEY_CREDENTIAL_RATE_LIMIT_WINDOW_SECONDS,
   API_KEY_DEFAULT_CONFIG_ID,
+  API_KEY_DEFAULT_PERMISSIONS,
 } from "../shared/api-key"
 import {
   enabledOAuthClientIds,
@@ -282,8 +285,12 @@ export function createAuthOptions(
             minExpiresIn: 1,
             maxExpiresIn: 365,
           },
-          permissions: { defaultPermissions: { status: ["read"] } },
-          rateLimit: { enabled: true, maxRequests: 60, timeWindow: 60_000 },
+          permissions: { defaultPermissions: API_KEY_DEFAULT_PERMISSIONS },
+          rateLimit: {
+            enabled: true,
+            maxRequests: API_KEY_CREDENTIAL_RATE_LIMIT_MAX_REQUESTS,
+            timeWindow: API_KEY_CREDENTIAL_RATE_LIMIT_WINDOW_SECONDS * 1_000,
+          },
           requireName: true,
           storage: "database",
         },
@@ -303,7 +310,11 @@ export function createAuthOptions(
           permissions: {
             defaultPermissions: { ai: [...API_KEY_AI_OPERATIONS] },
           },
-          rateLimit: { enabled: true, maxRequests: 60, timeWindow: 60_000 },
+          rateLimit: {
+            enabled: true,
+            maxRequests: API_KEY_CREDENTIAL_RATE_LIMIT_MAX_REQUESTS,
+            timeWindow: API_KEY_CREDENTIAL_RATE_LIMIT_WINDOW_SECONDS * 1_000,
+          },
           requireName: true,
           storage: "database",
         },

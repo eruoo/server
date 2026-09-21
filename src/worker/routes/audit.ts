@@ -47,7 +47,7 @@ const eventSchema = z
       .nullable(),
   })
   .openapi("SecurityAuditEvent")
-export const auditRoute = createRoute({
+const auditRoute = createRoute({
   method: "get",
   path: "/api/security/audit-events",
   operationId: "listSecurityAuditEvents",

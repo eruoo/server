@@ -92,9 +92,11 @@ describe("AI management routes", () => {
         connection.id,
       )
       .run()
-    const auditsBefore = await env.DB.prepare(
-      "SELECT * FROM security_audit_events ORDER BY id",
-    ).all()
+    const auditsBefore = (
+      await env.DB.prepare(
+        "SELECT * FROM security_audit_events ORDER BY id",
+      ).all()
+    ).results
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("secret-upstream-body", {
@@ -151,9 +153,11 @@ describe("AI management routes", () => {
     )
     expect(fetch).toHaveBeenCalledOnce()
     expect(
-      await env.DB.prepare(
-        "SELECT * FROM security_audit_events ORDER BY id",
-      ).all(),
+      (
+        await env.DB.prepare(
+          "SELECT * FROM security_audit_events ORDER BY id",
+        ).all()
+      ).results,
     ).toEqual(auditsBefore)
   })
 

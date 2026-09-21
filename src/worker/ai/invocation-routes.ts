@@ -1,9 +1,5 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi"
 
-import {
-  AI_INVOCATION_TOTAL_DEADLINE_MS,
-  isAiConnectionSlug,
-} from "../../shared/ai"
 import { parseAiExternalModelId } from "../../shared/api-key"
 import { scheduleAuditEvent } from "../audit"
 import { inspectCredentialCarriers } from "../auth/carriers"
@@ -24,6 +20,7 @@ import {
   validateAiRequestCapabilities,
 } from "./model-authorization"
 import { listAiModels } from "./models"
+import { AI_INVOCATION_TOTAL_DEADLINE_MS, isAiConnectionSlug } from "./policy"
 import { validateResponsesRequest } from "./responses-request"
 import { invokeCodexResponses } from "./responses-transport"
 
@@ -43,9 +40,9 @@ import { invokeCodexResponses } from "./responses-transport"
  */
 
 /** The exact request-body budget for the invocation route (§7). */
-export const AI_RESPONSES_BODY_MAX_BYTES = 8 * 1_048_576
+const AI_RESPONSES_BODY_MAX_BYTES = 8 * 1_048_576
 /** The request-body read budget, after which the route answers 504. */
-export const AI_RESPONSES_BODY_READ_BUDGET_MS = 15_000
+const AI_RESPONSES_BODY_READ_BUDGET_MS = 15_000
 /** Admission (key verification + reservation) budget (§7). */
 const AI_INVOCATION_ADMISSION_BUDGET_MS = 5_000
 

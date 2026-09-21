@@ -1,19 +1,15 @@
 /**
- * Shared AI service contracts and the single AI policy source.
+ * The single AI policy source.
  *
  * This module keeps the value domains, connection naming rules, and first-run
  * operational boundaries from docs/specs/ai-service.md §4, §7, and §8 in one
  * place. The worker storage operations, the daily cleanup, and the restore
  * planner read these definitions instead of keeping private copies.
- *
- * Only the durable-state slice is implemented: AI HTTP routes, the AI key
- * profile, and real upstream connectors open in later slices, so nothing here
- * implies the AI service is usable yet.
  */
 
-export const AI_CONNECTIONS_TABLE = "ai_connections"
+const AI_CONNECTIONS_TABLE = "ai_connections"
 export const AI_AUTHORIZATION_SESSIONS_TABLE = "ai_authorization_sessions"
-export const AI_MODELS_TABLE = "ai_models"
+const AI_MODELS_TABLE = "ai_models"
 export const AI_INVOCATIONS_TABLE = "ai_invocations"
 
 /** Application tables introduced by the AI service migration. */
@@ -26,14 +22,14 @@ export const AI_APPLICATION_TABLES = [
 
 export type AiApplicationTable = (typeof AI_APPLICATION_TABLES)[number]
 
-export const aiProviderTypes = ["openai-codex"] as const
+const aiProviderTypes = ["openai-codex"] as const
 export type AiProviderType = (typeof aiProviderTypes)[number]
 
 export function isAiProviderType(value: string): value is AiProviderType {
   return (aiProviderTypes as readonly string[]).includes(value)
 }
 
-export const aiConnectionAuthorizationStatuses = [
+const aiConnectionAuthorizationStatuses = [
   "never_authorized",
   "connected",
   "reauthentication_required",
@@ -41,7 +37,7 @@ export const aiConnectionAuthorizationStatuses = [
 export type AiConnectionAuthorizationStatus =
   (typeof aiConnectionAuthorizationStatuses)[number]
 
-export const aiAuthorizationSessionStatuses = [
+const aiAuthorizationSessionStatuses = [
   "pending",
   "completed",
   "cancelled",
@@ -49,7 +45,7 @@ export const aiAuthorizationSessionStatuses = [
 export type AiAuthorizationSessionStatus =
   (typeof aiAuthorizationSessionStatuses)[number]
 
-export const aiInvocationStatuses = [
+const aiInvocationStatuses = [
   "reserved",
   "succeeded",
   "failed",
@@ -58,7 +54,7 @@ export const aiInvocationStatuses = [
 ] as const
 export type AiInvocationStatus = (typeof aiInvocationStatuses)[number]
 
-export const aiTerminalInvocationStatuses = [
+const aiTerminalInvocationStatuses = [
   "succeeded",
   "failed",
   "incomplete",
@@ -89,7 +85,7 @@ export function isAiServerIdentifier(value: string): boolean {
  * 1–64 lowercase ASCII letters or digits with single hyphens as separators,
  * no leading, trailing, or consecutive hyphens.
  */
-export const AI_CONNECTION_SLUG_MAX_LENGTH = 64
+const AI_CONNECTION_SLUG_MAX_LENGTH = 64
 const aiConnectionSlugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 export function isAiConnectionSlug(value: string): boolean {
@@ -187,7 +183,7 @@ export const AI_MAX_IN_FLIGHT_INVOCATIONS = 2
 export const AI_MAX_IN_FLIGHT_INVOCATIONS_PER_KEY = 1
 
 /** Reservations survive the request deadline by 30 seconds for terminal writes. */
-export const AI_INVOCATION_RESERVATION_GRACE_MS = 30_000
+const AI_INVOCATION_RESERVATION_GRACE_MS = 30_000
 
 /** Invocation metadata is queryable and physically cleaned after 30 days. */
 export const AI_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000

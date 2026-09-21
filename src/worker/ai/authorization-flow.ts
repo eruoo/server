@@ -1,8 +1,3 @@
-import {
-  AI_AUTHORIZATION_SESSION_MAX_TTL_MS,
-  AI_AUTHORIZATION_POLL_DEFAULT_INTERVAL_MS,
-  AI_RECENT_AUTHORIZATION_WINDOW_MS,
-} from "../../shared/ai"
 import { completeAiAuthorization } from "./authorizations"
 import {
   cancelAiAuthorizationSession,
@@ -32,6 +27,11 @@ import {
   AI_CREDENTIAL_DEFAULT_LIFETIME_MS,
   readCodexCredentialPackage,
 } from "./credential-lifecycle"
+import {
+  AI_AUTHORIZATION_SESSION_MAX_TTL_MS,
+  AI_AUTHORIZATION_POLL_DEFAULT_INTERVAL_MS,
+  AI_RECENT_AUTHORIZATION_WINDOW_MS,
+} from "./policy"
 import { AiStageUpstreamBudget } from "./stage-budget"
 
 /**

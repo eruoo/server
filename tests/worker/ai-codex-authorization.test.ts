@@ -14,7 +14,6 @@ import {
   vi,
 } from "vitest"
 
-import { AI_AUTHORIZATION_SESSION_MAX_TTL_MS } from "../../src/shared/ai"
 import worker from "../../src/worker"
 import {
   cancelCodexAuthorization,
@@ -37,6 +36,7 @@ import {
   parseAiCredentialKeyring,
 } from "../../src/worker/ai/credential-cipher"
 import { commitAiModelSnapshot } from "../../src/worker/ai/models"
+import { AI_AUTHORIZATION_SESSION_MAX_TTL_MS } from "../../src/worker/ai/policy"
 
 const now = 2_000_000_000_000
 const stageDeadlineAt = now + 30_000

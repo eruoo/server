@@ -6,6 +6,10 @@ strictDepBuilds: true
 peerDependencyRules:
   allowedVersions:
     "openapi-typescript>typescript": "6"
+# 统一 jose：oauth-provider 自带 6.2.10 会与根的 6.2.12 形成双版本共存，
+# 强制全部解析为根锁定的 6.2.12。
+overrides:
+  jose: 6.2.12
 allowBuilds:
   esbuild: true
   simple-git-hooks: true

@@ -5,12 +5,12 @@ const apiKeyPattern = /^[A-Za-z0-9_-]+$/
  * session_data 是缓存副本，不计入载体集合，否则一次请求携带
  * token + data 会被误判为多载体 400。
  */
-export const sessionTokenCookieNames = new Set([
+const sessionTokenCookieNames = new Set([
   "eruoo.session_token",
   "__Secure-eruoo.session_token",
 ])
 /** Session cookieCache data cookie 名。 */
-export const sessionDataCookieNames = new Set([
+const sessionDataCookieNames = new Set([
   "eruoo.session_data",
   "__Secure-eruoo.session_data",
 ])

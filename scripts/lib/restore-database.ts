@@ -5,13 +5,13 @@ import { constants as sqliteConstants, DatabaseSync } from "node:sqlite"
 
 import { z } from "zod"
 
-import { AI_APPLICATION_TABLES } from "../../src/shared/ai"
 import {
   enabledOAuthClients,
   OAUTH_REFRESH_TOKEN_MAX_TTL_SECONDS,
   oauthScopes,
   OAUTH_RESOURCE,
 } from "../../src/shared/oauth"
+import { AI_APPLICATION_TABLES } from "../../src/worker/ai/policy"
 import {
   BACKUP_FORMAT_VERSION,
   BACKUP_SINGLE_OBJECT_MAX_BYTES,

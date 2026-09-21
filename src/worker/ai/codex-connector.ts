@@ -3,8 +3,8 @@ import { createLocalJWKSet, jwtVerify } from "jose"
 import {
   AI_AUTHORIZATION_POLL_DEFAULT_INTERVAL_MS,
   AI_AUTHORIZATION_POLL_MIN_INTERVAL_MS,
-} from "../../shared/ai"
-import type { AiProviderType } from "../../shared/ai"
+} from "./policy"
+import type { AiProviderType } from "./policy"
 
 /**
  * Fixed openai-codex connector definition.
@@ -37,7 +37,7 @@ import type { AiProviderType } from "../../shared/ai"
 export const CODEX_PROVIDER_TYPE: AiProviderType = "openai-codex"
 
 /** Reference CLI version used for the model catalog's client_version gating. */
-export const CODEX_REFERENCE_CLIENT_VERSION = "0.154.0"
+const CODEX_REFERENCE_CLIENT_VERSION = "0.154.0"
 
 const CODEX_ISSUER = "https://auth.openai.com"
 const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -988,7 +988,7 @@ export function buildCodexResponsesRequest(input: {
 }
 
 /** Headers the connector sets on authenticated backend (models/responses) calls. */
-export function buildCodexBackendRequestHeaders(input: {
+function buildCodexBackendRequestHeaders(input: {
   accessToken: string
   accountId: string | null
 }): Record<string, string> {

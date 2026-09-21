@@ -1,7 +1,7 @@
 import {
   AI_MANAGEMENT_UPSTREAM_SINGLE_CALL_MS,
   AI_MANAGEMENT_UPSTREAM_TOTAL_MS,
-} from "../../shared/ai"
+} from "./policy"
 
 /**
  * Per-request budget for owner-facing AI management operations.

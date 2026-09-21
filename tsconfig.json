@@ -18,8 +18,11 @@
     "src/worker/**/*.ts",
     "src/shared/**/*.ts",
     "tests/worker/**/*.ts",
+    "playwright.config.ts",
     "vite.config.ts",
     "vitest.config.ts",
+    "vitest.client.config.ts",
+    "vitest.scripts.config.ts",
     "worker-configuration.d.ts"
   ]
 }

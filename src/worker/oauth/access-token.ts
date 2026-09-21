@@ -7,15 +7,24 @@ import {
 } from "jose"
 import { z } from "zod"
 
-import type { Principal } from "../../shared/principal"
+/** Per-carrier identity established by a verified credential, request-scoped. */
+export interface Principal {
+  subject: string
+  authMethod: "apiKey" | "oauth" | "session"
+  clientId?: string
+  scopes: string[]
+  permissions: string[]
+  credentialId?: string
+  reauthenticatedAt?: number
+}
 
-export const OAUTH_ACCESS_TOKEN_TYPE = "at+jwt"
-export const OAUTH_ACCESS_TOKEN_MAX_AGE_SECONDS = 60 * 60
+const OAUTH_ACCESS_TOKEN_TYPE = "at+jwt"
+const OAUTH_ACCESS_TOKEN_MAX_AGE_SECONDS = 60 * 60
 export const OAUTH_ACCESS_TOKEN_MAX_CLOCK_TOLERANCE_SECONDS = 5 * 60
 export const OAUTH_ACCESS_TOKEN_PRODUCTION_CLOCK_TOLERANCE_SECONDS = 60
 export const OAUTH_ACCESS_TOKEN_MAX_KEY_ID_LENGTH = 128
 export const OAUTH_ACCESS_TOKEN_SIGNING_ALGORITHMS = ["EdDSA", "RS256"] as const
-export const OAUTH_ACCESS_TOKEN_REQUIRED_CLAIMS = [
+const OAUTH_ACCESS_TOKEN_REQUIRED_CLAIMS = [
   "iss",
   "sub",
   "aud",

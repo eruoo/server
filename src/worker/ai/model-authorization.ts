@@ -1,4 +1,3 @@
-import { isAiConnectionSlug, isAiServerIdentifier } from "../../shared/ai"
 import {
   apiKeyAiModelPermissionKey,
   API_KEY_AI_MODEL_PERMISSION_PREFIX,
@@ -8,6 +7,7 @@ import {
 } from "../../shared/api-key"
 import { getAiConnection, getAiConnectionBySlug } from "./connections"
 import { listAiModels } from "./models"
+import { isAiConnectionSlug, isAiServerIdentifier } from "./policy"
 import type { ResponsesRequestBody } from "./responses-request"
 
 /**

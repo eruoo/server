@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   AI_RESPONSES_STREAM_MAX_BYTES as AI_STREAM_BUDGET,
   AI_SSE_HEARTBEAT_INTERVAL_MS,
-} from "../../src/shared/ai"
+} from "../../src/worker/ai/policy"
 import {
   UpstreamSseParser,
   completeResponsesOutput,

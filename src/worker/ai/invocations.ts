@@ -9,7 +9,7 @@ import {
   isAiTerminalInvocationStatus,
   type AiInvocationStatus,
   type AiTerminalInvocationStatus,
-} from "../../shared/ai"
+} from "./policy"
 
 /**
  * Durable invocation admission, terminal writes, and bounded history reads.

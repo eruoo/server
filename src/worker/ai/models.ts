@@ -1,4 +1,4 @@
-import { isAiServerIdentifier } from "../../shared/ai"
+import { isAiServerIdentifier } from "./policy"
 
 /**
  * Durable model catalog snapshots.

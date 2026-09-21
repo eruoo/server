@@ -1,9 +1,9 @@
+import { problem } from "../http/response"
 import {
   AI_RESPONSES_SINGLE_EVENT_MAX_BYTES,
   AI_RESPONSES_STREAM_MAX_BYTES,
   AI_SSE_HEARTBEAT_INTERVAL_MS,
-} from "../../shared/ai"
-import { problem } from "../http/response"
+} from "./policy"
 import {
   ResponsesProtocolError,
   consumeResponsesUpstream,

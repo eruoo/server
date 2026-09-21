@@ -80,7 +80,7 @@ export class InvalidAuditCursorError extends Error {
   override readonly name = "InvalidAuditCursorError"
 }
 
-export class InvalidStoredAuditEventError extends Error {
+class InvalidStoredAuditEventError extends Error {
   override readonly name = "InvalidStoredAuditEventError"
 }
 
