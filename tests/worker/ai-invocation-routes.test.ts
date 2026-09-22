@@ -660,7 +660,7 @@ it("completes a two-request tool round trip with returned reasoning history and 
         input: [prompt],
         stream: false,
         tools,
-        tool_choice: { type: "function", name: "test_echo" },
+        tool_choice: "auto",
       },
     })
     expect(first.status).toBe(200)
@@ -682,7 +682,13 @@ it("completes a two-request tool round trip with returned reasoning history and 
     ]
     const second = await call("/api/ai/responses", {
       headers: { "x-api-key": key },
-      body: { model: upstreamModelId, input, stream: false },
+      body: {
+        model: upstreamModelId,
+        input,
+        tools,
+        tool_choice: "auto",
+        stream: false,
+      },
     })
     expect(second.status).toBe(200)
     expect(await second.json()).toMatchObject({
@@ -693,10 +699,15 @@ it("completes a two-request tool round trip with returned reasoning history and 
       expect.objectContaining({
         input: [prompt],
         tools,
-        tool_choice: { type: "function", name: "test_echo" },
+        tool_choice: "auto",
         reasoning: { effort: "max" },
       }),
-      expect.objectContaining({ input, reasoning: { effort: "max" } }),
+      expect.objectContaining({
+        input,
+        tools,
+        tool_choice: "auto",
+        reasoning: { effort: "max" },
+      }),
     ])
     expect(await reservedRowCount()).toBe(0)
     expect(
@@ -705,4 +716,104 @@ it("completes a two-request tool round trip with returned reasoning history and 
   } finally {
     fetch.mockRestore()
   }
+})
+
+describe("DeepSeek thinking tool-choice compatibility", () => {
+  const tools = [{ type: "function", name: "test_echo" }]
+  const forcedChoices = [
+    "required",
+    { type: "function", name: "test_echo" },
+  ] as const
+
+  beforeEach(async () => {
+    await env.DB.prepare(
+      "UPDATE ai_models SET capabilities=? WHERE connectionId=? AND upstreamModelId=?",
+    )
+      .bind(
+        JSON.stringify({
+          supportedInApi: true,
+          reasoningEfforts: ["none", "low", "high", "max"],
+          functionTools: true,
+        }),
+        connectionId,
+        upstreamModelId,
+      )
+      .run()
+  })
+
+  it.each(
+    [undefined, "low", "high", "max"].flatMap((effort) =>
+      [false, true].flatMap((stream) =>
+        forcedChoices.map((choice) => ({ effort, stream, choice })),
+      ),
+    ),
+  )(
+    "rejects forced tools before upstream: %j",
+    async ({ effort, stream, choice }) => {
+      const key = await createAiKey([upstreamModelId])
+      const fetch = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async () => sseUpstream(completedFrames))
+      try {
+        const response = await call("/api/ai/responses", {
+          headers: { "x-api-key": key },
+          body: {
+            model: upstreamModelId,
+            input: "Call test_echo",
+            tools,
+            tool_choice: choice,
+            stream,
+            ...(effort === undefined ? {} : { reasoning: { effort } }),
+          },
+        })
+        expect(response.status).toBe(422)
+        expect(await response.json()).toMatchObject({
+          type: "https://auth.eruoo.me/problems/validation-failed",
+        })
+        expect(fetch).not.toHaveBeenCalled()
+        expect(await reservedRowCount()).toBe(0)
+      } finally {
+        fetch.mockRestore()
+      }
+    },
+  )
+
+  it.each([
+    ...[undefined, "none", "low", "high", "max"].flatMap((effort) =>
+      [undefined, "auto", "none"].map((choice) => ({ effort, choice })),
+    ),
+    ...forcedChoices.map((choice) => ({ effort: "none", choice })),
+  ])(
+    "preserves supported tool choices and efforts: %j",
+    async ({ effort, choice }) => {
+      const key = await createAiKey([upstreamModelId])
+      const fetch = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async () => sseUpstream(completedFrames))
+      try {
+        const response = await call("/api/ai/responses", {
+          headers: { "x-api-key": key },
+          body: {
+            model: upstreamModelId,
+            input: "Call test_echo",
+            tools,
+            stream: false,
+            ...(choice === undefined ? {} : { tool_choice: choice }),
+            ...(effort === undefined ? {} : { reasoning: { effort } }),
+          },
+        })
+        expect(response.status).toBe(200)
+        expect((await response.json<{ status: string }>()).status).toBe(
+          "completed",
+        )
+        expect(fetch).toHaveBeenCalledTimes(1)
+        const forwarded = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))
+        expect(forwarded.reasoning).toEqual({ effort: effort ?? "max" })
+        expect(forwarded.tool_choice).toEqual(choice)
+        expect(await reservedRowCount()).toBe(0)
+      } finally {
+        fetch.mockRestore()
+      }
+    },
+  )
 })

@@ -181,6 +181,12 @@ export function validateAiRequestCapabilities(input: {
   if (input.request.tools?.length && capabilities.functionTools !== true)
     return { ok: false, field: "tools" }
   if (
+    effort !== "none" &&
+    (input.request.tool_choice === "required" ||
+      typeof input.request.tool_choice === "object")
+  )
+    return { ok: false, field: "tool_choice" }
+  if (
     Array.isArray(input.request.input) &&
     input.request.input.some(
       (item) =>

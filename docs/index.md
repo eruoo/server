@@ -2,7 +2,7 @@
 
 ## AI 服务架构草案
 
-- [ai-service.md](specs/ai-service.md)：AI 服务唯一设计来源。现改为 DeepSeek 官方 API Key 与原生 Responses，默认 effort=max；旧 AI 状态一次性清理。DeepSeek staging 部署与 owner 人工验收见实施记录 §4.23；原生模型名与 Session 切换优化尚未部署。
+- [ai-service.md](specs/ai-service.md)：AI 服务唯一设计来源。现改为 DeepSeek 官方 API Key 与原生 Responses，默认 effort=max；旧 AI 状态一次性清理。DeepSeek staging 部署与 owner 人工验收见实施记录 §4.23；原生模型名与 Session 切换优化已发布 staging；工具选择组合的验收与修复见实施记录 §4.24。
 
 ## 完整架构规格（2026-09-09，服务端与 Web 已实施，平台验收另列）
 

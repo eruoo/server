@@ -216,9 +216,10 @@ const responsesRequestBodySchema = z
     text: textSchema
       .optional()
       .meta({ description: "Structured output settings." }),
-    tool_choice: toolChoiceSchema
-      .optional()
-      .meta({ description: "Tool selection policy." }),
+    tool_choice: toolChoiceSchema.optional().meta({
+      description:
+        "Tool selection policy. required and named functions require reasoning.effort=none; thinking mode (including the default max) accepts auto, none, or omission.",
+    }),
     tools: z
       .array(functionTool)
       .optional()
