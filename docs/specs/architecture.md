@@ -170,19 +170,19 @@ AI 连接管理的 Session 策略以 [ai-service.md §6.1](./ai-service.md#61-�
 
 使用独立的 `@better-auth/api-key` 插件，`enableSessionForAPIKeys=false`，只有 `x-api-key` 入口。哈希存 D1，原始值仅在创建响应返回一次。
 
-| 项       | 规则                                                                                                                                                                                                                                  |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 用途     | 一把 key 对应一个脚本/调用方；不用于登录、内部 Cron 或凭证管理                                                                                                                                                                        |
-| 期限     | 默认 180 天，最长 365 天，禁止永久 key；SPA 默认创建 180 天                                                                                                                                                                           |
-| 权限     | 首期服务端固定 `status:read`（default 档）与 `ai: [invoke, models:read]`（ai 档，2026-09-19 开放）；HTTP 不接受 permissions，禁止 wildcard；ai 档的模型许可由服务端按 `modelIds` 构造，default 档不开放权限更新                       |
-| 限流     | 每把 key 60/60 秒，同步凭证计数；入口粗限流见运维规格                                                                                                                                                                                 |
-| 到期提示 | 剩余有效期在 (0, 14 天] 且最终为 2xx 时，返回 UTC RFC3339 `API-Key-Expires-At`                                                                                                                                                        |
-| mutation | 创建、命名更新、撤销均要求 recent owner Session；不能通过 key 管理另一把 key                                                                                                                                                          |
-| 网关     | 应用网关校验 owner/recent-auth、Origin、凭证载体、字段与配置档后调用插件服务端 API；`create`/`update` 不携带浏览器 headers/request，`userId` 只取已验证 owner；`list`/`get`/`delete` 保留插件 Session 校验                            |
-| 配置档   | 开放 default（`purpose` 省略或 `status`）与 ai（`purpose: ai` + 必填 `modelIds`，2026-09-19 开放）；`configId` 缺省显式补 `default`，未知值拒绝；`create` 不接受 `configId`；`get` 的 `keyId` 映射插件 query `id`；key 不能切换配置档 |
-| 删除重试 | 以资源归属校验后的不存在作为幂等完成；跨 owner 或跨档现存资源拒绝；归属预查后发生并发撤销且确认资源确实不存在时同样幂等完成，不能借此忽略身份失败或依赖异常                                                                           |
-| 网关限流 | 五个管理 operation 由网关按已登记 operation 与可信 IP 消费 100/60 秒持久桶，与原生 handler 共享桶键；429 带 Retry-After，不写拒绝审计，计数依赖异常返回 503                                                                           |
-| 歧义输入 | mutation 原始 JSON 的顶层重复字段（含转义后同名）与重复 query 参数按 400 拒绝，不执行 Key 变更                                                                                                                                        |
+| 项       | 规则                                                                                                                                                                                                                                                    |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 用途     | 一把 key 对应一个脚本/调用方；不用于登录、内部 Cron 或凭证管理                                                                                                                                                                                          |
+| 期限     | 默认 180 天，最长 365 天，禁止永久 key；SPA 默认创建 180 天                                                                                                                                                                                             |
+| 权限     | 首期服务端固定 `status:read`（default 档）与 `ai: [invoke, models:read]`（ai 档，2026-09-19 开放）；HTTP 不接受 permissions，禁止 wildcard；ai 档的模型许可由服务端按 `connectionId` 与 `modelIds` 构造，default 档不开放权限更新                       |
+| 限流     | 每把 key 60/60 秒，同步凭证计数；入口粗限流见运维规格                                                                                                                                                                                                   |
+| 到期提示 | 剩余有效期在 (0, 14 天] 且最终为 2xx 时，返回 UTC RFC3339 `API-Key-Expires-At`                                                                                                                                                                          |
+| mutation | 创建、命名更新、撤销均要求 recent owner Session；不能通过 key 管理另一把 key                                                                                                                                                                            |
+| 网关     | 应用网关校验 owner/recent-auth、Origin、凭证载体、字段与配置档后调用插件服务端 API；`create`/`update` 不携带浏览器 headers/request，`userId` 只取已验证 owner；`list`/`get`/`delete` 保留插件 Session 校验                                              |
+| 配置档   | 开放 default（`purpose` 省略或 `status`）与 ai（`purpose: ai` + 必填 `connectionId` 和 `modelIds`，2026-09-19 开放）；`configId` 缺省显式补 `default`，未知值拒绝；`create` 不接受 `configId`；`get` 的 `keyId` 映射插件 query `id`；key 不能切换配置档 |
+| 删除重试 | 以资源归属校验后的不存在作为幂等完成；跨 owner 或跨档现存资源拒绝；归属预查后发生并发撤销且确认资源确实不存在时同样幂等完成，不能借此忽略身份失败或依赖异常                                                                                             |
+| 网关限流 | 五个管理 operation 由网关按已登记 operation 与可信 IP 消费 100/60 秒持久桶，与原生 handler 共享桶键；429 带 Retry-After，不写拒绝审计，计数依赖异常返回 503                                                                                             |
+| 歧义输入 | mutation 原始 JSON 的顶层重复字段（含转义后同名）与重复 query 参数按 400 拒绝，不执行 Key 变更                                                                                                                                                          |
 
 依赖失败必须抛出可区分的服务错误，不允许插件把数据库异常吞成 invalid key。旧 patch 只在目标版本的对应行为测试仍失败时移植；不把整个旧补丁集默认带回。
 
@@ -229,13 +229,14 @@ Vue 3 + `<script setup lang="ts">` + Vue Router。一个 Session 控制器管理
 
 ### 6.2 Session 状态
 
-| 状态                  | UI 与请求行为                                                               |
-| --------------------- | --------------------------------------------------------------------------- |
-| 初次 checking         | 登录状态尚未确认；不挂载受保护面板、不发 owner API                          |
-| authenticated         | 挂载面板；每个功能只加载一次自己的数据                                      |
-| anonymous             | 清敏感内存并显示登录入口；来自明确的 Session 空结果或可信的凭证失效响应     |
-| unavailable           | 显示服务暂不可用与重试；不跳转 GitHub、不清掉表单来伪装注销                 |
-| 已登录后的 refreshing | 保留已挂载表单和一次性 key，冻结操作；结果成功后恢复，明确 anonymous 才清理 |
+| 状态                      | UI 与请求行为                                                                                          |
+| ------------------------- | ------------------------------------------------------------------------------------------------------ |
+| 初次 checking             | 登录状态尚未确认；不挂载受保护面板、不发 owner API                                                     |
+| authenticated             | 挂载面板；每个功能只加载一次自己的数据                                                                 |
+| anonymous                 | 清敏感内存并显示登录入口；来自明确的 Session 空结果或可信的凭证失效响应                                |
+| unavailable               | 显示服务暂不可用与重试；不跳转 GitHub、不清掉表单来伪装注销                                            |
+| 已登录后的手动 refreshing | 保留已挂载表单和一次性 key，冻结操作；结果成功后恢复，明确 anonymous 才清理                            |
+| 可见性后台检查            | 保持 authenticated 和表单可操作；故障显示重试提示，可信失效转 anonymous，Session ID 变化则重新挂载面板 |
 
 管理请求收到明确的 `authentication-required` / `invalid-credential` Problem 401 时，交由唯一 Session 控制器进入 anonymous；列表读取、mutation 及成功后的刷新遵循同一规则，不再额外请求 get-session。请求开始时绑定身份 generation 和 Session ID，旧登录周期或其他窗口登录前的拒绝，以及已卸载页面的结果不能清掉新身份。未知 401、权限 403、recent-auth 403 与依赖故障不冒充注销。
 
@@ -243,7 +244,7 @@ Vue 3 + `<script setup lang="ts">` + Vue Router。一个 Session 控制器管理
 
 路由路径或查询变化时，使该页尚未完成的登录流程失效并恢复可操作状态；其迟到成功、错误和 fallback 均不作用于新页面。OAuth consent 还在退出开始或 Session 身份变化时失效，不能让全局退出后的迟到响应继续跳转或修改地址。取消登录保留已确认的身份，不中断全局 Session 检查或退出请求。
 
-只由 Session 控制器负责初始化、可见性恢复、登录/退出后的刷新；只允许一条在途刷新，使用 generation 丢弃过时结果。关闭库重复的自动触发选项。恢复可见性时距上次成功检查不足 30 秒则不重复请求；长时间不可用可由用户离开页面清理内存。
+只由 Session 控制器负责初始化、可见性恢复、登录/退出后的刷新；只允许一条在途刷新，使用 generation 丢弃过时结果。关闭库重复的自动触发选项。页面连续隐藏不足 5 分钟时恢复可见性不检查；达到 5 分钟后后台检查，保留输入和操作状态。所有非强制检查继续合并在途请求，并以成功检查后的 30 秒窗口去重。首次加载、显式重试与登录完成仍检查；每次服务端管理写操作仍独立验证 Session，不依赖客户端检查频率。
 
 ### 6.3 mutation 与异步状态
 

@@ -78,6 +78,7 @@ export async function listApiKeysForProfile(
 export async function createApiKeyForProfile(input: {
   configId: string
   days: number
+  connectionId?: string
   modelIds?: string[]
   name: string
 }) {
@@ -88,6 +89,9 @@ export async function createApiKeyForProfile(input: {
         expiresIn: input.days * 86400,
         name: input.name,
         purpose: input.configId === API_KEY_AI_CONFIG_ID ? "ai" : "status",
+        ...(input.connectionId === undefined
+          ? {}
+          : { connectionId: input.connectionId }),
         ...(input.modelIds === undefined ? {} : { modelIds: input.modelIds }),
       }),
       headers: { "content-type": "application/json" },
@@ -112,6 +116,7 @@ export async function renameApiKeyInProfile(
 export async function updateAiKeyModelGrants(
   keyId: string,
   name: string,
+  connectionId: string,
   modelIds: string[],
 ) {
   await requestJson("/api/auth/api-key/update", {
@@ -119,6 +124,7 @@ export async function updateAiKeyModelGrants(
       configId: API_KEY_AI_CONFIG_ID,
       keyId,
       name,
+      connectionId,
       modelIds,
     }),
     headers: { "content-type": "application/json" },

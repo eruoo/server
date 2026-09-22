@@ -48,7 +48,6 @@ function connectionView(
 ) {
   return {
     id: connection.id,
-    slug: connection.slug,
     name: connection.name,
     providerType: connection.providerType,
     enabled: connection.enabled,
@@ -124,7 +123,6 @@ const connectionViewSchema = z
     id: z.string(),
     name: z.string(),
     providerType: z.string(),
-    slug: z.string(),
     updatedAt: z.number(),
   })
   .openapi("AiConnection")
@@ -139,7 +137,7 @@ const connectionWithModelsSchema = connectionViewSchema.extend({
   ),
 })
 const createConnectionBodySchema = z
-  .object({ name: z.string().min(1).max(100), slug: z.string().min(1).max(64) })
+  .object({ name: z.string().min(1).max(100) })
   .strict()
 const updateConnectionBodySchema = z
   .object({
@@ -293,12 +291,10 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
           name: parsed.data.name,
           now: Date.now(),
           providerType: DEEPSEEK_PROVIDER_TYPE,
-          slug: parsed.data.slug,
         })
       } catch {
         return problem("validation-failed", requestId)
       }
-      if (!created.created) return problem("validation-failed", requestId)
       scheduleAuditEvent(c, {
         metadata: {
           connectionId: created.connection.id,

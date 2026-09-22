@@ -14,10 +14,11 @@ provide(darkThemeKey, isDark)
 const route = useRoute()
 watch(() => route.fullPath, session.cancelAuthentication, { flush: "sync" })
 function onVisibility() {
-  if (document.visibilityState === "visible") void session.refresh()
+  void session.visibilityChanged(document.visibilityState === "visible")
 }
 onMounted(() => {
   void session.refresh(true)
+  onVisibility()
   document.addEventListener("visibilitychange", onVisibility)
 })
 onUnmounted(() => {

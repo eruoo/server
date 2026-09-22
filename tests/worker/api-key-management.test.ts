@@ -305,13 +305,20 @@ it("rejects unopened fields, profiles and ambiguous parameters", async () => {
     ["/api/auth/api-key/create", { body: { name: "x", userId: session.id } }],
     [
       "/api/auth/api-key/create",
-      { body: { name: "x", modelIds: ["codex/gpt"] } },
+      {
+        body: {
+          name: "x",
+          connectionId: "11111111-1111-1111-1111-111111111111",
+          modelIds: ["codex/gpt"],
+        },
+      },
     ],
     ["/api/auth/api-key/create", { body: { name: "x", purpose: "ai" } }],
     [
       "/api/auth/api-key/create",
       {
         body: {
+          connectionId: "11111111-1111-1111-1111-111111111111",
           modelIds: ["missing-connection/gpt"],
           name: "x",
           purpose: "ai",
@@ -326,7 +333,8 @@ it("rejects unopened fields, profiles and ambiguous parameters", async () => {
         body: {
           configId: "default",
           keyId: created.id,
-          modelIds: ["codex-main/gpt-test"],
+          connectionId: "11111111-1111-1111-1111-111111111111",
+          modelIds: ["gpt-test"],
           name: "x",
         },
       },
@@ -973,7 +981,8 @@ it("creates an ai profile key with server-built model permissions", async () => 
   const response = await call("/api/auth/api-key/create", {
     cookie: session.cookie,
     body: {
-      modelIds: ["codex-main/gpt-test", "codex-main/openai/gpt-other"],
+      connectionId: "11111111-1111-1111-1111-111111111111",
+      modelIds: ["gpt-test", "openai/gpt-other"],
       name: "ai key",
       purpose: "ai",
     },
@@ -1022,15 +1031,37 @@ it("replaces and revokes ai model grants through update", async () => {
   const session = await ownerSession()
   const created = await call("/api/auth/api-key/create", {
     cookie: session.cookie,
-    body: { modelIds: ["codex-main/gpt-test"], name: "ai key", purpose: "ai" },
+    body: {
+      connectionId: "11111111-1111-1111-1111-111111111111",
+      modelIds: ["gpt-test"],
+      name: "ai key",
+      purpose: "ai",
+    },
   }).then((response) => response.json<{ id: string }>())
+
+  for (const incomplete of [
+    { modelIds: ["gpt-test"] },
+    { connectionId: "11111111-1111-1111-1111-111111111111" },
+  ]) {
+    const invalid = await call("/api/auth/api-key/update", {
+      cookie: session.cookie,
+      body: {
+        configId: "ai",
+        keyId: created.id,
+        name: "ai key",
+        ...incomplete,
+      },
+    })
+    expect(invalid.status).toBe(422)
+  }
 
   const replaced = await call("/api/auth/api-key/update", {
     cookie: session.cookie,
     body: {
       configId: "ai",
       keyId: created.id,
-      modelIds: ["codex-main/openai/gpt-other"],
+      connectionId: "11111111-1111-1111-1111-111111111111",
+      modelIds: ["openai/gpt-other"],
       name: "ai key renamed",
     },
   })
@@ -1063,7 +1094,13 @@ it("replaces and revokes ai model grants through update", async () => {
 
   const revoked = await call("/api/auth/api-key/update", {
     cookie: session.cookie,
-    body: { configId: "ai", keyId: created.id, modelIds: [], name: "ai key" },
+    body: {
+      configId: "ai",
+      keyId: created.id,
+      connectionId: "11111111-1111-1111-1111-111111111111",
+      modelIds: [],
+      name: "ai key",
+    },
   })
   expect(revoked.status).toBe(200)
   const afterRevoke = await env.DB.prepare(
@@ -1073,6 +1110,7 @@ it("replaces and revokes ai model grants through update", async () => {
     .first<{ permissions: string }>()
   expect(JSON.parse(afterRevoke?.permissions ?? "{}")).toEqual({
     ai: ["invoke", "models:read"],
+    "ai-model:11111111-1111-1111-1111-111111111111:0": [],
   })
 })
 

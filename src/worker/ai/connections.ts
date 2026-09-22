@@ -1,5 +1,4 @@
 import {
-  isAiConnectionSlug,
   isAiProviderType,
   isAiServerIdentifier,
   type AiConnectionAuthorizationStatus,
@@ -16,7 +15,6 @@ import {
 
 export interface AiConnectionRecord {
   id: string
-  slug: string
   name: string
   providerType: string
   enabled: boolean
@@ -30,7 +28,6 @@ export interface AiConnectionRecord {
 
 interface AiConnectionRow {
   id: string
-  slug: string
   name: string
   providerType: string
   enabled: number
@@ -86,21 +83,6 @@ export async function getAiConnection(
   return row === null ? null : toAiConnectionRecord(row)
 }
 
-/** Resolves one connection by its immutable unique slug. */
-export async function getAiConnectionBySlug(
-  database: D1Database,
-  slug: string,
-): Promise<AiConnectionRecord | null> {
-  if (!isAiConnectionSlug(slug)) {
-    throw new RangeError("The AI connection slug is invalid.")
-  }
-  const row = await database
-    .prepare('SELECT * FROM "ai_connections" WHERE "slug" = ?1')
-    .bind(slug)
-    .first<AiConnectionRow>()
-  return row === null ? null : toAiConnectionRecord(row)
-}
-
 export async function listAiConnections(
   database: D1Database,
 ): Promise<AiConnectionRecord[]> {
@@ -112,15 +94,15 @@ export async function listAiConnections(
   return rows.results.map(toAiConnectionRecord)
 }
 
-export type CreateAiConnectionResult =
-  | { created: true; connection: AiConnectionRecord }
-  | { created: false; reason: "slug-exists" }
+export type CreateAiConnectionResult = {
+  created: true
+  connection: AiConnectionRecord
+}
 
 export async function createAiConnection(
   database: D1Database,
   input: {
     id: string
-    slug: string
     name: string
     providerType: string
     now: number
@@ -128,9 +110,6 @@ export async function createAiConnection(
 ): Promise<CreateAiConnectionResult> {
   if (!isAiServerIdentifier(input.id)) {
     throw new RangeError("The AI connection id is invalid.")
-  }
-  if (!isAiConnectionSlug(input.slug)) {
-    throw new RangeError("The AI connection slug is invalid.")
   }
   if (
     input.name.length < 1 ||
@@ -143,30 +122,17 @@ export async function createAiConnection(
   }
   requireEpochMilliseconds(input.now, "The AI connection creation time")
 
-  // A single conditional insert decides slug uniqueness without a prior read,
-  // so two concurrent creations of the same slug produce exactly one row.
-  const result = await database
-    .prepare(
-      `INSERT INTO "ai_connections" (
-         "id", "slug", "name", "providerType", "enabled",
-         "authorizationStatus", "credentialVersion",
-         "credentialCiphertext", "createdAt", "updatedAt"
-       )
-       SELECT ?1, ?2, ?3, ?4, 1,
-         'never_authorized', 0, NULL, ?5, ?5
-       WHERE NOT EXISTS (SELECT 1 FROM "ai_connections" WHERE "slug" = ?2)`,
-    )
-    .bind(input.id, input.slug, input.name, input.providerType, input.now)
+  await database
+    .prepare(`INSERT INTO ai_connections
+    (id, slug, name, providerType, enabled, authorizationStatus, credentialVersion,
+     credentialCiphertext, createdAt, updatedAt)
+    VALUES (?1, ?1, ?2, ?3, 1, 'never_authorized', 0, NULL, ?4, ?4)`)
+    .bind(input.id, input.name, input.providerType, input.now)
     .run()
-
-  if (readChanges(result, "creation") === 0) {
-    return { created: false, reason: "slug-exists" }
-  }
   return {
     created: true,
     connection: {
       id: input.id,
-      slug: input.slug,
       name: input.name,
       providerType: input.providerType,
       enabled: true,

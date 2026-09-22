@@ -23,7 +23,6 @@ import {
 import AiCredentialForm from "./AiCredentialForm.vue"
 const list = useManagedList(listAiConnections)
 const session = useSession()
-const slug = shallowRef("")
 const name = shallowRef("")
 const loadingPanel = shallowRef(true)
 const panelBusy = computed(() => list.busy.value || loadingPanel.value)
@@ -39,8 +38,7 @@ const protocolLabel = () =>
     ? describeAiProtocols(provider.value.responsesStyle)
     : "协议未确认"
 async function create() {
-  if (await list.mutate(() => createAiConnection(slug.value, name.value))) {
-    slug.value = ""
+  if (await list.mutate(() => createAiConnection(name.value))) {
     name.value = ""
   }
 }
@@ -105,19 +103,10 @@ onUnmounted(() => {
     <p class="eyebrow">AI 接入</p>
     <h1>AI 连接</h1>
     <p>
-      连接使用 DeepSeek 官方 API Key；slug
-      创建后不可修改，模型目录来自上游账号的最近一次发现。
+      连接使用 DeepSeek 官方 API
+      Key，模型目录来自上游账号的最近一次发现。调用时直接使用上游模型名。
     </p>
     <form class="inline-form" @submit.prevent="create">
-      <label
-        >slug<input
-          v-model="slug"
-          required
-          maxlength="64"
-          pattern="[a-z0-9]+(-[a-z0-9]+)*"
-          placeholder="deepseek-main"
-          :disabled="panelBusy"
-      /></label>
       <label
         >名称<input
           v-model="name"
@@ -130,7 +119,7 @@ onUnmounted(() => {
     <p role="status">{{ list.message.value }}</p>
     <ul class="credential-list">
       <li v-for="connection in list.items.value" :key="connection.id">
-        <h2>{{ connection.name }} · {{ connection.slug }}</h2>
+        <h2>{{ connection.name }} · {{ connection.id.slice(0, 8) }}</h2>
         <p data-testid="ai-connection-state">
           <strong>{{ stateLabel(connection) }}</strong> ·
           {{ connection.providerType }} ·

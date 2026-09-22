@@ -63,12 +63,18 @@ it("sends the JSON content type on every AI management mutation", async () => {
 })
 
 it("sends the key name with a grant update", async () => {
-  await updateAiKeyModelGrants("ai-key-id", "ai probe", ["codex-main/gpt-test"])
+  await updateAiKeyModelGrants(
+    "ai-key-id",
+    "ai probe",
+    "11111111-1111-1111-1111-111111111111",
+    ["gpt-test"],
+  )
   expect(calls).toHaveLength(1)
   expect(JSON.parse(calls[0].body ?? "{}")).toEqual({
     configId: "ai",
     keyId: "ai-key-id",
-    modelIds: ["codex-main/gpt-test"],
+    connectionId: "11111111-1111-1111-1111-111111111111",
+    modelIds: ["gpt-test"],
     name: "ai probe",
   })
   expect(calls[0].contentType).toBe("application/json")

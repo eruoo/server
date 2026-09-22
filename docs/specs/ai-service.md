@@ -1,6 +1,6 @@
 # AI 接入服务
 
-更新：2026-09-22。本文是 AI 服务的唯一设计来源；当前实现改为 DeepSeek 官方 API。历史 Codex 部署与验证仅见 [实施记录](implementation.md)，不代表新的 DeepSeek 链路已在线验收。身份、OAuth/OIDC、备份与发布规则继续由 [architecture.md](architecture.md)、[protocol-contract.md](protocol-contract.md)、[operations.md](operations.md) 维护。
+更新：2026-09-22。本文是 AI 服务的唯一设计来源；当前实现改为 DeepSeek 官方 API。DeepSeek staging 人工验收及历史 Codex 记录见 [实施记录](implementation.md#423-2026-09-22deepseek-staging-人工验收与后续简化)；本文新增的原生模型名与单连接路由仍待部署。身份、OAuth/OIDC、备份与发布规则继续由 [architecture.md](architecture.md)、[protocol-contract.md](protocol-contract.md)、[operations.md](operations.md) 维护。
 
 ## 1. 目标
 
@@ -18,7 +18,7 @@ AI 连接管理要求有效 owner Session，写操作强读持久会话，不要
 
 1. owner 创建连接，输入 DeepSeek Key 并保存。
 2. 服务端加密保存；前端另发模型发现请求。发现失败单独展示，可重试发现。
-3. owner 为应用创建 `ai` 配置档调用 Key，明确勾选当前可用模型。
+3. owner 为应用创建 `ai` 配置档调用 Key，选择一条连接，再勾选该连接当前可用的模型。
 4. 应用通过 `/api/ai/models` 查看获准模型，通过 `/api/ai/responses` 调用。
 5. 服务端校验调用 Key、全局与单 Key 名额、模型授权和能力，再发送一次上游请求。
 
@@ -26,7 +26,7 @@ AI 连接管理要求有效 owner Session，写操作强读持久会话，不要
 
 ### 4.1 连接
 
-连接包含服务端 UUID、不可修改且唯一的 slug、名称、启用状态、`providerType=deepseek`、凭证状态和版本。slug 为 1–64 位小写字母、数字及单个连接短横线，不能以短横线开头或结尾。名称最多 100 字。
+连接包含服务端 UUID、名称、启用状态、`providerType=deepseek`、凭证状态和版本。名称最多 100 字，仅供管理界面识别；创建只填写名称，不再配置 slug。名称可修改，路由与权限始终绑定 UUID。
 
 `credentialVersion` 在保存、明确失效或断开时递增，控制模型快照和迟到结果。`permissionVersion` 只在断开或恢复清理时递增，控制本站调用 Key 的授权。静态 Key 没有虚构的到期时间、刷新令牌或设备授权会话。
 
@@ -36,11 +36,13 @@ DeepSeek `/models` 返回的 `data[].id` 就是请求中使用的调用名，不
 
 目前确认的调用名为 `deepseek-flash` 与 `deepseek-v4-pro`。两者支持文本、function tools、结构化输出与 effort；`deepseek-flash` 支持图片输入。能力映射来自官方文档，不来自 `/models`。未知 ID 可以出现在管理目录，但默认不可授权或调用；确认能力后再加入映射。
 
-本站模型名是 `<connection-slug>/<upstream-model-id>`，区分大小写。模型发现成功后原子替换快照，仅当前凭证版本可提交。响应体最多 256 KiB、最多 200 个唯一模型。保存新 Key 时清空旧快照，必须重新发现后才能调用。
+本站模型名直接使用上游 ID，例如 `deepseek-flash`，不添加连接前缀，区分大小写且保留 ID 本身的斜杠。`/api/ai/models` 返回的 `id` 可直接填入 Responses 的 `model`。调用 Key 绑定的连接决定使用哪个上游 Key；相同模型名不会跨连接回退。模型发现成功后原子替换快照，仅当前凭证版本可提交。响应体最多 256 KiB、最多 200 个唯一模型。保存新 Key 时清空旧快照，必须重新发现后才能调用。
 
 ### 4.3 本站调用 Key
 
-`ai` 配置档包含固定 `ai: [models:read, invoke]` 操作和精确模型列表。持久权限键为 `ai-model:<connection-uuid>:<permission-version>`，值为上游模型 ID 数组。连接重建、slug 复用、断开后重配都不能让旧授权复活；不支持通配符或自动授权新模型。
+`ai` 配置档包含固定 `ai: [models:read, invoke]` 操作，绑定一条连接及其精确模型列表。创建时必须提供 `connectionId` 与非空 `modelIds`；编辑授权时两者一起提供并整体替换，省略两者仅改名，空模型数组撤销全部模型但保留连接绑定。
+
+持久权限恰有一个 `ai-model:<connection-uuid>:<permission-version>` 键，值为原生模型 ID 数组。旧单连接 Key 可直接继续使用；旧多连接或无连接权限不会自动选择上游，owner 必须明确重选连接和模型。删除后重建同名连接、断开后重配都不能让旧授权复活；不支持通配符或自动授权新模型。
 
 普通换 Key 保留 permissionVersion。因此，原本获准的模型在新 Key 成功发现同名模型后恢复可用；未授权模型仍不可用。连接停用会暂停调用，重新启用恢复既有授权。
 
@@ -77,7 +79,7 @@ DeepSeek `/models` 返回的 `data[].id` 就是请求中使用的调用名，不
 
 ### 6.2 调用接口
 
-`GET /api/ai/models` 仅列出当前连接有效、当前凭证快照存在、能力已确认且该调用 Key 明确获准的模型。`POST /api/ai/responses` 支持下列严格子集；不支持字段直接 422，不静默降级。
+`GET /api/ai/models` 仅列出调用 Key 所绑定连接有效、当前凭证快照存在、能力已确认且该调用 Key 明确获准的模型。`POST /api/ai/responses` 支持下列严格子集；不支持字段直接 422，不静默降级。
 
 - `input`：字符串，或明确 `type` 的消息、function_call、function_call_output、reasoning 项列表。消息角色为 system/user/assistant；文本为 input_text/output_text。reasoning 使用 `content: [{type: reasoning_text, text: ...}]`。
 - 图片：仅 user 消息中的内联 PNG/JPEG/WebP base64 data URL，且模型必须具备 vision 能力。远程 URL、Files API、视频、GIF 和工具结果中的图片不在本站子集内。
@@ -120,11 +122,15 @@ HTTP 401 对外为 `ai-reauthorization-required`（503，需更新上游 Key）�
 
 追加 `0004_deepseek_api.sql`：删除旧 AI 配置档调用 Key、旧调用记录、旧连接、模型快照和设备授权会话；重建 connections/models 表，删除设备授权表。无需搬运或兼容旧 Codex 凭证、权限或会话。身份、Passkey、OAuth、普通调用 Key 等非 AI 数据保留；既有 0001–0003 迁移不改写。
 
+本次不新增迁移，既有 0001–0004 不改写。数据库保留内部 slug 列以兼容发布切换与旧 Worker 回退；旧值不变，新连接自动使用自身 UUID 填充，界面与 API 不再接受或返回 slug。现有 DeepSeek 连接 UUID、加密 Key、版本、模型快照、调用记录和本站 Key 权限全部保留。客户端需将旧的 `连接前缀/模型名` 改为原生模型名。
+
 每日清理只处理过期调用元数据，每批最多 500 行，每次最多 10 批，剩余留至下次。恢复工具可识别历史表结构与新结构：历史备份按原表结构清理后再应用后续迁移；新备份清除上游 Key、推进 credentialVersion/permissionVersion、结束在途调用为 unknown。恢复流程原本要求清除本站凭证的规则继续适用，不会借备份恢复重启授权。
 
 ## 9. 管理界面
 
 连接页显示 Key 是否已配置、启停状态、模型 ID、明确的能力与 effort 列表（默认 max）。保存 Key 后另发模型发现；失败保留可重试入口。断开确认明确说明会撤销该连接模型授权。Key 输入框始终为空开始，无设备码、轮询、虚构到期或刷新入口。
+
+本站 AI Key 创建和编辑统一使用“选择连接 → 勾选该连接模型”；切换连接会清空已选模型，必须重新勾选，不因模型同名自动转移授权。全部取消后可保存以撤销模型许可。
 
 ## 10. 扩展边界
 

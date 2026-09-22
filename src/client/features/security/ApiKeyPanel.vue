@@ -4,16 +4,15 @@ import { computed, onMounted, onUnmounted, shallowRef } from "vue"
 import {
   API_KEY_AI_CONFIG_ID,
   API_KEY_DEFAULT_CONFIG_ID,
+  readAiKeyConnectionGrant,
 } from "../../../shared/api-key"
 import ConfirmAction from "../../components/security/ConfirmAction.vue"
 import { useManagedList } from "../../composables/managed-list"
 import { useSession } from "../../composables/session"
 import { copyCredential, clipboardBusy } from "../../lib/clipboard"
-import {
-  listAiConnections,
-  readAiModelCapabilities,
-} from "../ai/ai-connections"
+import { listAiConnections } from "../ai/ai-connections"
 import type { AiConnection } from "../ai/ai-connections"
+import AiModelGrantFields from "../ai/AiModelGrantFields.vue"
 import {
   createApiKeyForProfile,
   listApiKeysForProfile,
@@ -32,9 +31,10 @@ const list = useManagedList((signal) =>
 const session = useSession()
 const name = shallowRef("")
 const days = shallowRef(180)
+const selectedConnectionId = shallowRef("")
 const selectedModels = shallowRef<string[]>([])
-/** The raw text of each edited grant field; parsing happens on save only. */
-const grantDraft = shallowRef<Record<string, string>>({})
+type ModelGrantDraft = { connectionId: string; modelIds: string[] }
+const grantDraft = shallowRef<Record<string, ModelGrantDraft>>({})
 const catalogLoaded = shallowRef(false)
 const secret = shallowRef<{ id: string; value: string } | null>(null)
 const copyMessage = shallowRef("")
@@ -47,31 +47,12 @@ const copyMessage = shallowRef("")
 const loadingProfile = shallowRef(true)
 const panelBusy = computed(() => list.busy.value || loadingProfile.value)
 const aiProfile = computed(() => profile.value === API_KEY_AI_CONFIG_ID)
-const availableModels = computed(() =>
-  connections.value
-    .filter(
-      (connection) =>
-        connection.enabled && connection.authorizationStatus === "connected",
-    )
-    .flatMap((connection) =>
-      connection.models
-        .filter(
-          (model) => readAiModelCapabilities(model.capabilities).supportedInApi,
-        )
-        .map((model) => `${connection.slug}/${model.id}`),
-    ),
-)
 let generation = 0
 let disposed = false
 function forget() {
   generation++
   secret.value = null
   copyMessage.value = ""
-}
-function toggleModel(modelId: string) {
-  selectedModels.value = selectedModels.value.includes(modelId)
-    ? selectedModels.value.filter((value) => value !== modelId)
-    : [...selectedModels.value, modelId]
 }
 async function loadConnections() {
   try {
@@ -103,6 +84,7 @@ async function switchProfile(next: string) {
   // keys nor let a row action reach them with the new configId.
   list.reset()
   profile.value = next
+  selectedConnectionId.value = ""
   selectedModels.value = []
   grantDraft.value = {}
   await loadProfileView()
@@ -114,7 +96,12 @@ async function create() {
     const key = await createApiKeyForProfile({
       configId: profile.value,
       days: days.value,
-      ...(aiProfile.value ? { modelIds: selectedModels.value } : {}),
+      ...(aiProfile.value
+        ? {
+            connectionId: selectedConnectionId.value,
+            modelIds: selectedModels.value,
+          }
+        : {}),
       name: name.value,
     })
     if (!disposed && generation === ownGeneration)
@@ -138,56 +125,38 @@ type KeyWithGrants = {
   permissions?: Readonly<Record<string, readonly string[]>> | null
 }
 
-const AI_MODEL_PERMISSION_PREFIX = "ai-model:"
-
-/**
- * Maps stored grants back to the public model IDs the owner selected. A
- * grant whose connection no longer exists has no public ID and is dropped;
- * saving then replaces it, which is exactly the server-side semantics.
- */
-function grantedModels(key: KeyWithGrants): string[] {
-  const permissions = key.permissions
-  if (!permissions) return []
-  return Object.entries(permissions)
-    .filter(([action]) => action.startsWith(AI_MODEL_PERMISSION_PREFIX))
-    .flatMap(([action, models]) => {
-      const [connectionId, version] = action
-        .slice(AI_MODEL_PERMISSION_PREFIX.length)
-        .split(":")
-      const connection = connections.value.find(
-        (candidate) =>
-          candidate.id === connectionId &&
-          String(candidate.permissionVersion) === version,
-      )
-      return connection === undefined
-        ? []
-        : [...models].map((model) => `${connection.slug}/${model}`)
-    })
+function draftFor(key: KeyWithGrants): ModelGrantDraft {
+  const draft = grantDraft.value[key.id]
+  if (draft) return draft
+  const grant = readAiKeyConnectionGrant(key.permissions)
+  if (!grant) return { connectionId: "", modelIds: [] }
+  const connection = connections.value.find(
+    (entry) => entry.id === grant.connectionId,
+  )
+  return {
+    connectionId: grant.connectionId,
+    modelIds:
+      connection?.permissionVersion === grant.permissionVersion
+        ? grant.modelIds
+        : [],
+  }
 }
-function draftFor(key: KeyWithGrants): string {
-  return grantDraft.value[key.id] ?? grantedModels(key).join(", ")
-}
-function updateDraft(key: KeyWithGrants, value: string) {
-  grantDraft.value = { ...grantDraft.value, [key.id]: value }
-}
-/**
- * The draft keeps the owner's raw text, separators included, so typing a comma
- * or a space never rewrites the field. Saving parses it: an empty field saves
- * an empty list, which is how every model grant is revoked.
- */
-function parseGrantDraft(draft: string): string[] {
-  return draft
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0)
+function updateDraft(key: KeyWithGrants, patch: Partial<ModelGrantDraft>) {
+  grantDraft.value = {
+    ...grantDraft.value,
+    [key.id]: { ...draftFor(key), ...patch },
+  }
 }
 async function saveGrants(key: KeyWithGrants) {
-  const draft = grantDraft.value[key.id]
-  // Saving while the catalog is unknown would silently drop every grant whose
-  // connection cannot be resolved, so it stays disabled instead.
-  if (draft === undefined || !catalogLoaded.value) return
+  const draft = draftFor(key)
+  if (!draft.connectionId || !catalogLoaded.value) return
   await list.mutate(async () => {
-    await updateAiKeyModelGrants(key.id, key.name ?? "", parseGrantDraft(draft))
+    await updateAiKeyModelGrants(
+      key.id,
+      key.name ?? "",
+      draft.connectionId,
+      draft.modelIds,
+    )
     const next = { ...grantDraft.value }
     delete next[key.id]
     grantDraft.value = next
@@ -262,31 +231,19 @@ onUnmounted(() => {
         :disabled="
           panelBusy ||
           (aiProfile && selectedModels.length === 0) ||
-          (aiProfile && availableModels.length === 0)
+          (aiProfile && !selectedConnectionId)
         "
       >
         创建密钥
       </button>
     </form>
-    <fieldset
+    <AiModelGrantFields
       v-if="aiProfile"
-      class="model-grants"
-      data-testid="ai-model-grants"
-    >
-      <legend>模型许可（至少选择一个）</legend>
-      <p v-if="availableModels.length === 0">
-        暂无可选模型：请先创建连接、保存 DeepSeek Key 并刷新模型目录。
-      </p>
-      <label v-for="model in availableModels" :key="model">
-        <input
-          type="checkbox"
-          :checked="selectedModels.includes(model)"
-          :disabled="panelBusy"
-          @change="toggleModel(model)"
-        />
-        {{ model }}
-      </label>
-    </fieldset>
+      v-model:connection-id="selectedConnectionId"
+      v-model:model-ids="selectedModels"
+      :connections="connections"
+      :disabled="panelBusy"
+    />
     <section v-if="secret" class="notice" aria-label="新密钥">
       <p>请保存密钥。关闭此处或离开页面后无法再次查看。</p>
       <input
@@ -335,18 +292,19 @@ onUnmounted(() => {
           }}
         </p>
         <template v-if="aiProfile">
-          <label
-            >模型许可<input
-              :value="draftFor(key)"
-              data-testid="key-grant"
-              :disabled="panelBusy"
-              @input="
-                updateDraft(key, ($event.target as HTMLInputElement).value)
-              "
-          /></label>
+          <AiModelGrantFields
+            :connection-id="draftFor(key).connectionId"
+            :model-ids="draftFor(key).modelIds"
+            :connections="connections"
+            :disabled="panelBusy || !catalogLoaded"
+            @update:connection-id="updateDraft(key, { connectionId: $event })"
+            @update:model-ids="updateDraft(key, { modelIds: $event })"
+          />
           <button
             class="pressable"
-            :disabled="panelBusy || !catalogLoaded"
+            :disabled="
+              panelBusy || !catalogLoaded || !draftFor(key).connectionId
+            "
             @click="saveGrants(key)"
           >
             保存模型许可

@@ -16,24 +16,24 @@ export const API_KEY_DEFAULT_PERMISSIONS = {
 
 /**
  * 应用侧 API Key 配置档。default 用于 status；ai 用于推理调用，权限
- * 由服务端按 owner 选择的对外模型 ID 构造，不依赖插件回退。
+ * 由服务端按 owner 选择的连接与原生模型 ID 构造，不依赖插件回退。
  */
 export const API_KEY_DEFAULT_CONFIG_ID = "default"
 /** 创建请求的用途选择器；省略或 status 映射到 default 档。 */
 export const API_KEY_STATUS_PURPOSE = "status"
-/** 创建请求的用途选择器；ai 映射到 ai 档并强制携带 modelIds。 */
+/** 创建请求的用途选择器；ai 映射到 ai 档并强制携带 connectionId 和 modelIds。 */
 export const API_KEY_AI_PURPOSE = "ai"
 export const API_KEY_AI_CONFIG_ID = "ai"
 
 /**
- * AI 档固定授予的 operation。模型许可另存于每个连接的
- * `ai-model:<连接 UUID>` action 集合；两项检查必须同时通过。
+ * AI 档固定授予的 operation。模型许可另存于所选单条连接的
+ * `ai-model:<连接 UUID>:<权限版本>` action 集合；两项检查必须同时通过。
  */
 export const API_KEY_AI_OPERATIONS = ["invoke", "models:read"] as const
 
 export const API_KEY_AI_MODEL_PERMISSION_PREFIX = "ai-model:"
 
-/** 持久权限键：绑定不可复用的连接 UUID，而不是可复用的 slug。 */
+/** 持久权限键：绑定不可复用的连接 UUID，不依赖连接名称。 */
 export function apiKeyAiModelPermissionKey(
   connectionId: string,
   permissionVersion = 0,
@@ -41,31 +41,34 @@ export function apiKeyAiModelPermissionKey(
   return `${API_KEY_AI_MODEL_PERMISSION_PREFIX}${connectionId}:${permissionVersion}`
 }
 
-/** 对外模型 ID：连接 slug 与上游模型 ID 以第一个斜杠分隔。 */
-export function formatAiExternalModelId(
-  connectionSlug: string,
-  upstreamModelId: string,
-): string {
-  return `${connectionSlug}/${upstreamModelId}`
+/** A caller key chooses exactly one connection, even when its model list is empty. */
+export interface AiKeyConnectionGrant {
+  connectionId: string
+  permissionVersion: number
+  modelIds: string[]
 }
 
-export interface AiExternalModelIdParts {
-  connectionSlug: string
-  upstreamModelId: string
-}
-
-/**
- * Splits an external model ID at its first slash. The remainder keeps the
- * upstream ID exactly as stored: no case folding, trimming, or URL decoding.
- * A leading, trailing, or missing slash is not a model ID.
- */
-export function parseAiExternalModelId(
-  value: string,
-): AiExternalModelIdParts | null {
-  const separator = value.indexOf("/")
-  if (separator <= 0 || separator === value.length - 1) return null
-  return {
-    connectionSlug: value.slice(0, separator),
-    upstreamModelId: value.slice(separator + 1),
-  }
+export function readAiKeyConnectionGrant(
+  permissions: Readonly<Record<string, readonly string[]>> | null | undefined,
+): AiKeyConnectionGrant | null {
+  const scopes = Object.entries(permissions ?? {}).filter(([scope]) =>
+    scope.startsWith(API_KEY_AI_MODEL_PERMISSION_PREFIX),
+  )
+  // Legacy multi-connection keys must be explicitly rebound, never routed arbitrarily.
+  if (scopes.length !== 1) return null
+  const [scope, models] = scopes[0]!
+  const [connectionId, rawVersion] = scope
+    .slice(API_KEY_AI_MODEL_PERMISSION_PREFIX.length)
+    .split(":")
+  const permissionVersion = Number(rawVersion)
+  if (
+    !connectionId ||
+    !Number.isSafeInteger(permissionVersion) ||
+    permissionVersion < 0 ||
+    scope !== apiKeyAiModelPermissionKey(connectionId, permissionVersion) ||
+    !Array.isArray(models) ||
+    !models.every((model) => typeof model === "string")
+  )
+    return null
+  return { connectionId, permissionVersion, modelIds: [...models] }
 }

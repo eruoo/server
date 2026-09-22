@@ -67,9 +67,13 @@ const createApiKeyBodySchema = z
   .object({
     name: apiKeyNameSchema,
     expiresIn: expiresInSchema.optional(),
+    connectionId: z.string().min(1).optional().meta({
+      description:
+        "Connection UUID. Required together with modelIds for AI grants.",
+    }),
     modelIds: z.array(z.string().min(1)).min(1).max(200).optional().meta({
       description:
-        "External model IDs (`connection-slug/upstream-model-id`). Required for the ai profile; rejected for the default profile.",
+        "Native upstream model IDs inside the selected connection. Required for the ai profile; rejected for the default profile.",
     }),
     purpose: z
       .enum([API_KEY_STATUS_PURPOSE, API_KEY_AI_PURPOSE])
@@ -86,6 +90,10 @@ const updateApiKeyBodySchema = z
     keyId: z.string().min(1).meta({ description: "API key ID." }),
     configId: apiKeyConfigIdSchema.optional(),
     name: apiKeyNameSchema,
+    connectionId: z.string().min(1).optional().meta({
+      description:
+        "Connection UUID. Required together with modelIds for AI grants.",
+    }),
     modelIds: z.array(z.string().min(1)).max(200).optional().meta({
       description:
         "Replacement model grant for the ai profile. Omitted keeps the current grant; an empty array revokes every model. Rejected for the default profile.",
@@ -333,9 +341,17 @@ async function handleCreate(
   const aiProfile = parsed.data.purpose === API_KEY_AI_PURPOSE
   // The ai profile requires a model selection; the default profile rejects
   // the field instead of ignoring it.
-  if (aiProfile && parsed.data.modelIds === undefined)
+  if (
+    aiProfile &&
+    (parsed.data.modelIds === undefined ||
+      parsed.data.connectionId === undefined)
+  )
     return problem("validation-failed", requestId)
-  if (!aiProfile && parsed.data.modelIds !== undefined)
+  if (
+    !aiProfile &&
+    (parsed.data.modelIds !== undefined ||
+      parsed.data.connectionId !== undefined)
+  )
     return problem("validation-failed", requestId)
 
   let permissions: Record<string, string[]> | undefined
@@ -343,11 +359,12 @@ async function handleCreate(
   if (aiProfile) {
     const resolved = await resolveAiModelSelection(
       c.env.DB,
+      parsed.data.connectionId!,
       parsed.data.modelIds ?? [],
     )
     if (!resolved.ok) return problem("validation-failed", requestId)
-    permissions = buildAiKeyPermissions(resolved.entries)
-    modelGrantCount = resolved.entries.length
+    permissions = buildAiKeyPermissions(resolved.selection)
+    modelGrantCount = resolved.selection.modelIds.length
   }
   c.set("apiKeyAudit", {
     configId: aiProfile ? API_KEY_AI_CONFIG_ID : API_KEY_DEFAULT_CONFIG_ID,
@@ -414,7 +431,17 @@ async function handleUpdate(
   const configId = parsed.data.configId ?? API_KEY_DEFAULT_CONFIG_ID
   // Model grants exist only in the ai profile; the default profile rejects
   // the field rather than silently dropping it.
-  if (configId !== API_KEY_AI_CONFIG_ID && parsed.data.modelIds !== undefined)
+  if (
+    configId !== API_KEY_AI_CONFIG_ID &&
+    (parsed.data.modelIds !== undefined ||
+      parsed.data.connectionId !== undefined)
+  )
+    return problem("validation-failed", requestId)
+
+  if (
+    (parsed.data.connectionId === undefined) !==
+    (parsed.data.modelIds === undefined)
+  )
     return problem("validation-failed", requestId)
 
   let permissions: Record<string, string[]> | undefined
@@ -422,13 +449,14 @@ async function handleUpdate(
   if (configId === API_KEY_AI_CONFIG_ID && parsed.data.modelIds !== undefined) {
     const resolved = await resolveAiModelSelection(
       c.env.DB,
+      parsed.data.connectionId!,
       parsed.data.modelIds,
     )
     if (!resolved.ok) return problem("validation-failed", requestId)
     // An empty selection revokes every model grant while keeping the fixed
     // operations, so the key stays valid but can invoke nothing.
-    permissions = buildAiKeyPermissions(resolved.entries)
-    modelGrantCount = resolved.entries.length
+    permissions = buildAiKeyPermissions(resolved.selection)
+    modelGrantCount = resolved.selection.modelIds.length
   }
   c.set("apiKeyAudit", { configId, modelGrantCount })
   return callPluginApi(c, () =>

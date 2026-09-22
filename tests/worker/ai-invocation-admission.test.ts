@@ -64,7 +64,7 @@ function makeReservationWriteLate(
 
 const connectionId = "11111111-1111-1111-1111-111111111111"
 const upstreamModelId = "gpt-test"
-const externalModelId = "codex-main/gpt-test"
+const externalModelId = "gpt-test"
 
 let sequence = 0
 async function call(
@@ -142,6 +142,7 @@ describe("AI invocation admission", () => {
     const session = await ownerSession()
     const created = await call("/api/auth/api-key/create", {
       body: {
+        connectionId,
         modelIds: [externalModelId],
         name: "admission probe",
         purpose: "ai",
@@ -206,6 +207,7 @@ describe("AI invocation admission", () => {
     const session = await ownerSession()
     const created = await call("/api/auth/api-key/create", {
       body: {
+        connectionId,
         modelIds: [externalModelId],
         name: "admission probe",
         purpose: "ai",
@@ -252,6 +254,7 @@ describe("AI invocation admission", () => {
     const session = await ownerSession()
     const created = await call("/api/auth/api-key/create", {
       body: {
+        connectionId,
         modelIds: [externalModelId],
         name: "admission probe",
         purpose: "ai",
@@ -368,6 +371,7 @@ describe("AI invocation admission", () => {
     const session = await ownerSession()
     const created = await call("/api/auth/api-key/create", {
       body: {
+        connectionId,
         modelIds: [externalModelId],
         name: "admission probe",
         purpose: "ai",

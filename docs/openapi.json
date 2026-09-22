@@ -796,9 +796,6 @@
           "providerType": {
             "type": "string"
           },
-          "slug": {
-            "type": "string"
-          },
           "updatedAt": {
             "type": "number"
           }
@@ -812,7 +809,6 @@
           "id",
           "name",
           "providerType",
-          "slug",
           "updatedAt"
         ]
       }
@@ -1105,6 +1101,11 @@
                     "maximum": 31536000,
                     "description": "Lifetime in seconds, between 1 and 365 days."
                   },
+                  "connectionId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Connection UUID. Required together with modelIds for AI grants."
+                  },
                   "modelIds": {
                     "type": "array",
                     "items": {
@@ -1113,7 +1114,7 @@
                     },
                     "minItems": 1,
                     "maxItems": 200,
-                    "description": "External model IDs (`connection-slug/upstream-model-id`). Required for the ai profile; rejected for the default profile."
+                    "description": "Native upstream model IDs inside the selected connection. Required for the ai profile; rejected for the default profile."
                   },
                   "purpose": {
                     "type": "string",
@@ -1310,6 +1311,11 @@
                     "type": "string",
                     "minLength": 1,
                     "description": "Display name of the API key."
+                  },
+                  "connectionId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Connection UUID. Required together with modelIds for AI grants."
                   },
                   "modelIds": {
                     "type": "array",
