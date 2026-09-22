@@ -36,10 +36,10 @@ import {
 /**
  * AI management endpoints (§6.1).
  *
- * Reads require an owner session; every mutation additionally requires a
- * recent owner session. Authorization session reads, polls, and cancels are
- * bound to the session that created them, and the flow layer re-confirms the
- * recent authentication from persisted state before any token lands.
+ * Reads require an owner session; every mutation checks the persistent
+ * session without requiring recent authentication. Authorization reads,
+ * polls, and cancels are bound to the session that created them, and the flow
+ * layer re-confirms its validity from persisted state before any token lands.
  * Credential and authorization internals never leave these handlers: the
  * connection view carries identity, status, and the model snapshot only.
  */
@@ -217,9 +217,9 @@ const authorizationIdParam = z.object({ id: z.string() })
 export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
   const owner = async (
     c: AppContext,
-    recent = false,
+    persistent = false,
   ): Promise<OwnerSession | ReturnType<typeof problem>> =>
-    readOwnerSession(c, recent)
+    readOwnerSession(c, false, persistent)
 
   app.openapi(
     createRoute({
@@ -725,9 +725,8 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
           return problem("not-found", requestId)
         case "session-mismatch":
           return problem("permission-denied", requestId)
-        case "owner-session-revoked":
-        case "recent-authentication-required":
-          return problem("recent-authentication-required", requestId)
+        case "owner-session-invalid":
+          return problem("invalid-credential", requestId)
         case "upstream-unavailable":
           return problem("ai-upstream-unavailable", requestId)
         case "invalid-identity":

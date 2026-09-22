@@ -30,7 +30,6 @@ import {
 import {
   AI_AUTHORIZATION_SESSION_MAX_TTL_MS,
   AI_AUTHORIZATION_POLL_DEFAULT_INTERVAL_MS,
-  AI_RECENT_AUTHORIZATION_WINDOW_MS,
 } from "./policy"
 import { AiStageUpstreamBudget } from "./stage-budget"
 
@@ -46,7 +45,7 @@ import { AiStageUpstreamBudget } from "./stage-budget"
  * - The authorization code is exchanged and the ID token verified (JWKS,
  *   issuer, audience, expiry) before anything is persisted.
  * - Immediately before the credential commit the flow re-reads the owner's
- *   persistent session: recent authentication, not revoked. The same
+ *   persistent session: not expired or revoked. The same
  *   request's earlier checks never substitute for this recheck.
  * - Reauthorization must keep the original account and workspace: the
  *   workspace is guarded atomically by the completion write; the ChatGPT
@@ -245,39 +244,22 @@ async function decryptDeviceGrant(
   }
 }
 
-interface OwnerSessionAuthenticationState {
-  present: boolean
-  recentAuthentication: boolean
-}
-
-async function readOwnerSessionAuthenticationState(
+async function isOwnerSessionActive(
   context: AiCredentialServiceContext,
   input: { ownerSessionId: string; ownerUserId: string; now: number },
-): Promise<OwnerSessionAuthenticationState> {
+): Promise<boolean> {
   const row = await context.database
-    .prepare(
-      'SELECT "userId", "expiresAt", "reauthenticatedAt" FROM "session" WHERE "id" = ?1',
-    )
+    .prepare('SELECT "userId", "expiresAt" FROM "session" WHERE "id" = ?1')
     .bind(input.ownerSessionId)
     .first<{
       expiresAt: string
-      reauthenticatedAt: string
       userId: string
     }>()
-  if (row === null) return { present: false, recentAuthentication: false }
   // Defense in depth: the row must belong to the bound owner user, not just
   // exist under the recorded session id.
-  if (row.userId !== input.ownerUserId) {
-    return { present: false, recentAuthentication: false }
-  }
+  if (row === null || row.userId !== input.ownerUserId) return false
   const expiresAt = new Date(row.expiresAt).getTime()
-  const reauthenticatedAt = new Date(row.reauthenticatedAt).getTime()
-  const notExpired = Number.isFinite(expiresAt) && expiresAt > input.now
-  const recent =
-    Number.isFinite(reauthenticatedAt) &&
-    reauthenticatedAt <= input.now &&
-    input.now - reauthenticatedAt <= AI_RECENT_AUTHORIZATION_WINDOW_MS
-  return { present: true, recentAuthentication: notExpired && recent }
+  return Number.isFinite(expiresAt) && expiresAt > input.now
 }
 
 export type PollCodexAuthorizationResult =
@@ -294,8 +276,7 @@ export type PollCodexAuthorizationResult =
   | { status: "rejected" }
   | { status: "invalid-identity" }
   | { status: "account-mismatch" }
-  | { status: "recent-authentication-required" }
-  | { status: "owner-session-revoked" }
+  | { status: "owner-session-invalid" }
 
 /** Claim-rejection statuses that carry no payload in the poll result. */
 type PollClaimRejectionStatus = Exclude<
@@ -362,9 +343,9 @@ async function cancelSession(
  *
  * Every decision taken after an await reads the current clock rather than the
  * stage's entry time: the poll claim, the authorization session and the
- * owner's recent authentication must all be judged at the moment of the write,
- * so a slow upstream can never commit against an expired claim or a stale
- * authentication window. The stage deadline itself stays absolute.
+ * owner's session must all be judged at the moment of the write, so a slow
+ * upstream can never commit against an expired claim or session. The stage
+ * deadline itself stays absolute.
  */
 export async function pollCodexAuthorization(
   context: AiAuthorizationFlowContext,
@@ -583,29 +564,18 @@ export async function pollCodexAuthorization(
     }
   }
 
-  // Pre-commit recheck of the owner's persistent session: recent
-  // authentication and not revoked, read fresh from D1. Earlier identity
-  // checks in this request never substitute for this read.
-  const authentication = await readOwnerSessionAuthenticationState(context, {
+  // Pre-commit recheck of the owner's persistent session: not expired or
+  // revoked, read fresh from D1. Earlier identity checks in this request never
+  // substitute for this read.
+  const ownerSessionActive = await isOwnerSessionActive(context, {
     now: clock(),
     ownerSessionId: session.ownerSessionId,
     ownerUserId: session.ownerUserId,
   })
-  if (!authentication.present) {
+  if (!ownerSessionActive) {
     await cancelSession(context, session, clock())
     emitCompletion("failure")
-    return { status: "owner-session-revoked" }
-  }
-  if (!authentication.recentAuthentication) {
-    // The session stays pending: after a fresh reauthentication the owner
-    // may poll again while the grant is still live.
-    await releasePollClaim(context, {
-      claimId,
-      nextPollAt: clock() + deviceGrant.intervalMs,
-      now: clock(),
-      session,
-    })
-    return { status: "recent-authentication-required" }
+    return { status: "owner-session-invalid" }
   }
 
   const completionId = crypto.randomUUID()
@@ -684,7 +654,7 @@ export async function pollCodexAuthorization(
     case "session-expired":
       return { status: "expired" }
     case "owner-session-revoked":
-      return { status: "owner-session-revoked" }
+      return { status: "owner-session-invalid" }
     case "upstream-account-mismatch":
       return { status: "account-mismatch" }
     case "claim-not-held":

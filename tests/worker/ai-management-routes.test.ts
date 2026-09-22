@@ -68,6 +68,7 @@ describe("AI management routes", () => {
       body: { name: "Diagnostic", slug: "diagnostic" },
       cookie: session.cookie,
     })
+    expect(created.status).toBe(200)
     const { connection } = await created.json<{ connection: { id: string } }>()
     const credentialCiphertext = await encryptAiSecret(
       await parseAiCredentialKeyring(env.AI_CREDENTIAL_KEYS),
@@ -98,6 +99,9 @@ describe("AI management routes", () => {
       ).all()
     ).results
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
+    await env.DB.prepare("UPDATE session SET reauthenticatedAt=? WHERE id=?")
+      .bind(new Date(Date.now() - 20 * 60_000).toISOString(), session.id)
+      .run()
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("secret-upstream-body", {
         status: 403,
@@ -198,8 +202,12 @@ describe("AI management routes", () => {
     }
   })
 
-  it("runs the connection lifecycle with audits and model snapshots", async () => {
+  it("runs the connection lifecycle after the recent-authentication window", async () => {
     const session = await ownerSession()
+    const reauthenticatedAt = new Date(Date.now() - 20 * 60_000).toISOString()
+    await env.DB.prepare("UPDATE session SET reauthenticatedAt=? WHERE id=?")
+      .bind(reauthenticatedAt, session.id)
+      .run()
 
     const providers = await call("/api/ai/providers", {
       cookie: session.cookie,
@@ -292,7 +300,131 @@ describe("AI management routes", () => {
       ].sort(),
     )
     expect(audits.results.every((row) => row.outcome === "success")).toBe(true)
+    expect(
+      await env.DB.prepare("SELECT reauthenticatedAt FROM session WHERE id=?")
+        .bind(session.id)
+        .first("reauthenticatedAt"),
+    ).toBe(reauthenticatedAt)
   })
+
+  it("starts, polls, and cancels authorization without recent authentication", async () => {
+    const session = await ownerSession()
+    await env.DB.prepare("UPDATE session SET reauthenticatedAt=? WHERE id=?")
+      .bind(new Date(Date.now() - 20 * 60_000).toISOString(), session.id)
+      .run()
+    const created = await call("/api/ai/connections", {
+      body: { name: "Main", slug: "codex-main" },
+      cookie: session.cookie,
+    })
+    expect(created.status).toBe(200)
+    const { connection } = await created.json<{ connection: { id: string } }>()
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((input, init) => {
+        const request = new Request(input, init)
+        const url = new URL(request.url)
+        if (url.pathname === "/api/accounts/deviceauth/usercode") {
+          return Promise.resolve(
+            Response.json({
+              device_auth_id: "device-auth-1",
+              interval: "5",
+              user_code: "WDJB-MJHT",
+            }),
+          )
+        }
+        if (url.pathname === "/api/accounts/deviceauth/token") {
+          return Promise.resolve(Response.json({}, { status: 404 }))
+        }
+        throw new Error(`Unexpected upstream request: ${request.url}`)
+      })
+    const started = await call(
+      `/api/ai/connections/${connection.id}/authorizations`,
+      { cookie: session.cookie, method: "POST" },
+    )
+    expect(started.status).toBe(200)
+    const { authorizationId } = await started.json<{
+      authorizationId: string
+    }>()
+    await env.DB.prepare(
+      "UPDATE ai_authorization_sessions SET nextPollAt=? WHERE id=?",
+    )
+      .bind(Date.now() - 1, authorizationId)
+      .run()
+    const polled = await call(
+      `/api/ai/authorizations/${authorizationId}/poll`,
+      {
+        cookie: session.cookie,
+        method: "POST",
+      },
+    )
+    expect(polled.status).toBe(200)
+    expect(await polled.json()).toMatchObject({ status: "pending" })
+    const cancelled = await call(`/api/ai/authorizations/${authorizationId}`, {
+      cookie: session.cookie,
+      method: "DELETE",
+    })
+    expect(cancelled.status).toBe(200)
+    expect(await cancelled.json()).toMatchObject({ status: "cancelled" })
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(["revoked", "expired"] as const)(
+    "rejects every mutation with a %s session despite its cached identity",
+    async (state) => {
+      const session = await ownerSession()
+      const identity = await call("/api/auth/get-session", {
+        cookie: session.cookie,
+      })
+      const cachedCookies = identity.headers
+        .getSetCookie()
+        .filter((cookie) => cookie.startsWith("eruoo.session_data="))
+        .map((cookie) => cookie.split(";")[0])
+      expect(cachedCookies).toHaveLength(1)
+      const cookie = [session.cookie, ...cachedCookies].join("; ")
+      if (state === "revoked") {
+        await env.DB.prepare("DELETE FROM session WHERE id=?")
+          .bind(session.id)
+          .run()
+      } else {
+        await env.DB.prepare("UPDATE session SET expiresAt=? WHERE id=?")
+          .bind(new Date(Date.now() - 1_000).toISOString(), session.id)
+          .run()
+      }
+      const fetch = vi.spyOn(globalThis, "fetch")
+      const connectionId = "11111111-1111-4111-8111-111111111111"
+      const authorizationId = "22222222-2222-4222-8222-222222222222"
+      for (const [method, path, body] of [
+        ["POST", "/api/ai/connections", { name: "Rejected", slug: "rejected" }],
+        ["PATCH", `/api/ai/connections/${connectionId}`, { name: "Rejected" }],
+        ["DELETE", `/api/ai/connections/${connectionId}`, undefined],
+        ["POST", `/api/ai/connections/${connectionId}/disconnect`, undefined],
+        [
+          "POST",
+          `/api/ai/connections/${connectionId}/authorizations`,
+          undefined,
+        ],
+        ["POST", `/api/ai/authorizations/${authorizationId}/poll`, undefined],
+        ["DELETE", `/api/ai/authorizations/${authorizationId}`, undefined],
+        [
+          "POST",
+          `/api/ai/connections/${connectionId}/models/refresh`,
+          undefined,
+        ],
+      ] as const) {
+        const response = await call(path, { method, body, cookie })
+        expect(response.status, `${method} ${path}`).toBe(401)
+        expect(await response.json()).toMatchObject({
+          type: expect.stringContaining("/invalid-credential"),
+        })
+      }
+      expect(fetch).not.toHaveBeenCalled()
+      expect(
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS count FROM ai_connections",
+        ).first("count"),
+      ).toBe(0)
+    },
+  )
 
   it("requires the exact Origin and a bounded body on mutations", async () => {
     const session = await ownerSession()

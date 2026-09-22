@@ -118,8 +118,10 @@ Better Auth 是 Session Cookie、JWE、登录 ceremony 和持久 Session 的唯�
 | 敏感操作          | 当前持久 Session 中 `0 ≤ now - reauthenticatedAt ≤ 15 分钟`                                                            |
 | 普通身份展示      | 允许原生缓存；缓存到期后必须查 D1                                                                                      |
 | 管理读取          | 允许缓存承担 Session 查找；请求内完成一次 owner account 关联验证                                                       |
-| 长期凭证 mutation | 绕过 Cookie cache 读取持久 Session，验证 owner 与 recent-auth                                                          |
+| 长期凭证 mutation | 绕过 Cookie cache 读取持久 Session，验证 owner 与 recent-auth（AI 连接管理例外见下文）                                 |
 | OAuth 授权码签发  | 绕过缓存验证持久 owner Session；不额外要求每次授权都重认证                                                             |
+
+AI 连接管理的 Session 策略以 [ai-service.md §6.1](./ai-service.md#61-管理接口) 为准。
 
 撤销在 D1 提交后，**新开始的强校验**必须拒绝；已通过检查的在途操作不能被追溯取消。普通缓存读取存在最多 30 秒的旧状态窗口。长期 token 的撤销窗口另见协议规格，不混为一种“即时注销”。
 
@@ -145,7 +147,7 @@ Better Auth 是 Session Cookie、JWE、登录 ceremony 和持久 Session 的唯�
 - Passkey 只能为已通过 owner 校验的账户注册；登录使用库验证的 credential→user 关系，再验证其 owner account 关联。不可把注册准入放到客户端。
 - 通用 API 先检查凭证载体是否唯一，再验证该载体，最后执行路由权限。禁止 Session 失败后试 API Key、Bearer 失败后试 Cookie。
 - 验证结果采用按载体区分的主体：Session 带 userId/sessionId；OAuth 带 subject/clientId/scopes/resource；API Key 带 ownerId/keyId/permissions。仅在请求内使用，不持久化一个重复的 Principal 表。
-- `readOwnerSession` 以参数区分普通与 recent 两种读取强度，是 owner Session 读取的唯一入口；路由提前选择读取强度。强结果可满足同请求的普通读取，弱结果不可冒充强结果。
+- `readOwnerSession` 是 owner Session 读取的唯一入口；路由提前选择是否要求 recent-auth、是否绕过 Cookie cache 读取持久状态。recent-auth 默认要求持久读取；仅要求持久读取的路由不隐含 recent-auth。强结果可满足同请求的普通读取，弱结果不可冒充强结果。
 - 库读取产生的多条 Set-Cookie 必须完整透传；更新/清理缓存不能只发生在服务端内存。复用应用守卫的结果不允许跳过库内部维持事务一致性所需的验证，也不修改库的私有上下文来强行减少查询。
 - 权限通过同一份路由声明维护；handler 仍在查询中限定资源 owner。业务层不接收原始 Cookie/token。
 - D1/加密/网络异常表示无法判定身份，不能转成“未登录”。只有已证实缺失、过期、失效的凭证才进入相应 401/null 分支。

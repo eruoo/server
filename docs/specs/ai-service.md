@@ -56,7 +56,7 @@ AI 模块处理共用接入能力。截图识别、知识库组织、业务提�
 管理浏览器
     |
     v
-现有 owner Session / recent-auth
+现有 owner Session（API Key 管理另要求 recent-auth）
     |
     v
 AI 管理接口 ---> 连接、设备授权、模型目录、调用凭证
@@ -154,7 +154,7 @@ AI HTTP 入口
 
 采用 Device Code 流程，适合没有 localhost 回调监听器的 Worker：
 
-1. owner 在连接页面点击授权，服务端校验近期认证。
+1. owner 在连接页面点击授权，服务端按 §6.1 校验当前持久 owner Session。
 2. 连接器申请设备码；本地创建限时授权会话，绑定 owner、当前 Session 和连接版本。
 3. 前端显示官方验证地址和一次性 user code。设备内部标识、验证码、临时授权码及令牌均不进入日志。
 4. 前端按服务端返回的时间调用 poll 接口；每次 poll 最多进行一次上游检查。
@@ -204,7 +204,9 @@ D1 是凭证状态的唯一事实来源。每次调用读取当前凭证版本�
 
 ### 6.1 管理接口
 
-管理读取要求 owner Session；连接创建、变更、断开、删除、授权启动、主动模型刷新和凭证权限变更要求 recent owner Session。授权会话的读取、poll 与取消还必须匹配创建它的 Session，令牌落库前从持久状态重新确认近期认证、Session 未撤销和连接版本，不能复用同一请求先前的身份检查结果。
+AI 连接管理只要求有效的 owner Session，不要求最近 15 分钟内重新通过 Passkey 或 GitHub 认证。读取沿用普通 owner Session 检查；连接创建、变更、断开、删除、授权启动、poll、取消与主动模型刷新必须绕过 Cookie cache 校验持久 Session。API Key 的创建、修改和撤销仍要求 recent owner Session。
+
+授权会话的读取、poll 与取消还必须匹配创建它的 Session。令牌落库前从持久状态重新确认 Session 归属、未过期、未撤销和连接版本，不能复用同一请求先前的身份检查结果。若 Session 在授权过程中失效，拒绝保存凭证并返回 `invalid-credential`（401）；前端按正常登录失效处理。
 
 | 方法与路径                                   | 作用                                   |
 | -------------------------------------------- | -------------------------------------- |
@@ -398,7 +400,7 @@ API Key 仍在现有凭证管理入口创建和撤销，按 status、AI 用途�
 | protocol-contract.md §4.3 的 OIDC 私钥加密规则                                                | 该规则继续约束 OIDC 私钥；AI 上游凭证按 §5.2 由 AI 模块消费独立 Secret                           | operations 配置清单与凭证轮换说明                                             |
 | operations.md 的审计、清理、恢复和发布配置                                                    | 增加 §7、§8 的 AI 数据规则及 §12 的部署配置                                                      | operations、恢复规划器、发布校验与 acceptance 专项                            |
 
-保持现有单一 owner、recent-auth、单凭证载体、同源管理、请求级 Auth 生命周期和增量迁移纪律。AI 不使用 Better Auth 登录 account 表存放业务上游账号，不使用模块级在途 Promise，不将身份模块改成 AI 模块的依赖方。
+保持现有单一 owner、单凭证载体、同源管理、请求级 Auth 生命周期和增量迁移纪律。AI 连接管理的 Session 策略以 §6.1 为准，API Key 和身份凭证管理继续遵循现有 recent-auth 规则。AI 不使用 Better Auth 登录 account 表存放业务上游账号，不使用模块级在途 Promise，不将身份模块改成 AI 模块的依赖方。
 
 ## 12. 实施范围与验收
 

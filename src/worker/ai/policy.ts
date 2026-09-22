@@ -150,9 +150,6 @@ export const AI_MANAGEMENT_UPSTREAM_TOTAL_MS = 20_000
 /** Stage budget for authorization start, poll, and model refresh requests. */
 export const AI_MANAGEMENT_STAGE_BUDGET_MS = 30_000
 
-/** The recent-authentication window anchor for credential commit rechecks. */
-export const AI_RECENT_AUTHORIZATION_WINDOW_MS = 900_000
-
 /** One upstream SSE event or a JSON terminal payload is capped at 4 MiB. */
 export const AI_RESPONSES_SINGLE_EVENT_MAX_BYTES = 4 * 1_048_576
 

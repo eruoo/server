@@ -144,6 +144,18 @@ function forgetAuthorization() {
   authorizationMessage.value = ""
 }
 
+/** Bind direct panel requests to the current login and authorization round. */
+function captureCredentialFailureHandler() {
+  const ownGeneration = generation
+  const handleCredentialFailure = session.captureCredentialFailureHandler()
+  return (error: unknown): boolean => {
+    if (disposed || generation !== ownGeneration) return false
+    if (!handleCredentialFailure(error)) return false
+    forgetAuthorization()
+    return true
+  }
+}
+
 function stateLabel(connection: {
   authorizationStatus: string
   enabled: boolean
@@ -199,6 +211,7 @@ async function poll() {
   // A poll of this round is already running; it re-arms the timer itself.
   if (pollInFlightGeneration === ownGeneration) return
   pollInFlightGeneration = ownGeneration
+  const handleCredentialFailure = captureCredentialFailureHandler()
   try {
     let result: Awaited<ReturnType<typeof pollAiAuthorization>>
     try {
@@ -206,6 +219,7 @@ async function poll() {
       pollFailures = 0
     } catch (error) {
       if (disposed || generation !== ownGeneration) return
+      if (handleCredentialFailure(error)) return
       if (
         error instanceof ApiError &&
         error.type.endsWith("/recent-authentication-required")
@@ -224,6 +238,7 @@ async function poll() {
       // instead of replaying the exchange.
       const persisted = await readPersistedAuthorization(
         started.authorizationId,
+        handleCredentialFailure,
       )
       if (disposed || generation !== ownGeneration) return
       if (persisted === null) {
@@ -303,10 +318,12 @@ async function cancelAuthorization() {
  * rethrowing into the shared list message.
  */
 async function refreshAfterAuthorization(id: string) {
+  const handleCredentialFailure = captureCredentialFailureHandler()
   let failure: string | null = null
   try {
     await refreshAiModels(id)
   } catch (error) {
+    if (handleCredentialFailure(error)) return
     failure =
       error instanceof Error && error.message.length > 0
         ? error.message
@@ -362,13 +379,15 @@ async function remove(id: string) {
 
 async function readPersistedAuthorization(
   authorizationId: string,
+  handleCredentialFailure: (error: unknown) => boolean,
 ): Promise<Awaited<ReturnType<typeof getAiAuthorization>> | null> {
   try {
     return await getAiAuthorization(
       authorizationId,
       new AbortController().signal,
     )
-  } catch {
+  } catch (error) {
+    handleCredentialFailure(error)
     return null
   }
 }
@@ -391,6 +410,7 @@ async function resumePendingAuthorization() {
   const pending = readPendingAuthorization()
   if (pending === null) return
   const ownGeneration = generation
+  const handleCredentialFailure = captureCredentialFailureHandler()
   let status: Awaited<ReturnType<typeof getAiAuthorization>> | null = null
   let readError: unknown = null
   try {
@@ -403,6 +423,7 @@ async function resumePendingAuthorization() {
   }
   if (disposed || generation !== ownGeneration) return
   if (status === null) {
+    if (handleCredentialFailure(readError)) return
     if (isTerminalApiError(readError)) {
       forgetAuthorization()
       authorizationMessage.value =
@@ -463,13 +484,15 @@ watch(session.status, (status) => {
  * the controls nor may it hold the form closed while it is in flight.
  */
 async function loadPanelView() {
+  const handleCredentialFailure = captureCredentialFailureHandler()
   loadingPanel.value = true
   try {
     await list.load()
     try {
       provider.value =
         (await listAiProviders(new AbortController().signal))[0] ?? null
-    } catch {
+    } catch (error) {
+      if (handleCredentialFailure(error)) return
       provider.value = null
     }
   } finally {

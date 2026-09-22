@@ -842,7 +842,7 @@ describe("device authorization poll", () => {
       ownerSessionId: owner.sessionId,
       ownerUserId: owner.userId,
     })
-    expect(result).toEqual({ status: "owner-session-revoked" })
+    expect(result).toEqual({ status: "owner-session-invalid" })
     const connection = await getAiConnection(env.DB, connectionId)
     expect(connection).toMatchObject({
       authorizationStatus: "never_authorized",
@@ -850,7 +850,7 @@ describe("device authorization poll", () => {
     })
   })
 
-  it("blocks the credential commit when recent authentication went stale", async () => {
+  it("commits credentials for a valid session without recent authentication", async () => {
     await createConnection()
     const owner = await createOwnerSession({
       reauthenticatedAtMs: now - 20 * 60_000,
@@ -890,39 +890,25 @@ describe("device authorization poll", () => {
       ownerSessionId: owner.sessionId,
       ownerUserId: owner.userId,
     })
-    expect(result).toEqual({ status: "recent-authentication-required" })
-    // The session stays pending and nothing was persisted.
+    expect(result).toEqual({ status: "completed" })
     expect(await readSessionRow(authorizationId)).toMatchObject({
-      status: "pending",
+      status: "completed",
     })
     const connection = await getAiConnection(env.DB, connectionId)
-    expect(connection?.credentialCiphertext).toBeNull()
-    // No completion audit for a retryable pre-commit block.
+    expect(connection?.authorizationStatus).toBe("connected")
+    expect(
+      await decryptStoredPackage(connection?.credentialCiphertext ?? ""),
+    ).toMatchObject({
+      refreshToken: "refresh-token-1",
+    })
     expect(
       auditEvents.filter(
         (event) => event.type === "ai_authorization_completed",
       ),
-    ).toEqual([])
-    // After a fresh reauthentication the same session can still complete.
-    await env.DB.prepare("UPDATE session SET reauthenticatedAt=? WHERE id=?")
-      .bind(new Date(now + defaultIntervalMs).toISOString(), owner.sessionId)
-      .run()
-    mock.routes.deviceToken = {
-      response: () =>
-        jsonResponse({
-          authorization_code: "auth-code-1",
-          code_challenge: "challenge-1",
-          code_verifier: "verifier-1",
-        }),
-    }
-    const retry = await pollWithClock({
-      authorizationId,
-      deadlineAt: now + 60_000,
-      now: now + defaultIntervalMs * 2,
-      ownerSessionId: owner.sessionId,
-      ownerUserId: owner.userId,
-    })
-    expect(retry).toEqual({ status: "completed" })
+    ).toHaveLength(1)
+    expect(
+      mock.calls.filter((call) => call.url.endsWith("/oauth/token")),
+    ).toHaveLength(1)
   })
 
   it("refuses reauthorization for a different workspace account", async () => {
@@ -1074,13 +1060,12 @@ describe("device authorization poll", () => {
     })
   })
 
-  it("rechecks the owner's recent authentication at commit time", async () => {
+  it("rechecks the owner session expiry at commit time", async () => {
     await createConnection()
-    // At entry the authentication is 14m59s old: inside the window by one
-    // second. The exchange then spends two more seconds, so the commit must
-    // judge the window against the current clock, not the entry time.
+    // The session expires during the exchange, after the poll has started.
     const owner = await createOwnerSession({
-      reauthenticatedAtMs: now + 5_000 - 899_000,
+      reauthenticatedAtMs: now - 60_000,
+      expiresAtMs: now + 6_000,
     })
     installUpstreamMock({
       deviceToken: () =>
@@ -1119,12 +1104,11 @@ describe("device authorization poll", () => {
       ownerSessionId: owner.sessionId,
       ownerUserId: owner.userId,
     })
-    expect(result).toEqual({ status: "recent-authentication-required" })
-    // The session stays pending: a re-verified owner may poll again.
+    expect(result).toEqual({ status: "owner-session-invalid" })
     const session = await readSessionRow(
       (started as { authorizationId: string }).authorizationId,
     )
-    expect(session?.status).toBe("pending")
+    expect(session?.status).toBe("cancelled")
     expect(await getAiConnection(env.DB, connectionId)).toMatchObject({
       authorizationStatus: "never_authorized",
       credentialCiphertext: null,
