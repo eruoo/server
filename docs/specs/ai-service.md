@@ -1,6 +1,6 @@
 # AI 接入服务
 
-更新：2026-09-22。本文是 AI 服务的唯一设计来源；当前实现改为 DeepSeek 官方 API。DeepSeek staging 人工验收及历史 Codex 记录见 [实施记录](implementation.md#423-2026-09-22deepseek-staging-人工验收与后续简化)；本文新增的原生模型名与单连接路由仍待部署。身份、OAuth/OIDC、备份与发布规则继续由 [architecture.md](architecture.md)、[protocol-contract.md](protocol-contract.md)、[operations.md](operations.md) 维护。
+更新：2026-09-22。本文是 AI 服务的唯一设计来源；当前实现改为 DeepSeek 官方 API。DeepSeek staging 人工验收及历史 Codex 记录见 [实施记录](implementation.md#423-2026-09-22deepseek-staging-人工验收与后续简化)；原生模型名与单连接路由已随 PR #52 发布 staging。身份、OAuth/OIDC、备份与发布规则继续由 [architecture.md](architecture.md)、[protocol-contract.md](protocol-contract.md)、[operations.md](operations.md) 维护。
 
 ## 1. 目标
 
@@ -85,10 +85,12 @@ DeepSeek `/models` 返回的 `data[].id` 就是请求中使用的调用名，不
 - 图片：仅 user 消息中的内联 PNG/JPEG/WebP base64 data URL，且模型必须具备 vision 能力。远程 URL、Files API、视频、GIF 和工具结果中的图片不在本站子集内。
 - `instructions`；`reasoning.effort` 为 `none/low/high/max`，**省略时本站明确发送 max**。none 关闭推理，显式选择其他值原样发送。
 - `max_output_tokens` 为 1–393216 整数，包含推理与可见输出；其上限仍受上游模型实际限制。
-- `text.format` 支持带 name/schema 的 json_schema。function tools 支持 description/parameters；名称唯一、最长 128 位，仅字母数字下划线及短横线。tool_choice 支持 auto/none/required/已声明 function。历史 function_call 必须与后续 function_call_output 逐一配对。
+- `text.format` 支持带 name/schema 的 json_schema。function tools 支持 description/parameters；名称唯一、最长 128 位，仅字母数字下划线及短横线。tool_choice 支持 auto/none/required/已声明 function；其中 required 和指定 function 仅允许显式 reasoning.effort=none。low/high/max（含省略 effort 时的默认 max）只允许 auto、none 或省略 tool_choice。不支持的组合在模型授权后、上游请求前返回 422 并释放名额，不自动关闭推理或改写工具选择。历史 function_call 必须与后续 function_call_output 逐一配对。
 - `stream` 默认 true；false 时仍消费原生上游 SSE 并返回最终 Response 对象。`store` 只接受 false，`parallel_tool_calls` 只接受 true，二者在上游是固定行为；本站验证后不发送这两个兼容字段。
 
 DeepSeek 将 developer 当 user 处理，本站拒绝 developer，避免指令优先级被降级。encrypted_content、reasoning.summary、include、previous_response_id、持久会话、strict、内置/custom tools、temperature/top_p 等均不在本站子集内。客户端发送完整历史，并按上述字段重建历史项，不能把包含额外字段的原始输出对象直接回填。
+
+限制依据：DeepSeek [Chat Completions 参考](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/) 明确思考模式不支持 required/指定工具；Responses 文档未重复列出此限制，本站 staging 实测确认 max + 指定工具失败、max + auto 的推理工具往返成功（见实施记录 §4.24）。其他思考档位与 required 按同一官方限制校验，尚未逐一真实调用验证。
 
 ### 6.3 终态与错误
 

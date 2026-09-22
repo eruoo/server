@@ -476,6 +476,16 @@ owner 随后要求三项一起完成，本地补充 3 条完整路由验收：�
 
 发布前复审修正：保留内部 slug 列，避免先迁移后部署及 Worker 回退时旧版本访问缺失列；连接列表与模型授权选择器显示相同的短 UUID，便于区分同名连接。修正后完整 `pnpm run check` 通过：Worker 402、前端 72、脚本 71、Chromium 8 项，共 553 项。最终提交、CI 与部署结果以关联 PR 和 Actions 记录为准。
 
+### 4.24 2026-09-22：原生模型路由发布与工具选择组合修复
+
+PR #52 已合入 `4e4ccff5ac77df834997fe04ac3ba8c2ff92f78e`；主分支 CI run 35742874686、staging 部署 run 35743499305 成功。0 项迁移、5 项在线冒烟通过，Worker 版本为 `418afde8-df0e-4e23-8805-0b441d822371`。
+
+owner 补测确认结构化 JSON 与默认 max 成功。工具 A/B 对照仅切换 tool_choice：max + 指定 test_echo 返回 502（requestId `971f9e35-d49e-45eb-9f6c-79f19f3cd4b8`）；max + auto 返回 reasoning/function_call；保持 tools、回传推理历史与工具结果后，第二轮 completed/max 且正确返回工具生成的随机值。该证据确认 max + auto 的完整推理工具往返；不代表所有 effort/工具选择组合都已线上通过，也未取得失败请求的原始上游响应。
+
+根因：能力校验分别允许 effort 与 function tools，却未校验思考模式下的强制工具选择组合。原验收脚本和路由 mock 测试同样使用了不兼容的组合，导致本地成功未能代表实际请求可用。修复规则统一见 [AI 服务设计 §6.2](ai-service.md#62-调用接口)；工具往返验收改用 auto，两轮保留工具定义及完整推理历史，第二轮直接消费工具结果，不插入新的 user 回合。本节修复尚未提交或发布。
+
+回归先在未修复代码上执行：16 个非法组合被错误放行、17 个合法组合通过；修复后相关路由、DeepSeek 能力与 Responses 协议测试共 119 项通过。覆盖省略 effort/low/high/max、required/指定工具、JSON/SSE 两种响应方式的 422、零上游请求和名额释放；合法组合保持 effort/tool_choice 原样转发。完整 `pnpm run check` 通过：Worker 435、前端 72、脚本 71、Chromium 8，共 586 项；更新后的临时验收脚本通过合成完整流程验证。未将这些 mock 结果记为新的线上验收。
+
 ## 5. 后续验证与已知限制
 
 Cloudflare 与 GitHub 接线、staging 验收及 production 首次发布、真实登录和备份已按上述记录完成。以下限制与后续范围仍保留，不能由本地测试替代：
@@ -484,6 +494,6 @@ Cloudflare 与 GitHub 接线、staging 验收及 production 首次发布、真�
 - §4.11 的 Default 三地 warm 达到新目标，同代码闲置样本满足新目标；旧 JP 尾延迟和 Smart SG 超时未定位，后续若再次出现须按请求与平台证据排查，不能报告为已修复。常规发布阶段耗时尚未积累五次样本，不代表所有代理节点或生产性能已验证。
 - Workflow 中断与代码回退已在 §4.9 完成所列场景；大对象提交竞争与长时限的所有窗口未穷尽。成功导出/上传、隔离库导入、凭证清理及新信任验证已在 §4.8 通过。
 - Desktop App、Rust 安全存储、客户端打包与跨端联调：按 owner 最新决定延期，不属于本次 Web 交付。
-- AI 历史 Codex 链路的 403 阻断与恢复演练见 §4.21，不再作为现有 DeepSeek 链路的状态。DeepSeek staging 已完成 §4.23 所列 owner 人工测试；结构化输出、带推理历史的工具往返、真实加密密钥轮换与异常上游行为仍不能由本地 mock 代替。原生模型名与 Session 切换优化尚未部署；production 未发布本轮 AI 改动。
+- AI 历史 Codex 链路的 403 阻断与恢复演练见 §4.21，不再作为现有 DeepSeek 链路的状态。DeepSeek staging 已完成 §4.23 与 §4.24 所列 owner 人工测试；真实加密密钥轮换与其他异常上游行为仍不能由本地 mock 代替。原生模型名与 Session 切换优化已发布 staging，工具选择校验修复尚未发布；production 未发布本轮 AI 改动。
 
 恢复规划器只输出可审核计划；恢复、secret 轮换、资源删除及正式部署仍需当次具体授权。Git 提交和 PR 合并与这些平台操作分别记录，不代表远端发布或验收已经完成。
