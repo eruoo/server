@@ -21,12 +21,9 @@ export interface AiConnectionRecord {
   providerType: string
   enabled: boolean
   authorizationStatus: AiConnectionAuthorizationStatus
-  upstreamAccountId: string | null
+  permissionVersion: number
   credentialVersion: number
   credentialCiphertext: string | null
-  credentialExpiresAt: number | null
-  refreshClaimId: string | null
-  refreshClaimExpiresAt: number | null
   createdAt: number
   updatedAt: number
 }
@@ -38,12 +35,9 @@ interface AiConnectionRow {
   providerType: string
   enabled: number
   authorizationStatus: AiConnectionAuthorizationStatus
-  upstreamAccountId: string | null
+  permissionVersion: number
   credentialVersion: number
   credentialCiphertext: string | null
-  credentialExpiresAt: number | null
-  refreshClaimId: string | null
-  refreshClaimExpiresAt: number | null
   createdAt: number
   updatedAt: number
 }
@@ -155,12 +149,11 @@ export async function createAiConnection(
     .prepare(
       `INSERT INTO "ai_connections" (
          "id", "slug", "name", "providerType", "enabled",
-         "authorizationStatus", "upstreamAccountId", "credentialVersion",
-         "credentialCiphertext", "credentialExpiresAt", "refreshClaimId",
-         "refreshClaimExpiresAt", "createdAt", "updatedAt"
+         "authorizationStatus", "credentialVersion",
+         "credentialCiphertext", "createdAt", "updatedAt"
        )
        SELECT ?1, ?2, ?3, ?4, 1,
-         'never_authorized', NULL, 0, NULL, NULL, NULL, NULL, ?5, ?5
+         'never_authorized', 0, NULL, ?5, ?5
        WHERE NOT EXISTS (SELECT 1 FROM "ai_connections" WHERE "slug" = ?2)`,
     )
     .bind(input.id, input.slug, input.name, input.providerType, input.now)
@@ -178,12 +171,9 @@ export async function createAiConnection(
       providerType: input.providerType,
       enabled: true,
       authorizationStatus: "never_authorized",
-      upstreamAccountId: null,
+      permissionVersion: 0,
       credentialVersion: 0,
       credentialCiphertext: null,
-      credentialExpiresAt: null,
-      refreshClaimId: null,
-      refreshClaimExpiresAt: null,
       createdAt: input.now,
       updatedAt: input.now,
     },
@@ -247,53 +237,24 @@ export type DisconnectAiConnectionResult =
   | { disconnected: true; clearedCredentials: boolean }
   | { disconnected: false; reason: "not-found" }
 
-/**
- * Disconnecting clears credentials, drops any refresh claim, advances the
- * credential version, and cancels pending authorization sessions in one atomic
- * batch. Because the version advances and the claim is removed, a late refresh
- * or exchange result can no longer overwrite the disconnected state.
- */
+/** Disconnect revokes all model grants by advancing the permission version. */
 export async function disconnectAiConnection(
   database: D1Database,
   input: { id: string; now: number },
 ): Promise<DisconnectAiConnectionResult> {
-  const existing = await getAiConnection(database, input.id)
-  if (existing === null) {
-    return { disconnected: false, reason: "not-found" }
-  }
-  requireEpochMilliseconds(input.now, "The AI connection disconnect time")
-
-  const results = await database.batch<unknown>([
-    database
-      .prepare(
-        `UPDATE "ai_connections"
-         SET "authorizationStatus" = 'reauthentication_required',
-             "credentialCiphertext" = NULL,
-             "credentialExpiresAt" = NULL,
-             "refreshClaimId" = NULL,
-             "refreshClaimExpiresAt" = NULL,
-             "credentialVersion" = "credentialVersion" + 1,
-             "updatedAt" = ?2
-         WHERE "id" = ?1
-           AND ("credentialCiphertext" IS NOT NULL OR "refreshClaimId" IS NOT NULL)`,
-      )
-      .bind(input.id, input.now),
-    database
-      .prepare(
-        `UPDATE "ai_authorization_sessions"
-         SET "status" = 'cancelled', "updatedAt" = ?2
-         WHERE "connectionId" = ?1 AND "status" = 'pending'`,
-      )
-      .bind(input.id, input.now),
-  ])
-  if (results.length !== 2) {
-    throw new TypeError("The AI connection disconnect result is invalid.")
-  }
-
-  return {
-    disconnected: true,
-    clearedCredentials: readChanges(results[0], "disconnect") === 1,
-  }
+  if (!isAiServerIdentifier(input.id))
+    throw new RangeError("Invalid connection id")
+  requireEpochMilliseconds(input.now, "Disconnect time")
+  const result = await database
+    .prepare(`UPDATE ai_connections
+    SET authorizationStatus='reauthentication_required', credentialCiphertext=NULL,
+        credentialVersion=credentialVersion+1, permissionVersion=permissionVersion+1,
+        updatedAt=?2 WHERE id=?1`)
+    .bind(input.id, input.now)
+    .run()
+  return readChanges(result, "disconnect") === 1
+    ? { disconnected: true, clearedCredentials: true }
+    : { disconnected: false, reason: "not-found" }
 }
 
 export type DeleteAiConnectionResult =
@@ -301,8 +262,7 @@ export type DeleteAiConnectionResult =
   | { deleted: false; reason: "not-found" }
 
 /**
- * Deleting removes the connection, its pending authorization sessions, and its
- * model snapshots. Invocation history keeps its identifier snapshots because
+ * Deleting removes the connection and its model snapshots. Invocation history keeps its identifier snapshots because
  * ai_invocations deliberately has no foreign key to connections.
  */
 export async function deleteAiConnection(
@@ -313,24 +273,11 @@ export async function deleteAiConnection(
     throw new RangeError("The AI connection id is invalid.")
   }
 
-  const results = await database.batch<unknown>([
-    database
-      .prepare(
-        'DELETE FROM "ai_authorization_sessions" WHERE "connectionId" = ?1',
-      )
-      .bind(input.id),
-    database
-      .prepare('DELETE FROM "ai_models" WHERE "connectionId" = ?1')
-      .bind(input.id),
-    database
-      .prepare('DELETE FROM "ai_connections" WHERE "id" = ?1')
-      .bind(input.id),
-  ])
-  if (results.length !== 3) {
-    throw new TypeError("The AI connection deletion result is invalid.")
-  }
-
-  return readChanges(results[2], "deletion") === 1
+  const result = await database
+    .prepare("DELETE FROM ai_connections WHERE id=?1 RETURNING id")
+    .bind(input.id)
+    .first()
+  return result !== null
     ? { deleted: true }
     : { deleted: false, reason: "not-found" }
 }

@@ -53,9 +53,7 @@
           "type": {
             "type": "string",
             "enum": [
-              "ai_authorization_cancelled",
-              "ai_authorization_completed",
-              "ai_authorization_started",
+              "ai_credential_saved",
               "ai_connection_created",
               "ai_connection_deleted",
               "ai_connection_disconnected",
@@ -780,11 +778,11 @@
           "createdAt": {
             "type": "number"
           },
-          "credentialExpiresAt": {
-            "type": [
-              "number",
-              "null"
-            ]
+          "credentialVersion": {
+            "type": "number"
+          },
+          "permissionVersion": {
+            "type": "number"
           },
           "enabled": {
             "type": "boolean"
@@ -803,22 +801,19 @@
           },
           "updatedAt": {
             "type": "number"
-          },
-          "upstreamAccount": {
-            "type": "string"
           }
         },
         "required": [
           "authorizationStatus",
           "createdAt",
-          "credentialExpiresAt",
+          "credentialVersion",
+          "permissionVersion",
           "enabled",
           "id",
           "name",
           "providerType",
           "slug",
-          "updatedAt",
-          "upstreamAccount"
+          "updatedAt"
         ]
       }
     },
@@ -838,9 +833,7 @@
             "schema": {
               "type": "string",
               "enum": [
-                "ai_authorization_cancelled",
-                "ai_authorization_completed",
-                "ai_authorization_started",
+                "ai_credential_saved",
                 "ai_connection_created",
                 "ai_connection_deleted",
                 "ai_connection_disconnected",
@@ -1456,10 +1449,7 @@
                           "authorizationKind": {
                             "type": "string"
                           },
-                          "deviceVerificationUrl": {
-                            "type": "string"
-                          },
-                          "issuer": {
+                          "defaultReasoningEffort": {
                             "type": "string"
                           },
                           "providerType": {
@@ -1471,8 +1461,7 @@
                         },
                         "required": [
                           "authorizationKind",
-                          "deviceVerificationUrl",
-                          "issuer",
+                          "defaultReasoningEffort",
                           "providerType",
                           "responsesStyle"
                         ]
@@ -1766,9 +1755,9 @@
         }
       }
     },
-    "/api/ai/connections/{id}/authorizations": {
-      "post": {
-        "operationId": "startAiAuthorization",
+    "/api/ai/connections/{id}/credential": {
+      "put": {
+        "operationId": "saveAiCredential",
         "security": [
           {
             "ownerSession": []
@@ -1784,194 +1773,48 @@
             "in": "path"
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "apiKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048,
+                    "pattern": "^[\\x21-\\x7e]+$"
+                  },
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "apiKey",
+                  "expectedVersion"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
-            "description": "Started device authorization",
+            "description": "Credential saved; model discovery is separate",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "authorizationId": {
-                      "type": "string"
-                    },
-                    "expiresAt": {
-                      "type": "number"
-                    },
-                    "intervalMs": {
-                      "type": "number"
-                    },
-                    "userCode": {
-                      "type": "string"
-                    },
-                    "verificationUrl": {
-                      "type": "string"
+                    "saved": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
-                    "authorizationId",
-                    "expiresAt",
-                    "intervalMs",
-                    "userCode",
-                    "verificationUrl"
+                    "saved"
                   ]
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "Request rejected or dependency unavailable",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/ai/authorizations/{id}": {
-      "get": {
-        "operationId": "readAiAuthorization",
-        "security": [
-          {
-            "ownerSession": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": true,
-            "name": "id",
-            "in": "path"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Authorization status",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "status": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "status"
-                  ],
-                  "additionalProperties": {}
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "Request rejected or dependency unavailable",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "operationId": "cancelAiAuthorization",
-        "security": [
-          {
-            "ownerSession": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": true,
-            "name": "id",
-            "in": "path"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Cancelled authorization",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "status": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "status"
-                  ],
-                  "additionalProperties": {}
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "Request rejected or dependency unavailable",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/ai/authorizations/{id}/poll": {
-      "post": {
-        "operationId": "pollAiAuthorization",
-        "security": [
-          {
-            "ownerSession": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": true,
-            "name": "id",
-            "in": "path"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "One bounded poll",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "intervalMs": {
-                      "type": "number"
-                    },
-                    "nextPollAt": {
-                      "type": "number"
-                    },
-                    "status": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "status"
-                  ],
-                  "additionalProperties": {}
                 }
               }
             }

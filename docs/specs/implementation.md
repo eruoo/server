@@ -359,7 +359,7 @@ owner 授权收尾文档、核验首次自动调度并定点排查 §4.12 的登
 
 按本轮 owner 授权的 PR 3 切片交付上游凭证生命周期与管理编排，AI HTTP 正式路由仍未注册（`/api/ai/*` 在实际根装配继续 404，OpenAPI 仅随新增授权审计事件扩展事件枚举，不新增 AI 接口）。本次为本地代码与验证交付：未迁移远端数据库、未部署、未执行真实上游授权。
 
-- 连接器（`src/worker/ai/codex-connector.ts`）：固定 `openai-codex` 定义——issuer `https://auth.openai.com`、client `app_EMoamEEZ73f0CkXaXp7hrann`、设备验证页、usercode/设备令牌/交换/刷新/模型目录端点与 JWKS 地址全部为代码常量，不开放任何上游 URL/Host/认证头配置；逐字段校验固定参考契约（详见 [ai-service §14 连接器固定契约](ai-service.md#14-核查依据)），未确认的上游行为（非第一方 originator 待遇、FedRAMP、audience 形态、默认有效期）已在该表标注“待实测”，不宣称兼容。ID token 验签（RS256+issuer+audience+exp、按次获取 JWKS）通过后才提取 `chatgpt_account_id`/`chatgpt_user_id`；上游错误正文一律不透出。
+- 连接器（`src/worker/ai/codex-connector.ts`）：固定 `openai-codex` 定义——issuer `https://auth.openai.com`、client `app_EMoamEEZ73f0CkXaXp7hrann`、设备验证页、usercode/设备令牌/交换/刷新/模型目录端点与 JWKS 地址全部为代码常量，不开放任何上游 URL/Host/认证头配置；逐字段校验固定参考契约（详见 ai-service §14 连接器固定契约），未确认的上游行为（非第一方 originator 待遇、FedRAMP、audience 形态、默认有效期）已在该表标注“待实测”，不宣称兼容。ID token 验签（RS256+issuer+audience+exp、按次获取 JWKS）通过后才提取 `chatgpt_account_id`/`chatgpt_user_id`；上游错误正文一律不透出。
 - 凭证加密（`src/worker/ai/credential-cipher.ts`）：AES-256-GCM、随机 96-bit IV、版本化 keyring（`AI_CREDENTIAL_KEYS` 为 `<version>:<base64url 32B>` 逗号列表）；密文信封含格式版本与 key ID；AAD 绑定环境、连接 UUID、提供方与用途（credential-package/device-grant）；旧 key 只读、新写用当前 key；篡改、AAD 错配、key 缺失与非法 keyring 均显式失败。Secret 按操作按需解析，不缓存、不进入模块初始化路径。
 - 授权编排（`src/worker/ai/authorization-flow.ts`）：复用 PR 2 的会话绑定/claim/版本/原子完成；每次 poll 一次上游检查并遵守 nextPollAt 与上游间隔（interval 字符串解析、默认 5s、≥1s）；设备授权临时数据加密存储；授权码交换与验签后、提交凭证前重新读取持久 Session 复核近期认证（15 分钟）与未撤销，不复用先前检查；重授权保持原账号与工作区（工作区由原子完成 guard、用户 ID 由存储包比对）；取消、退出、过期、断开、删除与版本变化均由 guard 阻止迟到写入。审计新增 `ai_authorization_started/completed/cancelled`（allowlist：connectionId、providerType），pending poll 不写审计。
 - 刷新编排（`src/worker/ai/credential-lifecycle.ts`）：提前 60 秒刷新；D1 claim/版本/有效期协调；刷新网络 10 秒含 body 且受阶段剩余预算截断（`stage-budget.ts` 维护单次 10s/合计 20s/阶段 30s，不随阶段切换重置）；预算耗尽于发出前→释放 claim、保留凭证、可重试；400 invalid_grant（含 legacy 码）与 401→确定终局；已发出的其余失败（5xx/429/超时/传输/不可解析 200）与 claim 过期、落库失败→结果不明，转入需重新授权（`markAiConnectionReauthenticationRequired`，不清 pending 授权会话）；并发提交竞争→重读后采用胜者凭证或报告断开态；解密失败的存储包按不可读终局处理。
@@ -445,11 +445,22 @@ owner 授权收尾文档、核验首次自动调度并定点排查 §4.12 的登
 
 **403 归因：原因尚未确认（出口或边缘防护是待验证假说）**。已确认的事实：授权完成后该次模型目录请求返回 403，模型目录未建立，依赖目录的真实推理链路验收受阻。同一头型（`originator: eruoo`、`user-agent: eruoo/1`）自本机、无有效凭证请求同一端点返回 401 JSON：该对照说明这一请求形态自本机网络路径到达了应用层，但它不带有效凭证，不能证明 Worker 请求的第三方请求头待遇正常，也不能排除凭证或请求本身被拒。owner 本机 Codex app 与 CLI 正常，说明账号与凭证链路本身可用，但不说明 Worker 侧持有的凭证在本次请求中被接受。社区案例（codex CLI Linux/rustls 指纹被同款 403 的 openai/codex#17860、OpenAI 对 Cloudflare Worker 出口 403 封锁的持续报告）来自其他环境，在缺少本次 Worker 响应直接证据的情况下只能作为待验证线索，不能当作本次根因证明。Cloudflare 挑战页的识别方式（响应体特征、`cf-mitigated` 响应头等）见 [Detect response](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/)；本轮未保留可判定来源层的响应证据（响应头未读取，错误正文在进程内被有界读取但目录分类不检查它、也不落日志），因此“Worker 请求收到 Cloudflare 边缘挑战”“令牌未被评估”“唯一根因是出口 IP 与 workerd TLS 指纹”“第三方请求头待遇已验证正常”“production 必然出现相同 403”均未确认。auth.openai.com（设备码/交换/JWKS）自 Worker 正常，只说明其他上游路径可用，不解释该 403。
 
-按 [ai-service §13](ai-service.md#13-脆弱前提与取舍)，该连接器当前不可用、AI 上线门槛未通过；owner 决策为维持现状并记录（不伪造第一方身份、不自动改用付费 API、不新建中继组件）。AI Key 无法获得目录内模型许可（目录恒为空、创建必带非空 `modelIds`），因此调用链（JSON/SSE 真实调用、在途限制 429、取消收尾、SSE error 分类、断开后拒绝推理、usage 与调用记录）**全部受阻，标为上游阻断未验证**；真实令牌刷新（凭证约 10 天有效，60 秒提前窗口未自然到期）同样未触发。后续验证方法：先确认阻断原因，再按 §4.21 重跑最小闭环；处理方案（含任何出口通道变更）需 owner 另行决策与授权，本轮不预设方案。
+按 ai-service §13，该连接器当前不可用、AI 上线门槛未通过；owner 决策为维持现状并记录（不伪造第一方身份、不自动改用付费 API、不新建中继组件）。AI Key 无法获得目录内模型许可（目录恒为空、创建必带非空 `modelIds`），因此调用链（JSON/SSE 真实调用、在途限制 429、取消收尾、SSE error 分类、断开后拒绝推理、usage 与调用记录）**全部受阻，标为上游阻断未验证**；真实令牌刷新（凭证约 10 天有效，60 秒提前窗口未自然到期）同样未触发。后续验证方法：先确认阻断原因，再按 §4.21 重跑最小闭环；处理方案（含任何出口通道变更）需 owner 另行决策与授权，本轮不预设方案。
 
 **边界与审计（已验证部分）**：调用端点认证拒绝路径实测——无效 `x-api-key`、仅 Cookie、仅 Bearer、无载体对 `POST /api/ai/responses` 一律 401 invalid-credential（单载体规则生效），`GET /api/ai/models` 无效 Key 401；无效 Key 的两次探测产生 `api_key_rejected` 审计各一条（requestId 与响应逐一对应），无 `x-api-key` 的载体拒绝不产生该审计，符合 §3 规则。管理审计：`ai_connection_created`、`ai_authorization_started`（两次）、`ai_authorization_completed`、`ai_authorization_cancelled` 全部记录且带 requestId；调用记录面板以 owner Session 读取 `GET /api/ai/invocations` 正常渲染空态。管理端点无凭据 401 边界已在 §4.19/§4.20 测试覆盖，本轮部署后冒烟复验。
 
 **含 AI 数据的恢复演练（通过）**：为使快照包含真实待处理授权，先在已连接连接上启动一次重新授权（不完成），随即以 `wrangler workflows trigger` 创建真实备份实例 `cf_b8e8302944606be3c570e8a7e24ae2cc13e24c784cb9ebcacf62365d298d8cc7`（16:42 完成，快照 39,745 bytes；上传步骤内建 R2 校验通过后记 `database_backup_health=ok`）。带外复核：对象键与上传步骤输出一致，内部 R2 API 读回 content-length 39,745、ETag `cac729f7ac33d285fd9e4d381c3cf8f8` 等于下载文件 MD5、storage class Standard。恢复规划器以库路径对真实 SQL 校验（descriptor 输入以工作流内建对象校验 + 带外 key/size/ETag/storage-class 复核替代——`exportBookmark` 等字段本轮无法从 R2 外部读取，该替代如实记录）：schema、外键与 `0001–0003` 精确前缀通过，SQL SHA-256 与本地文件一致。快照导入隔离空库 `eruoo-server-restore-20260919-7bf5b82`（`6237f569-31dd-4051-aaca-2de30320205a`，25 表 344 行），在原始 schema 上执行生成的清理 SQL 后断言全部通过：连接转 `reauthentication_required`、`credentialCiphertext`/`refreshClaimId` 清空、`credentialVersion` 1→2（旧刷新结果不能复活凭证）、`ai_authorization_sessions` 2 行（含加密设备授权数据）清零、在途调用转换语句执行成功但本轮快照无 reserved 行（行级效果仍仅合成验证覆盖）、源库 `deployment_migrations` 记录清除、Session/Passkey/API Key/审计清零、GitHub provider 令牌清空而 owner 关联保留、静态 OAuth client/resource 按当前清单恢复。前向迁移 0 项（ledger 已含 0003），随后写入隔离目标专属 migration receipt（目标 ID ≠ staging/production）。演练后删除隔离 D1 与本地快照副本（保留仅含哈希与生成 SQL 的演练回执于本地私有目录）；R2 快照按既有 30 天生命周期保留。JWKS 重建与认证冒烟未在本轮重复（§4.8 已验证，本轮任务核对项不要求）。
+
+### 4.22 2026-09-22：DeepSeek 官方 API 接入（本地实现）
+
+当前 AI 设计由 [ai-service.md](ai-service.md) 维护。§4.14–§4.21 及上方初版交付表中的 Codex 设备授权、刷新与 403 阻断均为历史记录，不作为 DeepSeek 链路的验收结论。
+
+- 删除 Codex 设备授权、OAuth 刷新与推理重放，使用 DeepSeek 官方静态 API Key、原生 `/models` 与 `/responses`。默认 effort 明确发送 `max`；已确认模型支持可选 effort，`deepseek-flash` 支持图片。
+- 保存 Key 在 D1 原子写中复核持久 owner Session 与观察到的凭证版本。普通替换保留精确模型授权，重新发现模型后恢复调用；断开推进独立授权版本，使旧调用 Key 授权失效。输入不回显、不进入浏览器存储。
+- 追加 0004 一次性清理旧 AI 状态与 AI 配置档调用 Key，保留非 AI 数据。恢复工具区分新旧表结构，不再对新结构访问设备授权表。现有登录会话修复仍是本次提交的前置祖先。
+- 验证使用本地合成凭证与 mock 上游，覆盖并发保存、失效 Session、迟到 401、授权版本、默认 max、图片、工具与推理 SSE、失败 usage、超时取消、重置迁移及恢复。浏览器检查确认保存后密码框清空、上游 503 不退出本站登录、本站会话 401 返回登录页。
+- `pnpm run check` 通过：格式、lint、三组类型检查、OpenAPI 一致性；Worker 36 文件 395 项、前端 16 文件 67 项、脚本 6 文件 71 项、Chromium 8 项，共 541 项。另完成上述浏览器 mock 操作检查。所有上游凭证均为合成值。
+- 未推送、未部署、未操作远端数据库或 Secret，未发送真实 DeepSeek 请求。真实目录、图片/工具推理与上游计量仍待单独授权验收。
 
 ## 5. 后续验证与已知限制
 

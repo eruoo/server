@@ -82,6 +82,7 @@ export interface ValidatedBackupDescriptor {
 
 export interface InspectedBackupSql {
   hasAiApplicationTables: boolean
+  hasLegacyAiAuthorizationSessions: boolean
   hasDeploymentReceipt: boolean
   migration: {
     count: number
@@ -440,6 +441,7 @@ const aiConnectionScrubColumns = new Set([
   "credentialCiphertext",
   "credentialExpiresAt",
   "credentialVersion",
+  "permissionVersion",
   "refreshClaimId",
   "refreshClaimExpiresAt",
 ])
@@ -820,7 +822,13 @@ function assertScrubbed(
  * in flight. Model snapshots and terminal history stay as reference data.
  */
 function assertAiStateScrubbed(database: DatabaseSync): void {
+  const legacy =
+    queryAll(
+      database,
+      "SELECT name FROM sqlite_schema WHERE type='table' AND name='ai_authorization_sessions'",
+    ).length > 0
   if (
+    legacy &&
     queryAll(database, 'SELECT "id" FROM "ai_authorization_sessions" LIMIT 1')
       .length
   ) {
@@ -829,7 +837,7 @@ function assertAiStateScrubbed(database: DatabaseSync): void {
   if (
     queryAll(
       database,
-      `SELECT "id" FROM "ai_connections" WHERE "authorizationStatus" = 'connected' OR "credentialCiphertext" IS NOT NULL OR "credentialExpiresAt" IS NOT NULL OR "refreshClaimId" IS NOT NULL OR "refreshClaimExpiresAt" IS NOT NULL LIMIT 1`,
+      `SELECT "id" FROM "ai_connections" WHERE "authorizationStatus" = 'connected' OR "credentialCiphertext" IS NOT NULL ${legacy ? 'OR "credentialExpiresAt" IS NOT NULL OR "refreshClaimId" IS NOT NULL OR "refreshClaimExpiresAt" IS NOT NULL' : ""} LIMIT 1`,
     ).length
   ) {
     throw new Error("Credential scrub left AI upstream credentials resumable.")
@@ -926,6 +934,9 @@ export async function inspectBackupSql(
     database.exec(
       `BEGIN IMMEDIATE;\n${createCredentialScrubSql({
         hasAiApplicationTables,
+        hasLegacyAiAuthorizationSessions: tables.has(
+          "ai_authorization_sessions",
+        ),
         hasDeploymentReceipt: tables.has(migrationReceiptTable),
       })}\nCOMMIT;`,
     )
@@ -934,6 +945,7 @@ export async function inspectBackupSql(
 
     return {
       hasAiApplicationTables,
+      hasLegacyAiAuthorizationSessions: tables.has("ai_authorization_sessions"),
       hasDeploymentReceipt: tables.has(migrationReceiptTable),
       migration,
       md5: createHash("md5").update(bytes).digest("hex"),
@@ -975,22 +987,26 @@ export interface CredentialScrubOptions {
    * 0001-only snapshot never sees them.
    */
   hasAiApplicationTables?: boolean
+  hasLegacyAiAuthorizationSessions?: boolean
   hasDeploymentReceipt?: boolean
 }
 
 export function createCredentialScrubSql(
   options: CredentialScrubOptions = {},
 ): string {
+  const legacy = options.hasLegacyAiAuthorizationSessions ?? true
   const aiStatements = options.hasAiApplicationTables
     ? [
         // Pending device authorization sessions (and their encrypted device
         // grants) are temporary state and never survive a restore.
-        'DELETE FROM "ai_authorization_sessions";',
+        ...(legacy ? ['DELETE FROM "ai_authorization_sessions";'] : []),
         // Connection configuration survives, but upstream credentials,
         // refresh claims, and connected status are cleared and the credential
         // version advances, so stale exchange or refresh results cannot
         // revive the old authorization.
-        `UPDATE "ai_connections" SET "credentialCiphertext" = NULL, "credentialExpiresAt" = NULL, "refreshClaimId" = NULL, "refreshClaimExpiresAt" = NULL, "credentialVersion" = "credentialVersion" + 1, "authorizationStatus" = 'reauthentication_required' WHERE "credentialCiphertext" IS NOT NULL OR "refreshClaimId" IS NOT NULL;`,
+        legacy
+          ? `UPDATE "ai_connections" SET "credentialCiphertext" = NULL, "credentialExpiresAt" = NULL, "refreshClaimId" = NULL, "refreshClaimExpiresAt" = NULL, "credentialVersion" = "credentialVersion" + 1, "authorizationStatus" = 'reauthentication_required' WHERE "credentialCiphertext" IS NOT NULL OR "refreshClaimId" IS NOT NULL;`
+          : `UPDATE "ai_connections" SET "credentialCiphertext"=NULL, "credentialVersion"="credentialVersion"+1, "permissionVersion"="permissionVersion"+1, "authorizationStatus"='reauthentication_required';`,
         // In-flight reservations become unknown at their lease boundary;
         // terminal history and its recorded usage are preserved as-is.
         `UPDATE "ai_invocations" SET "status" = 'unknown', "endedAt" = "leaseExpiresAt" WHERE "status" = 'reserved';`,

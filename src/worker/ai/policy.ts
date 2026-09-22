@@ -8,21 +8,19 @@
  */
 
 const AI_CONNECTIONS_TABLE = "ai_connections"
-export const AI_AUTHORIZATION_SESSIONS_TABLE = "ai_authorization_sessions"
 const AI_MODELS_TABLE = "ai_models"
 export const AI_INVOCATIONS_TABLE = "ai_invocations"
 
 /** Application tables introduced by the AI service migration. */
 export const AI_APPLICATION_TABLES = [
   AI_CONNECTIONS_TABLE,
-  AI_AUTHORIZATION_SESSIONS_TABLE,
   AI_MODELS_TABLE,
   AI_INVOCATIONS_TABLE,
 ] as const
 
 export type AiApplicationTable = (typeof AI_APPLICATION_TABLES)[number]
 
-const aiProviderTypes = ["openai-codex"] as const
+const aiProviderTypes = ["deepseek"] as const
 export type AiProviderType = (typeof aiProviderTypes)[number]
 
 export function isAiProviderType(value: string): value is AiProviderType {
@@ -36,14 +34,6 @@ const aiConnectionAuthorizationStatuses = [
 ] as const
 export type AiConnectionAuthorizationStatus =
   (typeof aiConnectionAuthorizationStatuses)[number]
-
-const aiAuthorizationSessionStatuses = [
-  "pending",
-  "completed",
-  "cancelled",
-] as const
-export type AiAuthorizationSessionStatus =
-  (typeof aiAuthorizationSessionStatuses)[number]
 
 const aiInvocationStatuses = [
   "reserved",
@@ -70,8 +60,7 @@ export function isAiTerminalInvocationStatus(
 }
 
 /**
- * Server-generated identifiers (connection, session, request, claim, and
- * completion IDs) are UUIDs. Synthetic test fixtures use the same shape.
+ * Server-generated identifiers (connection and request IDs) are UUIDs. Synthetic test fixtures use the same shape.
  */
 const aiServerIdentifierPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -97,44 +86,7 @@ export function isAiConnectionSlug(value: string): boolean {
 }
 
 /**
- * Reads the current wall clock for decisions taken after an asynchronous step.
- * Production omits it (the default is `Date.now`); tests hand the AI flows
- * their own clock so a synthetic timeline stays consistent with the durable
- * rows they seed.
- */
-export type AiClock = () => number
-
-/** Device authorization sessions live at most 15 minutes. */
-export const AI_AUTHORIZATION_SESSION_MAX_TTL_MS = 15 * 60 * 1000
-
-/** Poll intervals never fall below 1 second. */
-export const AI_AUTHORIZATION_POLL_MIN_INTERVAL_MS = 1_000
-
-/**
- * Default device-authorization poll interval when the upstream omits it or
- * sends an unparseable value. The fixed Codex contract returns the interval as
- * a string; OpenCode's connector treats 5 seconds as the default floor.
- */
-export const AI_AUTHORIZATION_POLL_DEFAULT_INTERVAL_MS = 5_000
-
-/** A poll claim coordinates one upstream status check per poll request. */
-export const AI_AUTHORIZATION_POLL_CLAIM_TTL_MS = 30_000
-
-/** Refresh claim retention, including the 10-second refresh network budget. */
-export const AI_CREDENTIAL_REFRESH_CLAIM_TTL_MS = 30_000
-
-/** Access tokens are refreshed 60 seconds before they expire. */
-export const AI_CREDENTIAL_REFRESH_LEAD_MS = 60_000
-
-/**
- * Refresh network budget, response body included. It is always truncated by
- * the invoking stage's remaining budget when that is smaller.
- */
-export const AI_CREDENTIAL_REFRESH_NETWORK_BUDGET_MS = 10_000
-
-/**
- * The credential package (access and refresh token plus the retained account
- * identity) is stored as one AES-256-GCM ciphertext. Application code caps
+ * The credential package (static API key) is stored as one AES-256-GCM ciphertext. Application code caps
  * the serialized envelope at 4096 characters to keep the stored value
  * bounded; the envelope validator and every storage write enforce the same
  * bound before persisting.
@@ -144,14 +96,8 @@ export const AI_CREDENTIAL_CIPHERTEXT_MAX_LENGTH = 4096
 /** Single upstream HTTP call during owner-facing AI management operations. */
 export const AI_MANAGEMENT_UPSTREAM_SINGLE_CALL_MS = 10_000
 
-/** Combined upstream HTTP budget for one owner-facing management operation. */
-export const AI_MANAGEMENT_UPSTREAM_TOTAL_MS = 20_000
-
-/** Stage budget for authorization start, poll, and model refresh requests. */
+/** Stage budget for owner-facing model discovery requests. */
 export const AI_MANAGEMENT_STAGE_BUDGET_MS = 30_000
-
-/** The recent-authentication window anchor for credential commit rechecks. */
-export const AI_RECENT_AUTHORIZATION_WINDOW_MS = 900_000
 
 /** One upstream SSE event or a JSON terminal payload is capped at 4 MiB. */
 export const AI_RESPONSES_SINGLE_EVENT_MAX_BYTES = 4 * 1_048_576
@@ -164,8 +110,7 @@ export const AI_SSE_HEARTBEAT_INTERVAL_MS = 15_000
 
 /**
  * Absolute inference deadline measured from the request's arrival. Every
- * stage budget is truncated by it; switching stages, a 401 recovery, or a
- * replay never resets it.
+ * stage budget is truncated by it; switching stages never resets it.
  */
 export const AI_INVOCATION_TOTAL_DEADLINE_MS = 300_000
 
@@ -175,7 +120,7 @@ export const AI_INVOCATION_FIRST_RESPONSE_BUDGET_MS = 90_000
 /** Maximum silence between two upstream body chunks before the call fails. */
 export const AI_INVOCATION_NO_DATA_INTERVAL_MS = 90_000
 
-/** Stage budget for reading the credential and any refresh it needs. */
+/** Stage budget for reading and decrypting the upstream key. */
 export const AI_CREDENTIAL_STAGE_BUDGET_MS = 15_000
 
 /** Service-wide and per-key in-flight invocation slots. */

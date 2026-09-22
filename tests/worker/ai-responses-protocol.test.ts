@@ -86,7 +86,6 @@ describe("Responses request subset validation", () => {
   it("accepts the complete supported subset and rejects nothing in it", () => {
     const result = validateResponsesRequest({
       ...validBase,
-      include: ["reasoning.encrypted_content"],
       instructions: "be brief",
       parallel_tool_calls: true,
       reasoning: { effort: "high" },
@@ -96,7 +95,6 @@ describe("Responses request subset validation", () => {
         format: {
           name: "result",
           schema: { type: "object" },
-          strict: true,
           type: "json_schema",
         },
       },
@@ -106,7 +104,6 @@ describe("Responses request subset validation", () => {
           description: "d",
           name: "get_weather",
           parameters: { type: "object" },
-          strict: true,
           type: "function",
         },
       ],
@@ -117,7 +114,7 @@ describe("Responses request subset validation", () => {
   it("rejects every unsupported or unknown field instead of dropping it", () => {
     for (const extra of [
       { temperature: 0.7 },
-      { max_output_tokens: 512 },
+      { max_output_tokens: -1 },
       { metadata: { a: 1 } },
       { top_p: 0.9 },
       { unknown_field: true },
@@ -164,9 +161,8 @@ describe("Responses request subset validation", () => {
           type: "function_call_output",
         },
         {
-          encrypted_content: "opaque-state",
+          content: [{ type: "reasoning_text", text: "prior reasoning" }],
           id: "rs_1",
-          summary: [{ text: "thought", type: "summary_text" }],
           type: "reasoning",
         },
         {

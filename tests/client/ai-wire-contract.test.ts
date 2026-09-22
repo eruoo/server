@@ -1,13 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest"
 
 import {
-  cancelAiAuthorization,
   deleteAiConnection,
   disconnectAiConnection,
-  getAiAuthorization,
-  pollAiAuthorization,
   refreshAiModels,
-  startAiAuthorization,
+  saveAiCredential,
 } from "../../src/client/features/ai/ai-connections"
 import { updateAiKeyModelGrants } from "../../src/client/features/security/api-keys"
 
@@ -43,32 +40,25 @@ afterEach(() => {
 
 it("sends the JSON content type on every AI management mutation", async () => {
   const id = "11111111-1111-1111-1111-111111111111"
-  const authorizationId = "22222222-2222-2222-2222-222222222222"
   await disconnectAiConnection(id)
   await deleteAiConnection(id)
   await refreshAiModels(id)
-  await startAiAuthorization(id)
-  await pollAiAuthorization(authorizationId)
-  await cancelAiAuthorization(authorizationId)
+  await saveAiCredential(id, "synthetic-key", 0)
 
   expect(calls.map((call) => call.contentType)).toEqual(
-    Array(6).fill("application/json"),
+    Array(4).fill("application/json"),
   )
   expect(calls.map((call) => call.method)).toEqual([
     "POST",
     "DELETE",
     "POST",
-    "POST",
-    "POST",
-    "DELETE",
+    "PUT",
   ])
   expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
     `/api/ai/connections/${id}/disconnect`,
     `/api/ai/connections/${id}`,
     `/api/ai/connections/${id}/models/refresh`,
-    `/api/ai/connections/${id}/authorizations`,
-    `/api/ai/authorizations/${authorizationId}/poll`,
-    `/api/ai/authorizations/${authorizationId}`,
+    `/api/ai/connections/${id}/credential`,
   ])
 })
 
@@ -103,13 +93,6 @@ it("gives the upstream-touching AI calls the 35 s budget from §6.1", async () =
 
   for (const call of [
     () => refreshAiModels("11111111-1111-1111-1111-111111111111"),
-    () => startAiAuthorization("11111111-1111-1111-1111-111111111111"),
-    () => pollAiAuthorization("22222222-2222-2222-2222-222222222222"),
-    () =>
-      getAiAuthorization(
-        "22222222-2222-2222-2222-222222222222",
-        new AbortController().signal,
-      ),
   ]) {
     vi.useFakeTimers()
     const pending = call().catch(() => undefined)

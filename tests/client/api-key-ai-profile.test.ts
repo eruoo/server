@@ -25,24 +25,32 @@ vi.mock("../../src/client/features/security/api-keys", async () => {
     updateAiKeyModelGrants: vi.fn<typeof actual.updateAiKeyModelGrants>(),
   }
 })
-vi.mock("../../src/client/features/ai/ai-connections", () => ({
-  listAiConnections: vi.fn<typeof listAiConnections>(),
-}))
+vi.mock("../../src/client/features/ai/ai-connections", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../src/client/features/ai/ai-connections")
+  >("../../src/client/features/ai/ai-connections")
+  return { ...actual, listAiConnections: vi.fn<typeof listAiConnections>() }
+})
 
 const connection = {
   authorizationStatus: "connected",
   createdAt: 1,
-  credentialExpiresAt: null,
+  credentialVersion: 0,
+  permissionVersion: 0,
   enabled: true,
   id: "11111111-1111-1111-1111-111111111111",
   models: [
-    { capabilities: null, discoveredAt: 1, displayName: null, id: "gpt-test" },
+    {
+      capabilities: { supportedInApi: true },
+      discoveredAt: 1,
+      displayName: null,
+      id: "gpt-test",
+    },
   ],
   name: "Main",
-  providerType: "openai-codex",
+  providerType: "deepseek",
   slug: "codex-main",
   updatedAt: 1,
-  upstreamAccountId: null,
 }
 
 function mountPanel() {
@@ -188,7 +196,7 @@ it("keeps the grant draft verbatim and parses it when saving", async () => {
     key: "hashed",
     name: "ai probe",
     permissions: {
-      "ai-model:11111111-1111-1111-1111-111111111111": ["gpt-test"],
+      "ai-model:11111111-1111-1111-1111-111111111111:0": ["gpt-test"],
     },
     start: "eruoo_",
   }
@@ -295,7 +303,7 @@ it("saves a replacement model grant for an existing ai key", async () => {
     name: "ai probe",
     permissions: {
       ai: ["invoke", "models:read"],
-      "ai-model:11111111-1111-1111-1111-111111111111": ["gpt-test"],
+      "ai-model:11111111-1111-1111-1111-111111111111:0": ["gpt-test"],
     },
     start: "eruoo_",
   }

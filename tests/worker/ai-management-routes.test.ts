@@ -6,11 +6,6 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import worker from "../../src/worker"
-import {
-  encryptAiSecret,
-  parseAiCredentialKeyring,
-} from "../../src/worker/ai/credential-cipher"
-import { problem } from "../../src/worker/http/response"
 import { ownerSession } from "./fixtures/session"
 
 let sequence = 0
@@ -51,7 +46,7 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM ai_invocations"),
     env.DB.prepare("DELETE FROM ai_models"),
     env.DB.prepare("DELETE FROM ai_connections"),
-    env.DB.prepare("DELETE FROM ai_authorization_sessions"),
+
     env.DB.prepare("DELETE FROM account"),
     env.DB.prepare("DELETE FROM session"),
     env.DB.prepare("DELETE FROM apikey"),
@@ -62,105 +57,6 @@ beforeEach(async () => {
 })
 
 describe("AI management routes", () => {
-  it("correlates catalog diagnostics with the local request without changing public errors or audits", async () => {
-    const session = await ownerSession()
-    const created = await call("/api/ai/connections", {
-      body: { name: "Diagnostic", slug: "diagnostic" },
-      cookie: session.cookie,
-    })
-    const { connection } = await created.json<{ connection: { id: string } }>()
-    const credentialCiphertext = await encryptAiSecret(
-      await parseAiCredentialKeyring(env.AI_CREDENTIAL_KEYS),
-      JSON.stringify({
-        accessToken: "secret-route-access",
-        refreshToken: "secret-route-refresh",
-      }),
-      {
-        connectionId: connection.id,
-        environment: env.APP_ORIGIN,
-        providerType: "openai-codex",
-        purpose: "credential-package",
-      },
-    )
-    await env.DB.prepare(
-      "UPDATE ai_connections SET authorizationStatus = ?, credentialCiphertext = ?, credentialExpiresAt = ? WHERE id = ?",
-    )
-      .bind(
-        "connected",
-        credentialCiphertext,
-        Date.now() + 3_600_000,
-        connection.id,
-      )
-      .run()
-    const auditsBefore = (
-      await env.DB.prepare(
-        "SELECT * FROM security_audit_events ORDER BY id",
-      ).all()
-    ).results
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
-    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("secret-upstream-body", {
-        status: 403,
-        headers: {
-          "cf-mitigated": "challenge",
-          "content-type": "text/html",
-          "cf-ray": "abcdef0123456789-SJC",
-          "x-request-id": "req_0123456789abcdef",
-          "set-cookie": "secret-upstream-cookie",
-        },
-      }),
-    )
-    const response = await call(
-      `/api/ai/connections/${connection.id}/models/refresh`,
-      {
-        method: "POST",
-        cookie: session.cookie,
-        headers: { "x-request-id": "untrusted-client-request" },
-      },
-    )
-    const requestId = response.headers.get("x-request-id")!
-    expect(requestId).not.toBe("untrusted-client-request")
-    expect(response.status).toBe(502)
-    expect(await response.json()).toEqual(
-      await problem("ai-upstream-protocol-error", requestId).json(),
-    )
-    for (const header of ["cf-mitigated", "cf-ray"])
-      expect(response.headers.has(header)).toBe(false)
-    expect(response.headers.get("set-cookie") ?? "").not.toContain(
-      "secret-upstream-cookie",
-    )
-    expect(warning).toHaveBeenCalledExactlyOnceWith(
-      JSON.stringify({
-        connectionId: connection.id,
-        requestId,
-        attemptPhase: "initial",
-        event: "ai_model_refresh_failed",
-        failureKind: "http",
-        httpStatus: 403,
-        reason: "protocol",
-        responseDiagnostics: {
-          cfMitigated: "challenge",
-          contentType: "html",
-          cfRay: "abcdef0123456789-SJC",
-          upstreamRequestId: "req_0123456789abcdef",
-        },
-        bodyFeatureDiagnostics: {
-          openAiBlockedSitePageMarkers: false,
-          cloudflarePageMarkers: false,
-          readOutcome: "complete",
-        },
-      }),
-    )
-    expect(fetch).toHaveBeenCalledOnce()
-    expect(
-      (
-        await env.DB.prepare(
-          "SELECT * FROM security_audit_events ORDER BY id",
-        ).all()
-      ).results,
-    ).toEqual(auditsBefore)
-  })
-
   it("requires an owner session on every management route", async () => {
     // Every registered §6.1 operation is covered, including the
     // authorization and model-refresh entries.
@@ -175,15 +71,9 @@ describe("AI management routes", () => {
         "/api/ai/connections/11111111-1111-1111-1111-111111111111/disconnect",
       ],
       [
-        "POST",
-        "/api/ai/connections/11111111-1111-1111-1111-111111111111/authorizations",
+        "PUT",
+        "/api/ai/connections/11111111-1111-1111-1111-111111111111/credential",
       ],
-      ["GET", "/api/ai/authorizations/22222222-2222-2222-2222-222222222222"],
-      [
-        "POST",
-        "/api/ai/authorizations/22222222-2222-2222-2222-222222222222/poll",
-      ],
-      ["DELETE", "/api/ai/authorizations/22222222-2222-2222-2222-222222222222"],
       [
         "POST",
         "/api/ai/connections/11111111-1111-1111-1111-111111111111/models/refresh",
@@ -198,8 +88,12 @@ describe("AI management routes", () => {
     }
   })
 
-  it("runs the connection lifecycle with audits and model snapshots", async () => {
+  it("runs the connection lifecycle after the recent-authentication window", async () => {
     const session = await ownerSession()
+    const reauthenticatedAt = new Date(Date.now() - 20 * 60_000).toISOString()
+    await env.DB.prepare("UPDATE session SET reauthenticatedAt=? WHERE id=?")
+      .bind(reauthenticatedAt, session.id)
+      .run()
 
     const providers = await call("/api/ai/providers", {
       cookie: session.cookie,
@@ -208,7 +102,7 @@ describe("AI management routes", () => {
     const providerBody = await providers.json<{
       providers: { providerType: string }[]
     }>()
-    expect(providerBody.providers[0]?.providerType).toBe("openai-codex")
+    expect(providerBody.providers[0]?.providerType).toBe("deepseek")
 
     const created = await call("/api/ai/connections", {
       body: { name: "Main", slug: "codex-main" },
@@ -223,6 +117,25 @@ describe("AI management routes", () => {
       slug: "codex-main",
     })
     const connectionId = createdBody.connection.id
+
+    const saved = await call(`/api/ai/connections/${connectionId}/credential`, {
+      method: "PUT",
+      cookie: session.cookie,
+      body: { apiKey: "synthetic-deepseek-key", expectedVersion: 0 },
+    })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toEqual({ saved: true })
+    const connectionList = await call("/api/ai/connections", {
+      cookie: session.cookie,
+    })
+    const publicText = await connectionList.text()
+    expect(publicText).not.toContain("synthetic-deepseek-key")
+    expect(publicText).not.toContain("credentialCiphertext")
+    const event = await env.DB.prepare(
+      "SELECT metadata FROM security_audit_events WHERE type='ai_credential_saved'",
+    ).first<{ metadata: string }>()
+    expect(event).not.toBeNull()
+    expect(event?.metadata).not.toContain("synthetic-deepseek-key")
 
     // The slug is unique: a second create with the same slug is rejected.
     const duplicate = await call("/api/ai/connections", {
@@ -284,6 +197,7 @@ describe("AI management routes", () => {
     // Audit rows are written asynchronously; compare the set, not the order.
     expect(audits.results.map((row) => row.type).sort()).toEqual(
       [
+        "ai_credential_saved",
         "ai_connection_created",
         "ai_connection_updated",
         "ai_connection_updated",
@@ -292,7 +206,67 @@ describe("AI management routes", () => {
       ].sort(),
     )
     expect(audits.results.every((row) => row.outcome === "success")).toBe(true)
+    expect(
+      await env.DB.prepare("SELECT reauthenticatedAt FROM session WHERE id=?")
+        .bind(session.id)
+        .first("reauthenticatedAt"),
+    ).toBe(reauthenticatedAt)
   })
+
+  it.each(["revoked", "expired"] as const)(
+    "rejects every mutation with a %s session despite its cached identity",
+    async (state) => {
+      const session = await ownerSession()
+      const identity = await call("/api/auth/get-session", {
+        cookie: session.cookie,
+      })
+      const cachedCookies = identity.headers
+        .getSetCookie()
+        .filter((cookie) => cookie.startsWith("eruoo.session_data="))
+        .map((cookie) => cookie.split(";")[0])
+      expect(cachedCookies).toHaveLength(1)
+      const cookie = [session.cookie, ...cachedCookies].join("; ")
+      if (state === "revoked") {
+        await env.DB.prepare("DELETE FROM session WHERE id=?")
+          .bind(session.id)
+          .run()
+      } else {
+        await env.DB.prepare("UPDATE session SET expiresAt=? WHERE id=?")
+          .bind(new Date(Date.now() - 1_000).toISOString(), session.id)
+          .run()
+      }
+      const fetch = vi.spyOn(globalThis, "fetch")
+      const connectionId = "11111111-1111-4111-8111-111111111111"
+      for (const [method, path, body] of [
+        ["POST", "/api/ai/connections", { name: "Rejected", slug: "rejected" }],
+        ["PATCH", `/api/ai/connections/${connectionId}`, { name: "Rejected" }],
+        ["DELETE", `/api/ai/connections/${connectionId}`, undefined],
+        ["POST", `/api/ai/connections/${connectionId}/disconnect`, undefined],
+        [
+          "PUT",
+          `/api/ai/connections/${connectionId}/credential`,
+          { apiKey: "synthetic", expectedVersion: 0 },
+        ],
+        [
+          "POST",
+          `/api/ai/connections/${connectionId}/models/refresh`,
+          undefined,
+        ],
+      ] as const) {
+        const response = await call(path, { method, body, cookie })
+        expect(response.status, `${method} ${path}`).toBe(401)
+        expect(await response.json()).toMatchObject({
+          type: expect.stringContaining("/invalid-credential"),
+        })
+      }
+      expect(fetch).not.toHaveBeenCalled()
+      expect(
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS count FROM ai_connections",
+        ).first("count"),
+      ).toBe(0)
+    },
+  )
 
   it("requires the exact Origin and a bounded body on mutations", async () => {
     const session = await ownerSession()
@@ -362,33 +336,4 @@ describe("AI management routes", () => {
     )
     expect(badCursor.status).toBe(422)
   })
-})
-
-it("returns a masked upstream account and never the raw identifier", async () => {
-  const session = await ownerSession()
-  const created = await call("/api/ai/connections", {
-    body: { name: "Masked", slug: "codex-masked" },
-    cookie: session.cookie,
-  })
-  expect(created.status).toBe(200)
-  const connectionId = (await created.json<{ connection: { id: string } }>())
-    .connection.id
-
-  // §5.2: the management API returns the masked account, not the raw one.
-  await env.DB.prepare(
-    `UPDATE "ai_connections" SET "upstreamAccountId" = ?1 WHERE "id" = ?2`,
-  )
-    .bind("account-abcdefgh", connectionId)
-    .run()
-
-  const listed = await call("/api/ai/connections", { cookie: session.cookie })
-  expect(listed.status).toBe(200)
-  const body = await listed.json<{
-    connections: { id: string; upstreamAccount: string }[]
-  }>()
-  const connection = body.connections.find(
-    (candidate) => candidate.id === connectionId,
-  )
-  expect(connection?.upstreamAccount).toBe("ac…efgh")
-  expect(JSON.stringify(body)).not.toContain("account-abcdefgh")
 })

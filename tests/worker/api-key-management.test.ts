@@ -93,24 +93,23 @@ async function seedAiCatalog(): Promise<void> {
       `DELETE FROM "ai_connections" WHERE "id"='11111111-1111-1111-1111-111111111111'`,
     ),
     env.DB.prepare(
-      `INSERT INTO "ai_connections" ("id","slug","name","providerType","enabled","authorizationStatus","upstreamAccountId","credentialVersion","credentialCiphertext","credentialExpiresAt","refreshClaimId","refreshClaimExpiresAt","createdAt","updatedAt")
-       VALUES (?,?,?,?,1,'connected','account-main',1,'ciphertext',?,NULL,NULL,?,?)`,
+      `INSERT INTO "ai_connections" ("id","slug","name","providerType","enabled","authorizationStatus","credentialVersion","credentialCiphertext","createdAt","updatedAt")
+       VALUES (?,?,?,?,1,'connected',1,'ciphertext',?,?)`,
     ).bind(
       "11111111-1111-1111-1111-111111111111",
       "codex-main",
       "Main",
-      "openai-codex",
-      now + 3_600_000,
+      "deepseek",
       now,
       now,
     ),
     env.DB.prepare(
       `INSERT INTO "ai_models" ("connectionId","upstreamModelId","displayName","capabilities","snapshotCredentialVersion","discoveredAt")
-       VALUES ('11111111-1111-1111-1111-111111111111','gpt-test','GPT Test',NULL,1,?)`,
+       VALUES ('11111111-1111-1111-1111-111111111111','gpt-test','GPT Test','{"supportedInApi":true}',1,?)`,
     ).bind(now),
     env.DB.prepare(
       `INSERT INTO "ai_models" ("connectionId","upstreamModelId","displayName","capabilities","snapshotCredentialVersion","discoveredAt")
-       VALUES ('11111111-1111-1111-1111-111111111111','openai/gpt-other','GPT Other',NULL,1,?)`,
+       VALUES ('11111111-1111-1111-1111-111111111111','openai/gpt-other','GPT Other','{"supportedInApi":true}',1,?)`,
     ).bind(now),
   ])
 }
@@ -989,7 +988,7 @@ it("creates an ai profile key with server-built model permissions", async () => 
     .first<{ permissions: string }>()
   expect(JSON.parse(stored?.permissions ?? "{}")).toEqual({
     ai: ["invoke", "models:read"],
-    "ai-model:11111111-1111-1111-1111-111111111111": [
+    "ai-model:11111111-1111-1111-1111-111111111111:0": [
       "gpt-test",
       "openai/gpt-other",
     ],
@@ -1044,7 +1043,7 @@ it("replaces and revokes ai model grants through update", async () => {
   expect(afterReplace?.name).toBe("ai key renamed")
   expect(JSON.parse(afterReplace?.permissions ?? "{}")).toEqual({
     ai: ["invoke", "models:read"],
-    "ai-model:11111111-1111-1111-1111-111111111111": ["openai/gpt-other"],
+    "ai-model:11111111-1111-1111-1111-111111111111:0": ["openai/gpt-other"],
   })
 
   // An omitted selection keeps the grant; an empty one revokes every model.
@@ -1059,7 +1058,7 @@ it("replaces and revokes ai model grants through update", async () => {
     .bind(created.id)
     .first<{ permissions: string }>()
   expect(JSON.parse(afterKeep?.permissions ?? "{}")).toMatchObject({
-    "ai-model:11111111-1111-1111-1111-111111111111": ["openai/gpt-other"],
+    "ai-model:11111111-1111-1111-1111-111111111111:0": ["openai/gpt-other"],
   })
 
   const revoked = await call("/api/auth/api-key/update", {

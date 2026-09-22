@@ -34,8 +34,11 @@ export const API_KEY_AI_OPERATIONS = ["invoke", "models:read"] as const
 export const API_KEY_AI_MODEL_PERMISSION_PREFIX = "ai-model:"
 
 /** 持久权限键：绑定不可复用的连接 UUID，而不是可复用的 slug。 */
-export function apiKeyAiModelPermissionKey(connectionId: string): string {
-  return `${API_KEY_AI_MODEL_PERMISSION_PREFIX}${connectionId}`
+export function apiKeyAiModelPermissionKey(
+  connectionId: string,
+  permissionVersion = 0,
+): string {
+  return `${API_KEY_AI_MODEL_PERMISSION_PREFIX}${connectionId}:${permissionVersion}`
 }
 
 /** 对外模型 ID：连接 slug 与上游模型 ID 以第一个斜杠分隔。 */

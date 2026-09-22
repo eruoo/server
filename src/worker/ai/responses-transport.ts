@@ -1,9 +1,13 @@
 import type { ProblemSlug } from "../http/problem-registry"
 import { problem } from "../http/response"
-import { buildCodexResponsesRequest } from "./codex-connector"
 import type { AiCredentialServiceContext } from "./credential-lifecycle"
-import { accessCodexCredentials } from "./credential-lifecycle"
-import { markAiConnectionReauthenticationRequired } from "./credentials"
+import { accessDeepSeekCredentials } from "./credential-lifecycle"
+import { markAiCredentialInvalid } from "./credential-lifecycle"
+import { buildDeepSeekResponsesRequest } from "./deepseek-connector"
+import {
+  deepSeekHttpProblem,
+  DEEPSEEK_DEFAULT_EFFORT,
+} from "./deepseek-connector"
 import { commitAiInvocationOutcome } from "./invocations"
 import {
   AI_CREDENTIAL_STAGE_BUDGET_MS,
@@ -19,60 +23,16 @@ import {
 } from "./responses-protocol"
 import type { ResponsesRequestBody } from "./responses-request"
 import { ResponsesSseWriter, runResponsesSsePipeline } from "./responses-sse"
-import { AiStageUpstreamBudget } from "./stage-budget"
 
-/**
- * Network orchestration for one admitted Responses invocation.
- *
- * The admission stage (route layer, PR 7) has already authenticated the API
- * key, checked the model permission, reserved the invocation row, and read
- * and validated the request body. This module owns everything from the
- * credential read to the committed outcome:
- *
- * - Credential stage: at most 15 seconds (refresh network included at 10),
- *   always truncated by the invocation's absolute deadline. A scheduled
- *   refresh happens only when the recorded expiry is inside the lead window.
- * - Upstream call: the fixed connector address and headers; the upstream is
- *   always asked for SSE, because the JSON mode reads the same upstream
- *   events and returns the terminal response object.
- * - Budgets: 90 seconds for the upstream's response headers, 90 seconds of
- *   upstream silence, and the 300-second absolute deadline (the tighter of
- *   the caller's deadline and the shared policy). A transport timeout fails
- *   as upstream-unavailable and still delivers a terminal on a writable
- *   downstream; only the client's own abort suppresses delivery. The silence
- *   and deadline budgets are evaluated between upstream reads and events, so
- *   a downstream write blocked by backpressure suspends them until the
- *   consumer drains (or the client disconnects).
- * - A single upstream HTTP 401 before any event was streamed permits one
- *   forced credential refresh and one replay. A 401 that survives the replay
- *   marks the connection reauthentication-required: the fresh token was
- *   rejected, so the authorization itself is dead.
- * - Every terminal (including failures) commits the invocation outcome with
- *   the controlled error code, the upstream request id when the upstream
- *   provided one, and the returned usage when it is present and bounded. A
- *   commit that does not land rejects `settled` (streaming) or the returned
- *   promise (non-streaming) instead of reporting success.
- *
- * A stream-level reauthorization-required classification does not mark the
- * connection reauthentication-required: only a definitive pre-stream 401
- * (after a forced refresh) or the credential service's own refresh verdict
- * does, so a transient upstream auth glitch cannot wipe a working
- * credential.
- *
- * The caller receives the downstream response plus a `settled` promise that
- * resolves after the outcome commit. Streaming responses settle when the
- * downstream stream closes; callers must keep that promise alive with their
- * execution context and must handle its rejection.
- */
-
+/** One admitted DeepSeek invocation. Static keys are never refreshed and generation is never replayed. */
 /** Stage budgets; production uses the shared policy constants. */
-export interface CodexResponsesBudgets {
+export interface DeepSeekResponsesBudgets {
   credentialStageMs: number
   firstResponseMs: number
   noDataIntervalMs: number
 }
 
-export interface InvokeCodexResponsesInput {
+export interface InvokeDeepSeekResponsesInput {
   /** API key that owns the admitted invocation row. */
   apiKeyId: string
   connectionId: string
@@ -91,11 +51,13 @@ export interface InvokeCodexResponsesInput {
   startedAt: number
   /** Upstream model id resolved from the key's model permission. */
   upstreamModelId: string
+  observedCredentialVersion: number
+  observedPermissionVersion: number
   /** Test-only overrides; production uses the shared policy constants. */
-  budgets?: Partial<CodexResponsesBudgets>
+  budgets?: Partial<DeepSeekResponsesBudgets>
 }
 
-export interface CodexResponsesDelivery {
+export interface DeepSeekResponsesDelivery {
   /** SSE stream, JSON terminal, or Problem, depending on the outcome. */
   response: Response
   /** Settles after the invocation outcome was committed. */
@@ -106,8 +68,8 @@ const AI_INVOCATION_USAGE_MAX_LENGTH = 4_096
 const AI_INVOCATION_UPSTREAM_REQUEST_ID_MAX_LENGTH = 128
 
 function resolveBudgets(
-  overrides: Partial<CodexResponsesBudgets> | undefined,
-): CodexResponsesBudgets {
+  overrides: Partial<DeepSeekResponsesBudgets> | undefined,
+): DeepSeekResponsesBudgets {
   return {
     credentialStageMs:
       overrides?.credentialStageMs ?? AI_CREDENTIAL_STAGE_BUDGET_MS,
@@ -187,9 +149,9 @@ function sseResponse(stream: ReadableStream<Uint8Array>): Response {
   })
 }
 
-export async function invokeCodexResponses(
-  input: InvokeCodexResponsesInput,
-): Promise<CodexResponsesDelivery> {
+export async function invokeDeepSeekResponses(
+  input: InvokeDeepSeekResponsesInput,
+): Promise<DeepSeekResponsesDelivery> {
   const budgets = resolveBudgets(input.budgets)
   const context: AiCredentialServiceContext = {
     credentialKeys: input.credentialKeys,
@@ -233,7 +195,7 @@ export async function invokeCodexResponses(
   const fail = async (
     slug: ProblemSlug,
     options: { retryAfterMs?: number; upstreamRequestId?: string | null } = {},
-  ): Promise<CodexResponsesDelivery> => {
+  ): Promise<DeepSeekResponsesDelivery> => {
     await commit({
       errorCode: slug,
       status: "failed",
@@ -249,23 +211,17 @@ export async function invokeCodexResponses(
     }
   }
 
-  // The stage window is per entry ("每次进入该阶段最多 15 秒"): a request
-  // whose admission already consumed time must not silently lose its
-  // refresh. The clock is the real one, because the credential service
-  // writes these values into durable claim and expiry state.
-  const readCredentials = (forceRefresh: boolean) => {
+  // Credential reads share the invocation deadline and have a bounded stage window.
+  const readCredentials = () => {
     const now = Date.now()
     const stageDeadline = Math.min(
       effectiveDeadlineAt,
       now + budgets.credentialStageMs,
     )
-    return accessCodexCredentials(context, {
+    return accessDeepSeekCredentials(context, {
       connectionId: input.connectionId,
       deadlineAt: stageDeadline,
-      forceRefresh,
-      now,
       signal: clientSignal,
-      upstream: new AiStageUpstreamBudget({ deadlineAt: stageDeadline }),
     })
   }
 
@@ -275,24 +231,43 @@ export async function invokeCodexResponses(
       Awaited<ReturnType<typeof readCredentials>>,
       { status: "usable" }
     >,
-  ): Promise<CodexResponsesDelivery> => {
+  ): Promise<DeepSeekResponsesDelivery> => {
     switch (result.status) {
       case "connection-not-found":
       case "disabled":
       case "reauthentication-required":
         return fail("ai-reauthorization-required")
-      case "credential-busy":
-        return fail("ai-credential-busy", { retryAfterMs: result.retryAfterMs })
+      case "timed-out":
+        return fail("request-timeout")
       case "upstream-unavailable":
         return fail("ai-upstream-unavailable")
     }
   }
 
-  const first = await readCredentials(false)
+  const cancelledOrExpired =
+    async (): Promise<DeepSeekResponsesDelivery | null> => {
+      if (clientSignal?.aborted) {
+        await commit({ errorCode: null, status: "unknown" })
+        return {
+          response: problem("request-timeout", input.requestId),
+          settled: Promise.resolve(),
+        }
+      }
+      return Date.now() >= effectiveDeadlineAt ? fail("request-timeout") : null
+    }
+  const beforeCredentials = await cancelledOrExpired()
+  if (beforeCredentials) return beforeCredentials
+  const first = await readCredentials()
+  const afterCredentials = await cancelledOrExpired()
+  if (afterCredentials) return afterCredentials
   if (first.status !== "usable") return credentialFailure(first)
+  if (
+    first.connection.credentialVersion !== input.observedCredentialVersion ||
+    first.connection.permissionVersion !== input.observedPermissionVersion
+  )
+    return fail("ai-connection-changed")
 
-  // The absolute deadline covers every stage; it is never reset by the 401
-  // recovery or a replay.
+  // The absolute deadline covers credential access and the single upstream call.
   const deadlineController = new AbortController()
   const deadlineTimer = setTimeout(
     () => deadlineController.abort(),
@@ -307,15 +282,19 @@ export async function invokeCodexResponses(
     deadlineReleased = true
     clearTimeout(deadlineTimer)
   }
-  // A fresh controller per attempt: reusing an aborted one would kill the
-  // body of a request whose headers arrived in the same turn.
+  // The header timeout stops when headers arrive; the total deadline remains active.
   let firstResponseTimedOut = false
 
+  const {
+    store: _store,
+    parallel_tool_calls: _parallel,
+    ...upstreamInput
+  } = input.request
   const upstreamBody = JSON.stringify({
-    ...input.request,
+    ...upstreamInput,
     instructions: input.request.instructions ?? "",
     model: input.upstreamModelId,
-    store: false,
+    reasoning: input.request.reasoning ?? { effort: DEEPSEEK_DEFAULT_EFFORT },
     stream: true,
   })
 
@@ -325,10 +304,7 @@ export async function invokeCodexResponses(
     deadlineController.signal.aborted ||
     Date.now() >= effectiveDeadlineAt
 
-  const callUpstream = async (
-    accessToken: string,
-    accountId: string | null,
-  ) => {
+  const callUpstream = async (apiKey: string) => {
     // A call whose budget is already gone is never started: the remaining
     // absolute budget and the client's cancellation are checked
     // synchronously, before the fetch, so an expired deadline costs zero
@@ -336,9 +312,8 @@ export async function invokeCodexResponses(
     if (budgetGone()) {
       throw new Error("The upstream call was not started: its budget is gone.")
     }
-    const request = buildCodexResponsesRequest({
-      accessToken,
-      accountId,
+    const request = buildDeepSeekResponsesRequest({
+      apiKey,
       stream: true,
     })
     firstResponseTimedOut = false
@@ -360,6 +335,7 @@ export async function invokeCodexResponses(
         body: upstreamBody,
         headers: request.headers,
         method: "POST",
+        redirect: "manual",
         signal: AbortSignal.any(signals),
       })
     } finally {
@@ -368,13 +344,10 @@ export async function invokeCodexResponses(
   }
 
   try {
-    let credentials = first
+    const credentials = first
     let upstream: Response
     try {
-      upstream = await callUpstream(
-        credentials.accessToken,
-        credentials.accountId,
-      )
+      upstream = await callUpstream(credentials.apiKey)
     } catch {
       if (clientSignal?.aborted) {
         // The client is gone; nothing is delivered and the outcome records
@@ -393,45 +366,12 @@ export async function invokeCodexResponses(
 
     if (upstream.status === 401) {
       await upstream.body?.cancel().catch(() => undefined)
-      // One forced refresh and one replay, only before any event streamed.
-      const refreshed = await readCredentials(true)
-      if (refreshed.status !== "usable") return credentialFailure(refreshed)
-      credentials = refreshed
-      let replay: Response
-      try {
-        replay = await callUpstream(
-          credentials.accessToken,
-          credentials.accountId,
-        )
-      } catch {
-        if (clientSignal?.aborted) {
-          await commit({ errorCode: null, status: "unknown" })
-          return {
-            response: problem("request-timeout", input.requestId),
-            settled: Promise.resolve(),
-          }
-        }
-        const timedOut = budgetGone() || firstResponseTimedOut
-        return fail(timedOut ? "request-timeout" : "ai-upstream-unavailable")
-      }
-      if (replay.status === 401) {
-        await replay.body?.cancel().catch(() => undefined)
-        // A fresh token was rejected: the authorization itself is dead. The
-        // transition is bound to the version whose token was rejected, so a
-        // reauthorization that landed meanwhile keeps its credentials — the
-        // problem below then describes this invocation, not the stored state.
-        await markAiConnectionReauthenticationRequired(input.database, {
-          connectionId: input.connectionId,
-          now: Date.now(),
-          observedCredentialVersion: credentials.connection.credentialVersion,
-        })
-        return fail("ai-reauthorization-required", {
-          upstreamRequestId: boundedUpstreamRequestId(
-            replay.headers.get("x-request-id"),
-          ),
-        })
-      }
-      upstream = replay
+      await markAiCredentialInvalid(
+        input.database,
+        input.connectionId,
+        credentials.connection.credentialVersion,
+      )
+      return fail("ai-reauthorization-required")
     }
 
     // Captured from the response that actually served the invocation.
@@ -441,13 +381,7 @@ export async function invokeCodexResponses(
 
     if (!(upstream.status >= 200 && upstream.status <= 299)) {
       await upstream.body?.cancel().catch(() => undefined)
-      // A bare upstream 429 does not prove the quota is exhausted, and 5xx is
-      // transient: both are unavailability. Every other non-2xx status means
-      // the fixed upstream contract did not hold.
-      const slug: ProblemSlug =
-        upstream.status === 429 || upstream.status >= 500
-          ? "ai-upstream-unavailable"
-          : "ai-upstream-protocol-error"
+      const slug = deepSeekHttpProblem(upstream.status)
       return fail(slug, { upstreamRequestId })
     }
 
@@ -474,7 +408,9 @@ export async function invokeCodexResponses(
             status: outcome.status,
             upstreamRequestId,
             usage:
-              result.kind === "completed" || result.kind === "incomplete"
+              result.kind === "completed" ||
+              result.kind === "incomplete" ||
+              result.kind === "failed"
                 ? boundedUsage(result.usage)
                 : null,
           })
@@ -496,7 +432,9 @@ export async function invokeCodexResponses(
       status: outcome.status,
       upstreamRequestId,
       usage:
-        result.kind === "completed" || result.kind === "incomplete"
+        result.kind === "completed" ||
+        result.kind === "incomplete" ||
+        result.kind === "failed"
           ? boundedUsage(result.usage)
           : null,
     })

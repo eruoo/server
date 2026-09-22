@@ -1,23 +1,20 @@
 import {
   AI_INVOCATIONS_TABLE,
-  AI_AUTHORIZATION_SESSIONS_TABLE,
   createAiInvocationRetentionCutoff,
 } from "./policy"
 
 /**
  * Daily bounded AI cleanup, joined to the existing 0 20 * * * schedule.
  *
- * Expired device authorization sessions (including their encrypted device
- * grant payloads) and invocation metadata past the shared 30-day retention
+ * Invocation metadata past the shared 30-day retention
  * boundary are deleted in batches of at most 500 rows with at most 10 batches
- * per category per run. Everything is a conditional DELETE keyed on the
+ * per run. Everything is a conditional DELETE keyed on the
  * scheduled boundary, so repeated or replayed crons are safe. Reservations
  * whose lease expired simply stop counting against the in-flight quota; they
  * are never deleted early, which would cut into the 30-day history retention.
  */
 
 export interface AiCleanupResult {
-  deletedAuthorizationSessions: number
   deletedInvocations: number
 }
 
@@ -34,17 +31,9 @@ export async function cleanupExpiredAiState(
   ) {
     throw new Error("Invalid cleanup boundary")
   }
-  // Both categories read the same scheduled boundary, so a single run never
-  // drifts between the session expiry and the retention cutoff.
+  // Retention is based on the scheduled boundary, including replayed runs.
   const invocationCutoff = createAiInvocationRetentionCutoff(scheduledTime)
 
-  const deletedAuthorizationSessions = await deleteExpiredRows(
-    database,
-    AI_AUTHORIZATION_SESSIONS_TABLE,
-    "id",
-    '"expiresAt"',
-    scheduledTime,
-  )
   const deletedInvocations = await deleteExpiredRows(
     database,
     AI_INVOCATIONS_TABLE,
@@ -53,7 +42,7 @@ export async function cleanupExpiredAiState(
     invocationCutoff,
   )
 
-  return { deletedAuthorizationSessions, deletedInvocations }
+  return { deletedInvocations }
 }
 
 async function deleteExpiredRows(

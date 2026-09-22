@@ -13,15 +13,19 @@ export const problemTypeRegistry = {
     status: 429,
     title: "AI concurrency exceeded",
   },
-  "ai-credential-busy": {
-    description:
-      "Another request is currently refreshing the upstream credential for this connection; retry after the indicated delay.",
-    status: 503,
-    title: "AI credential busy",
+  "ai-connection-changed": {
+    description: "The connection changed; reload before saving the credential.",
+    status: 409,
+    title: "AI connection changed",
+  },
+  "ai-upstream-rate-limited": {
+    description: "The upstream AI service rate limit was reached.",
+    status: 429,
+    title: "AI upstream rate limited",
   },
   "ai-reauthorization-required": {
     description:
-      "The upstream authorization for this connection is no longer usable; the owner must reauthorize before further AI calls.",
+      "The upstream authorization for this connection is no longer usable; the owner must configure a valid upstream API key before further AI calls.",
     status: 503,
     title: "AI reauthorization required",
   },
@@ -32,8 +36,7 @@ export const problemTypeRegistry = {
     title: "AI upstream protocol error",
   },
   "ai-upstream-quota-exceeded": {
-    description:
-      "The upstream account's usage limit is exhausted; retry after the indicated delay.",
+    description: "The upstream account has insufficient balance.",
     status: 429,
     title: "AI upstream quota exceeded",
   },

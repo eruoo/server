@@ -100,10 +100,10 @@ it("reads only well-formed usage totals", () => {
 
 it("labels the controlled errors the operator must tell apart", () => {
   expect(describeAiInvocationError("ai-upstream-quota-exceeded")).toBe(
-    "额度暂不可用（ai-upstream-quota-exceeded）",
+    "上游余额不足（ai-upstream-quota-exceeded）",
   )
   expect(describeAiInvocationError("ai-reauthorization-required")).toBe(
-    "需要重新授权（ai-reauthorization-required）",
+    "需要更新上游 Key（ai-reauthorization-required）",
   )
   expect(describeAiInvocationError("something-new")).toBe(
     "错误码 something-new",

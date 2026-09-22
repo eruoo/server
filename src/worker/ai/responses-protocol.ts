@@ -14,8 +14,7 @@ import {
  * resolution — the terminal output is completed from the collected items the
  * same way for JSON returns and SSE terminal frames.
  *
- * Failure classification follows docs/specs/ai-service.md §6.3 and the fixed
- * CLIProxyAPI reference: `usage_limit_reached` (with a validated
+ * Failure classification uses controlled compatibility error tokens: `usage_limit_reached` (with a validated
  * resets_at/resets_in_seconds) is a quota exhaustion; authentication-class
  * errors mean the credential is unusable; capacity/rate-limit and other
  * controlled upstream failures are unavailability; unparseable events,
@@ -162,6 +161,7 @@ export type ResponsesTerminalResult =
     }
   | {
       kind: "failed"
+      usage?: unknown
       failure: {
         kind: ResponsesUpstreamFailureKind
         /** Validated upstream retry hint in milliseconds, when provable. */
@@ -177,7 +177,7 @@ export type ResponsesTerminalResult =
       kind: "aborted"
     }
 
-/** Upstream failure events per the fixed reference taxonomy. */
+/** Recognized compatibility error tokens; unknown errors remain unavailable. */
 const quotaErrorType = "usage_limit_reached"
 const authenticationErrorTokens = new Set(["invalid_api_key", "unauthorized"])
 
@@ -804,7 +804,18 @@ async function handleParsedEvent(
   if (type === "response.failed" || type === "error") {
     const errorRecord = readErrorRecord(record)
     const failure = classifyUpstreamFailure(errorRecord ?? {})
-    return { kind: "failed", failure } satisfies ResponsesTerminalResult
+    const response = record.response
+    const usage =
+      response !== null &&
+      typeof response === "object" &&
+      !Array.isArray(response)
+        ? ((response as Record<string, unknown>).usage ?? null)
+        : null
+    return {
+      kind: "failed",
+      failure,
+      ...(usage === null ? {} : { usage }),
+    } satisfies ResponsesTerminalResult
   }
 
   // Every other Responses event is forwarded without interpretation.

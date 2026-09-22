@@ -1,27 +1,18 @@
 import { env } from "cloudflare:test"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import {
-  claimAiAuthorizationPoll,
-  completeAiAuthorization,
-  createAiAuthorizationSession,
-} from "../../src/worker/ai/authorizations"
-import {
-  createAiConnection,
-  getAiConnection,
-} from "../../src/worker/ai/connections"
+import { createAiConnection } from "../../src/worker/ai/connections"
 import {
   encryptAiSecret,
   parseAiCredentialKeyring,
 } from "../../src/worker/ai/credential-cipher"
-import { acquireAiCredentialRefreshClaim } from "../../src/worker/ai/credentials"
 import {
   readAiInvocation,
   assignAiInvocationIdentity,
   reserveAiInvocation,
 } from "../../src/worker/ai/invocations"
 import type { ResponsesRequestBody } from "../../src/worker/ai/responses-request"
-import { invokeCodexResponses } from "../../src/worker/ai/responses-transport"
+import { invokeDeepSeekResponses } from "../../src/worker/ai/responses-transport"
 
 const environment = "http://local.test"
 const connectionId = "11111111-1111-1111-1111-111111111111"
@@ -29,7 +20,7 @@ const requestId = "33333333-3333-3333-3333-333333333333"
 const apiKeyId = "key-transport"
 const ownerUserId = "transport-owner"
 const ownerSessionId = "transport-owner-session"
-const upstreamModelId = "gpt-test"
+const upstreamModelId = "deepseek-flash"
 
 function toBase64Url(bytes: Uint8Array): string {
   let binary = ""
@@ -40,48 +31,25 @@ function toBase64Url(bytes: Uint8Array): string {
 const keyV1 = crypto.getRandomValues(new Uint8Array(32))
 const keyringRaw = `1:${toBase64Url(keyV1)}`
 
-function fakeAccessToken(expiryMs: number, label = "access"): string {
-  const header = toBase64Url(
-    new TextEncoder().encode(JSON.stringify({ alg: "RS256", typ: "JWT" })),
-  )
-  const payload = toBase64Url(
-    new TextEncoder().encode(
-      JSON.stringify({
-        exp: Math.floor(expiryMs / 1_000),
-        sub: `access-${label}`,
-      }),
-    ),
-  )
-  return `${header}.${payload}.${toBase64Url(new Uint8Array(32))}`
-}
-
-async function encryptPackage(input: {
-  accessToken: string
-  refreshToken?: string
-}): Promise<string> {
+async function encryptPackage(): Promise<string> {
   const keyring = await parseAiCredentialKeyring(keyringRaw)
   return encryptAiSecret(
     keyring,
     JSON.stringify({
-      accessToken: input.accessToken,
-      chatgptUserId: "user-main",
-      refreshToken: input.refreshToken ?? "refresh-token-1",
+      kind: "api-key",
+      apiKey: "synthetic-upstream-key",
     }),
     {
       connectionId,
       environment,
-      providerType: "openai-codex",
+      providerType: "deepseek",
       purpose: "credential-package",
     },
   )
 }
 
 /** Reaches the connected state through the real storage primitives. */
-async function createConnectedConnection(input: {
-  accessToken: string
-  expiresAtMs: number
-  refreshToken?: string
-}): Promise<void> {
+async function createConnectedConnection(): Promise<void> {
   const now = Date.now()
   await env.DB.batch([
     env.DB.prepare(
@@ -110,44 +78,15 @@ async function createConnectedConnection(input: {
     id: connectionId,
     name: "Main",
     now,
-    providerType: "openai-codex",
-    slug: "codex-main",
+    providerType: "deepseek",
+    slug: "deepseek-main",
   })
   expect(created).toMatchObject({ created: true })
-  const authorizationSessionId = "22222222-2222-2222-2222-222222222222"
-  const claimId = "55555555-5555-5555-5555-555555555555"
-  const session = await createAiAuthorizationSession(env.DB, {
-    connectionId,
-    deviceGrantCiphertext: "device-grant-transport",
-    id: authorizationSessionId,
-    ownerSessionId,
-    ownerUserId,
-    pollIntervalMs: 5_000,
-    sessionTtlMs: 900_000,
-    now,
-  })
-  expect(session).toMatchObject({ created: true })
-  const claimed = await claimAiAuthorizationPoll(env.DB, {
-    claimId,
-    now: now + 6_000,
-    ownerSessionId,
-    ownerUserId,
-    sessionId: authorizationSessionId,
-  })
-  expect(claimed).toMatchObject({ claimed: true })
-  const completed = await completeAiAuthorization(env.DB, {
-    claimId,
-    completionId: "66666666-6666-6666-6666-666666666666",
-    credentialCiphertext: await encryptPackage({
-      accessToken: input.accessToken,
-      refreshToken: input.refreshToken,
-    }),
-    credentialExpiresAt: input.expiresAtMs,
-    now: now + 7_000,
-    sessionId: authorizationSessionId,
-    upstreamAccountId: "account-main",
-  })
-  expect(completed).toMatchObject({ completed: true })
+  await env.DB.prepare(
+    "UPDATE ai_connections SET authorizationStatus='connected', credentialCiphertext=?, credentialVersion=1 WHERE id=?",
+  )
+    .bind(await encryptPackage(), connectionId)
+    .run()
 }
 
 async function reserve(input: {
@@ -221,23 +160,21 @@ interface UpstreamCall {
 
 interface TransportMock {
   calls: UpstreamCall[]
-  refreshCalls: UpstreamCall[]
 }
 
 const mocks: Array<{ restore: () => void }> = []
 
 /**
- * Routes outbound calls: the fixed Codex responses endpoint, and the fixed
- * token endpoint for refresh paths. Any other URL fails the test.
+ * Only the fixed DeepSeek Responses endpoint is allowed.
  */
 function installUpstreamMock(handlers: {
-  refresh?: (init?: RequestInit) => Response | Promise<Response>
   responses?: (init?: RequestInit) => Response | Promise<Response>
 }): TransportMock {
-  const mock: TransportMock = { calls: [], refreshCalls: [] }
+  const mock: TransportMock = { calls: [] }
   const spy = vi
     .spyOn(globalThis, "fetch")
     .mockImplementation(async (input, init) => {
+      expect(init?.redirect).toBe("manual")
       const request = new Request(input, init)
       const url = new URL(request.url)
       const headers: Record<string, string> = {}
@@ -253,24 +190,14 @@ function installUpstreamMock(handlers: {
         url: request.url,
       }
       if (
-        url.origin === "https://chatgpt.com" &&
-        url.pathname === "/backend-api/codex/responses"
+        url.origin === "https://api.deepseek.com" &&
+        url.pathname === "/responses"
       ) {
         mock.calls.push(call)
         if (handlers.responses === undefined) {
           throw new Error("Unexpected responses call")
         }
         return handlers.responses(init)
-      }
-      if (
-        url.origin === "https://auth.openai.com" &&
-        url.pathname === "/oauth/token"
-      ) {
-        mock.refreshCalls.push(call)
-        if (handlers.refresh === undefined) {
-          throw new Error("Unexpected refresh call")
-        }
-        return handlers.refresh(init)
       }
       throw new Error(
         `Unexpected outbound request: ${request.method} ${request.url}`,
@@ -299,7 +226,7 @@ function requestBody(
 ): ResponsesRequestBody {
   return {
     input: "hello",
-    model: "codex-main/gpt-test",
+    model: "deepseek-main/deepseek-flash",
     stream: true,
     ...overrides,
   }
@@ -315,8 +242,10 @@ function invoke(input: {
   signal?: AbortSignal
 }) {
   const startedAt = Date.now()
-  return invokeCodexResponses({
+  return invokeDeepSeekResponses({
     apiKeyId,
+    observedCredentialVersion: 1,
+    observedPermissionVersion: 0,
     budgets: input.budgets,
     connectionId,
     credentialKeys: keyringRaw,
@@ -360,10 +289,7 @@ const completedFrames = [
 
 describe("responses transport", () => {
   it("streams the upstream events and commits the completed outcome", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     const mock = installUpstreamMock({
@@ -388,17 +314,17 @@ describe("responses transport", () => {
     // normalized body.
     expect(mock.calls.length).toBe(1)
     const call = mock.calls[0]
-    expect(call.url).toBe("https://chatgpt.com/backend-api/codex/responses")
+    expect(call.url).toBe("https://api.deepseek.com/responses")
     expect(call.headers.accept).toBe("text/event-stream")
     expect(call.headers["content-type"]).toBe("application/json")
-    expect(call.headers.originator).toBe("eruoo")
-    expect(call.headers["user-agent"]).toBe("eruoo/1")
-    expect(call.headers["chatgpt-account-id"]).toBe("account-main")
+    expect(call.headers.originator).toBeUndefined()
+    expect(call.headers["user-agent"]).toBeUndefined()
+    expect(call.headers["chatgpt-account-id"]).toBeUndefined()
     expect(call.headers.authorization).toMatch(/^Bearer /)
     expect(call.body).toMatchObject({
       instructions: "",
       model: upstreamModelId,
-      store: false,
+      reasoning: { effort: "max" },
       stream: true,
     })
 
@@ -412,10 +338,7 @@ describe("responses transport", () => {
   })
 
   it("returns the terminal response object in JSON mode", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({ responses: () => sseUpstream(completedFrames) })
@@ -441,10 +364,7 @@ describe("responses transport", () => {
   })
 
   it("records an incomplete terminal as incomplete", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({
@@ -470,84 +390,8 @@ describe("responses transport", () => {
     expect(row).toMatchObject({ errorCode: null, status: "incomplete" })
   })
 
-  it("recovers a pre-stream 401 with one forced refresh and one replay", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
-    const startedAt = Date.now()
-    await reserve({ deadlineAt: startedAt + 60_000, startedAt })
-    const rotated = fakeAccessToken(Date.now() + 3_600_000, "rotated")
-    const mock = installUpstreamMock({
-      refresh: () =>
-        jsonResponse({
-          access_token: rotated,
-          refresh_token: "refresh-token-2",
-        }),
-      responses: (init) => {
-        const request = new Request("https://x.test", init)
-        // Only the refreshed token is accepted; the first call 401s.
-        return request.headers.get("authorization") === `Bearer ${rotated}`
-          ? sseUpstream(completedFrames)
-          : jsonResponse({ error: { message: "unauthorized" } }, 401)
-      },
-    })
-
-    const delivery = await invoke({})
-    expect(delivery.response.status).toBe(200)
-    await delivery.settled
-
-    expect(mock.calls.length).toBe(2)
-    expect(mock.refreshCalls.length).toBe(1)
-    expect(mock.calls[0].headers.authorization).not.toBe(`Bearer ${rotated}`)
-    expect(mock.calls[1].headers.authorization).toBe(`Bearer ${rotated}`)
-    const connection = await getAiConnection(env.DB, connectionId)
-    expect(connection?.credentialVersion).toBe(2)
-    const row = await readAiInvocation(env.DB, requestId, Date.now())
-    expect(row).toMatchObject({ status: "succeeded" })
-  })
-
-  it("marks the connection when a 401 survives the replay", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
-    const startedAt = Date.now()
-    await reserve({ deadlineAt: startedAt + 60_000, startedAt })
-    const mock = installUpstreamMock({
-      refresh: () =>
-        jsonResponse({
-          access_token: fakeAccessToken(Date.now() + 3_600_000, "rotated"),
-          refresh_token: "refresh-token-2",
-        }),
-      responses: () =>
-        jsonResponse({ error: { message: "unauthorized" } }, 401),
-    })
-
-    const delivery = await invoke({})
-    expect(delivery.response.status).toBe(503)
-    const problem = (await delivery.response.json()) as { type: string }
-    expect(problem.type).toContain("ai-reauthorization-required")
-    await delivery.settled
-
-    expect(mock.calls.length).toBe(2)
-    const connection = await getAiConnection(env.DB, connectionId)
-    expect(connection).toMatchObject({
-      authorizationStatus: "reauthentication_required",
-      credentialCiphertext: null,
-    })
-    const row = await readAiInvocation(env.DB, requestId, Date.now())
-    expect(row).toMatchObject({
-      errorCode: "ai-reauthorization-required",
-      status: "failed",
-    })
-  })
-
-  it("classifies a bare upstream 429 as unavailable", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+  it("classifies upstream 429 as rate limited", async () => {
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({
@@ -562,23 +406,20 @@ describe("responses transport", () => {
     })
 
     const delivery = await invoke({})
-    expect(delivery.response.status).toBe(503)
+    expect(delivery.response.status).toBe(429)
     const problem = (await delivery.response.json()) as { type: string }
-    expect(problem.type).toContain("ai-upstream-unavailable")
+    expect(problem.type).toContain("ai-upstream-rate-limited")
     await delivery.settled
     const row = await readAiInvocation(env.DB, requestId, Date.now())
     expect(row).toMatchObject({
-      errorCode: "ai-upstream-unavailable",
+      errorCode: "ai-upstream-rate-limited",
       status: "failed",
       upstreamRequestId: "upstream-429",
     })
   })
 
   it("maps other upstream HTTP failures to a protocol error", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({
@@ -598,10 +439,7 @@ describe("responses transport", () => {
   })
 
   it("fails as request-timeout when the upstream never answers", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({
@@ -626,10 +464,7 @@ describe("responses transport", () => {
   })
 
   it("delivers an unavailable terminal when the upstream stalls without data", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({ responses: () => stallingUpstream() })
@@ -648,16 +483,15 @@ describe("responses transport", () => {
   })
 
   it("fails as unavailable when the total deadline expires mid-stream", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({ responses: () => stallingUpstream() })
 
-    const delivery = await invokeCodexResponses({
+    const delivery = await invokeDeepSeekResponses({
       apiKeyId,
+      observedCredentialVersion: 1,
+      observedPermissionVersion: 0,
       // The silence budget outlives the deadline, so the deadline is what
       // cuts the stalled read.
       budgets: { noDataIntervalMs: 30_000 },
@@ -685,10 +519,7 @@ describe("responses transport", () => {
   it.each([true, false])(
     "keeps one midstream-deadline classification across the SSE frame, JSON mode and the record (stream=%s)",
     async (stream) => {
-      await createConnectedConnection({
-        accessToken: fakeAccessToken(Date.now() + 3_600_000),
-        expiresAtMs: Date.now() + 3_600_000,
-      })
+      await createConnectedConnection()
       const startedAt = Date.now()
       await reserve({ deadlineAt: startedAt + 60_000, startedAt })
       installUpstreamMock({ responses: () => stallingUpstream() })
@@ -697,8 +528,10 @@ describe("responses transport", () => {
       // what ends the stalled upstream read — after the response was already
       // established, which per the contract classifies as upstream
       // unavailability, never a handshake timeout.
-      const delivery = await invokeCodexResponses({
+      const delivery = await invokeDeepSeekResponses({
         apiKeyId,
+        observedCredentialVersion: 1,
+        observedPermissionVersion: 0,
         budgets: { noDataIntervalMs: 30_000 },
         connectionId,
         credentialKeys: keyringRaw,
@@ -747,10 +580,7 @@ describe("responses transport", () => {
   )
 
   it("settles and records a timeout when a stalled consumer meets the deadline", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     const bigDelta = sseFrame("response.output_text.delta", {
@@ -765,8 +595,10 @@ describe("responses transport", () => {
         ]),
     })
 
-    const delivery = await invokeCodexResponses({
+    const delivery = await invokeDeepSeekResponses({
       apiKeyId,
+      observedCredentialVersion: 1,
+      observedPermissionVersion: 0,
       budgets: { noDataIntervalMs: 30_000 },
       connectionId,
       credentialKeys: keyringRaw,
@@ -798,10 +630,7 @@ describe("responses transport", () => {
   })
 
   it("records an oversized usage as unknown rather than failing the commit", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({
@@ -826,10 +655,7 @@ describe("responses transport", () => {
   })
 
   it("fails as a protocol error when the upstream body is missing", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({
@@ -849,10 +675,7 @@ describe("responses transport", () => {
   })
 
   it("fails as a protocol error when the upstream ends without a terminal", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({
@@ -878,10 +701,7 @@ describe("responses transport", () => {
   })
 
   it("records an unknown outcome when the client aborts", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({ responses: () => sseUpstream(completedFrames) })
@@ -894,51 +714,8 @@ describe("responses transport", () => {
     expect(row).toMatchObject({ errorCode: null, status: "unknown" })
   })
 
-  it("refreshes a needed credential even when the stage is entered late", async () => {
-    const now = Date.now()
-    await createConnectedConnection({
-      // Inside the 60-second refresh lead, so the call must refresh.
-      accessToken: fakeAccessToken(now + 30_000),
-      expiresAtMs: now + 30_000,
-    })
-    // The invocation started 20 seconds ago: admission already consumed
-    // time, and the credential stage window must not be measured from then.
-    const startedAt = now - 20_000
-    await reserve({ deadlineAt: startedAt + 60_000, startedAt })
-    const mock = installUpstreamMock({
-      refresh: () =>
-        jsonResponse({
-          access_token: fakeAccessToken(now + 3_600_000, "fresh"),
-          refresh_token: "refresh-token-2",
-        }),
-      responses: () => sseUpstream(completedFrames),
-    })
-
-    const delivery = await invokeCodexResponses({
-      apiKeyId,
-      connectionId,
-      credentialKeys: keyringRaw,
-      database: env.DB,
-      deadlineAt: startedAt + 60_000,
-      environment,
-      request: requestBody(),
-      requestId,
-      startedAt,
-      upstreamModelId,
-    })
-    expect(delivery.response.status).toBe(200)
-    await delivery.settled
-    expect(mock.refreshCalls.length).toBe(1)
-    expect(mock.calls.length).toBe(1)
-    const row = await readAiInvocation(env.DB, requestId, Date.now())
-    expect(row).toMatchObject({ status: "succeeded" })
-  })
-
   it("fails as request-timeout when the deadline expires before any response", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({
@@ -950,8 +727,10 @@ describe("responses transport", () => {
         }),
     })
 
-    const delivery = await invokeCodexResponses({
+    const delivery = await invokeDeepSeekResponses({
       apiKeyId,
+      observedCredentialVersion: 1,
+      observedPermissionVersion: 0,
       // The first-response budget outlives the deadline, so the deadline is
       // what cuts the handshake.
       budgets: { firstResponseMs: 30_000 },
@@ -977,16 +756,15 @@ describe("responses transport", () => {
   })
 
   it("starts no upstream call when the deadline has already passed", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now() - 10_000
     await reserve({ deadlineAt: startedAt + 5_000, startedAt })
     const mock = installUpstreamMock({})
 
-    const delivery = await invokeCodexResponses({
+    const delivery = await invokeDeepSeekResponses({
       apiKeyId,
+      observedCredentialVersion: 1,
+      observedPermissionVersion: 0,
       budgets: { firstResponseMs: 30_000 },
       connectionId,
       credentialKeys: keyringRaw,
@@ -1014,10 +792,7 @@ describe("responses transport", () => {
 
   it("clamps an over-long deadline to the shared 300-second policy", async () => {
     const now = Date.now()
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(now + 3_600_000),
-      expiresAtMs: now + 3_600_000,
-    })
+    await createConnectedConnection()
     // The caller asks for 400 seconds; the shared policy allows 300, which
     // this start time places in the past, so the deadline fires at once.
     const startedAt = now - 400_000
@@ -1031,8 +806,10 @@ describe("responses transport", () => {
         }),
     })
 
-    const delivery = await invokeCodexResponses({
+    const delivery = await invokeDeepSeekResponses({
       apiKeyId,
+      observedCredentialVersion: 1,
+      observedPermissionVersion: 0,
       budgets: { firstResponseMs: 30_000 },
       connectionId,
       credentialKeys: keyringRaw,
@@ -1054,10 +831,7 @@ describe("responses transport", () => {
   })
 
   it("rejects settled when the outcome commit cannot land", async () => {
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(Date.now() + 3_600_000),
-      expiresAtMs: Date.now() + 3_600_000,
-    })
+    await createConnectedConnection()
     const startedAt = Date.now()
     await reserve({ deadlineAt: startedAt + 60_000, startedAt })
     installUpstreamMock({ responses: () => sseUpstream(completedFrames) })
@@ -1072,161 +846,137 @@ describe("responses transport", () => {
       "The AI invocation outcome was not committed",
     )
   })
-
-  it("fails as credential-busy while another request holds the refresh claim", async () => {
-    const now = Date.now()
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(now + 1_000),
-      expiresAtMs: now + 1_000,
-    })
-    const startedAt = Date.now()
-    await reserve({ deadlineAt: startedAt + 60_000, startedAt })
-    // The claim stamps updatedAt, and the schema keeps updatedAt >= createdAt;
-    // the fixture writes its own clock, so read the claim clock after it.
-    const claimed = await acquireAiCredentialRefreshClaim(env.DB, {
-      claimId: "77777777-7777-7777-7777-777777777777",
-      connectionId,
-      now: Math.max(now, Date.now()),
-    })
-    expect(claimed).toMatchObject({ claimed: true })
-    installUpstreamMock({})
-
-    const delivery = await invoke({})
-    expect(delivery.response.status).toBe(503)
-    expect(delivery.response.headers.get("retry-after")).toBe("30")
-    const problem = (await delivery.response.json()) as { type: string }
-    expect(problem.type).toContain("ai-credential-busy")
-    await delivery.settled
-    const row = await readAiInvocation(env.DB, requestId, Date.now())
-    expect(row).toMatchObject({
-      errorCode: "ai-credential-busy",
-      status: "failed",
-    })
-  })
-
-  it("preserves a reauthorization that completes between the refresh commit and its result", async () => {
-    const now = Date.now()
-    await createConnectedConnection({
-      accessToken: fakeAccessToken(now + 3_600_000, "original"),
-      expiresAtMs: now + 3_600_000,
-    })
-    const startedAt = Date.now()
-    await reserve({ deadlineAt: startedAt + 60_000, startedAt })
-    const refreshedToken = fakeAccessToken(Date.now() + 3_600_000, "refreshed")
-    const winnerCiphertext = await encryptPackage({
-      accessToken: fakeAccessToken(Date.now() + 7_200_000, "reauthorized"),
-      refreshToken: "refresh-token-winner",
-    })
-    const mock = installUpstreamMock({
-      refresh: () =>
-        jsonResponse({
-          access_token: refreshedToken,
-          refresh_token: "refresh-token-2",
-        }),
-      responses: () =>
-        jsonResponse({ error: { message: "unauthorized" } }, 401),
-    })
-
-    // A legal reauthorization lands between the refresh commit and the
-    // snapshot the caller receives: it goes through the real session, claim
-    // and completion primitives, so its version binding holds exactly as in
-    // production. The wrapped database injects it after the commit statement
-    // itself has completed.
-    let committedOnce = false
-    const wrappedDatabase = {
-      prepare(query: string) {
-        const statement = env.DB.prepare(query)
-        return {
-          bind(...values: unknown[]) {
-            const bound = statement.bind(...(values as []))
-            const interleaveReauthorization = async (): Promise<void> => {
-              if (
-                !committedOnce &&
-                query.includes(`SET "credentialCiphertext" = ?3`)
-              ) {
-                committedOnce = true
-                const sessionId = crypto.randomUUID()
-                const claimId = crypto.randomUUID()
-                expect(
-                  await createAiAuthorizationSession(env.DB, {
-                    connectionId,
-                    deviceGrantCiphertext: "device-grant-winner",
-                    id: sessionId,
-                    ownerSessionId,
-                    ownerUserId,
-                    pollIntervalMs: 5_000,
-                    sessionTtlMs: 900_000,
-                    now,
-                  }),
-                ).toMatchObject({ created: true })
-                expect(
-                  await claimAiAuthorizationPoll(env.DB, {
-                    claimId,
-                    now: now + 6_000,
-                    ownerSessionId,
-                    ownerUserId,
-                    sessionId,
-                  }),
-                ).toMatchObject({ claimed: true })
-                expect(
-                  await completeAiAuthorization(env.DB, {
-                    claimId,
-                    completionId: crypto.randomUUID(),
-                    credentialCiphertext: winnerCiphertext,
-                    credentialExpiresAt: now + 7_200_000,
-                    now: now + 7_000,
-                    sessionId,
-                    upstreamAccountId: "account-main",
-                  }),
-                ).toMatchObject({ completed: true })
-              }
-            }
-            return {
-              all: async () => {
-                const result = await bound.all()
-                // The reauthorization lands after the refresh commit's own
-                // statement completed, before its result is returned.
-                await interleaveReauthorization()
-                return result
-              },
-              first: (...args: unknown[]) =>
-                (bound.first as (...callArgs: unknown[]) => unknown).apply(
-                  bound,
-                  args,
-                ),
-              run: () => bound.run(),
-            }
-          },
-        }
-      },
-      batch: <T>(statements: D1PreparedStatement[]) =>
-        env.DB.batch<T>(statements),
-    } as unknown as D1Database
-
-    const delivery = await invokeCodexResponses({
-      apiKeyId,
-      connectionId,
-      credentialKeys: keyringRaw,
-      database: wrappedDatabase,
-      deadlineAt: startedAt + 60_000,
-      environment,
-      request: requestBody(),
-      requestId,
-      startedAt,
-      upstreamModelId,
-    })
-    await delivery.settled
-
-    // The replay still uses this refresh's own token, and its 401 cannot
-    // invalidate the reauthorization that won afterwards: the invalidated
-    // version is the one this refresh wrote, not the row's current version.
-    expect(committedOnce).toBe(true)
-    expect(mock.calls).toHaveLength(2)
-    expect(mock.calls[1].headers.authorization).toBe(`Bearer ${refreshedToken}`)
-    expect(await getAiConnection(env.DB, connectionId)).toMatchObject({
-      authorizationStatus: "connected",
-      credentialCiphertext: winnerCiphertext,
-      credentialVersion: 3,
-    })
-  })
 })
+
+it.each([
+  [401, 503, "ai-reauthorization-required"],
+  [402, 429, "ai-upstream-quota-exceeded"],
+  [403, 503, "ai-upstream-unavailable"],
+  [503, 503, "ai-upstream-unavailable"],
+  [302, 502, "ai-upstream-protocol-error"],
+] as const)(
+  "maps HTTP %i without retry or error leakage",
+  async (upstreamStatus, status, code) => {
+    await createConnectedConnection()
+    const startedAt = Date.now()
+    await reserve({ startedAt, deadlineAt: startedAt + 60000 })
+    const mock = installUpstreamMock({
+      responses: () =>
+        jsonResponse(
+          { error: "synthetic-private-upstream-error" },
+          upstreamStatus,
+        ),
+    })
+    const delivery = await invoke({})
+    expect(delivery.response.status).toBe(status)
+    const text = await delivery.response.text()
+    expect(text).toContain(code)
+    expect(text).not.toContain("synthetic-private-upstream-error")
+    expect(mock.calls).toHaveLength(1)
+    await delivery.settled
+    const connection = await env.DB.prepare(
+      "SELECT authorizationStatus,credentialVersion FROM ai_connections WHERE id=?",
+    )
+      .bind(connectionId)
+      .first()
+    expect(connection).toEqual({
+      authorizationStatus:
+        upstreamStatus === 401 ? "reauthentication_required" : "connected",
+      credentialVersion: upstreamStatus === 401 ? 2 : 1,
+    })
+  },
+)
+
+it.each([true, false])(
+  "preserves reasoning and tool events with effort none (stream=%s)",
+  async (stream) => {
+    await createConnectedConnection()
+    const startedAt = Date.now()
+    await reserve({ startedAt, deadlineAt: startedAt + 60000 })
+    const reasoning = {
+      type: "reasoning",
+      id: "reason_1",
+      content: [{ type: "reasoning_text", text: "synthetic thought" }],
+    }
+    const call = {
+      type: "function_call",
+      call_id: "call_1",
+      name: "lookup",
+      arguments: "{}",
+    }
+    const usage = {
+      input_tokens: 10,
+      output_tokens: 5,
+      output_tokens_details: { reasoning_tokens: 3 },
+    }
+    const mock = installUpstreamMock({
+      responses: () =>
+        sseUpstream([
+          sseFrame("response.reasoning_text.delta", {
+            type: "response.reasoning_text.delta",
+            delta: "synthetic thought",
+          }),
+          sseFrame("response.output_item.done", {
+            type: "response.output_item.done",
+            output_index: 0,
+            item: reasoning,
+          }),
+          sseFrame("response.function_call_arguments.delta", {
+            type: "response.function_call_arguments.delta",
+            delta: "{}",
+          }),
+          sseFrame("response.output_item.done", {
+            type: "response.output_item.done",
+            output_index: 1,
+            item: call,
+          }),
+          sseFrame("response.completed", {
+            type: "response.completed",
+            response: { output: [reasoning, call], usage },
+          }),
+        ]),
+    })
+    const delivery = await invoke({
+      request: requestBody({ stream, reasoning: { effort: "none" } }),
+    })
+    const text = await delivery.response.text()
+    expect(text).toContain("synthetic thought")
+    expect(text).toContain('"function_call"')
+    expect(text).not.toContain("[DONE]")
+    expect(text.includes("response.function_call_arguments.delta")).toBe(stream)
+    expect(mock.calls[0].body?.reasoning).toEqual({ effort: "none" })
+    await delivery.settled
+    expect((await readAiInvocation(env.DB, requestId, Date.now()))?.usage).toBe(
+      JSON.stringify(usage),
+    )
+  },
+)
+
+it.each([true, false])(
+  "records actual usage even for a failed terminal (stream=%s)",
+  async (stream) => {
+    await createConnectedConnection()
+    const startedAt = Date.now()
+    await reserve({ startedAt, deadlineAt: startedAt + 60000 })
+    installUpstreamMock({
+      responses: () =>
+        sseUpstream([
+          sseFrame("response.failed", {
+            type: "response.failed",
+            response: {
+              error: "synthetic-private-error",
+              usage: { input_tokens: 10, output_tokens: 2 },
+            },
+          }),
+        ]),
+    })
+    const delivery = await invoke({ request: requestBody({ stream }) })
+    expect(await delivery.response.text()).not.toContain(
+      "synthetic-private-error",
+    )
+    await delivery.settled
+    expect(await readAiInvocation(env.DB, requestId, Date.now())).toMatchObject(
+      { status: "failed", usage: '{"input_tokens":10,"output_tokens":2}' },
+    )
+  },
+)
