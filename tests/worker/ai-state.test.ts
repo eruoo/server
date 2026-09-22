@@ -19,7 +19,6 @@ import { commitAiModelSnapshot, listAiModels } from "../../src/worker/ai/models"
 import {
   AI_INVOCATION_RETENTION_MS,
   createAiInvocationRetentionCutoff,
-  isAiConnectionSlug,
 } from "../../src/worker/ai/policy"
 
 const now = 2_000_000_000_000
@@ -37,11 +36,10 @@ function invocationRequestId(seed: number): string {
   return uuidWithSuffix("33333333-3333-3333-3333", seed)
 }
 
-async function createConnectedConnection(id: string, slug: string) {
+async function createConnectedConnection(id: string, name: string) {
   await createAiConnection(env.DB, {
     id,
-    slug,
-    name: slug,
+    name,
     providerType: "deepseek",
     now,
   })
@@ -116,34 +114,33 @@ describe("AI state storage", () => {
     ])
   })
 
-  it("validates connection slugs and provider types before writing", async () => {
-    expect(isAiConnectionSlug("codex-main")).toBe(true)
-    expect(isAiConnectionSlug("a")).toBe(true)
-    expect(isAiConnectionSlug("a-b-c")).toBe(true)
-    expect(isAiConnectionSlug("")).toBe(false)
-    expect(isAiConnectionSlug("A-b")).toBe(false)
-    expect(isAiConnectionSlug("-ab")).toBe(false)
-    expect(isAiConnectionSlug("ab-")).toBe(false)
-    expect(isAiConnectionSlug("a--b")).toBe(false)
-    expect(isAiConnectionSlug("a_b")).toBe(false)
-    expect(isAiConnectionSlug("a.b")).toBe(false)
-    expect(isAiConnectionSlug("设备")).toBe(false)
-    expect(isAiConnectionSlug("a".repeat(64))).toBe(true)
-    expect(isAiConnectionSlug("a".repeat(65))).toBe(false)
+  it("creates connections on the retained schema with an internal UUID slug", async () => {
+    const result = await createAiConnection(env.DB, {
+      id: connectionId,
+      name: "Main",
+      providerType: "deepseek",
+      now,
+    })
+    expect(result.connection).not.toHaveProperty("slug")
+    expect(
+      await env.DB.prepare("SELECT slug FROM ai_connections WHERE id=?")
+        .bind(connectionId)
+        .first(),
+    ).toEqual({ slug: connectionId })
+  })
 
+  it("validates connection names and provider types before writing", async () => {
     await expect(
       createAiConnection(env.DB, {
         id: connectionId,
-        slug: "Not A Slug",
-        name: "x",
+        name: "",
         providerType: "deepseek",
         now,
       }),
-    ).rejects.toThrow("slug is invalid")
+    ).rejects.toThrow("name is invalid")
     await expect(
       createAiConnection(env.DB, {
         id: connectionId,
-        slug: "codex-main",
         name: "x",
         providerType: "unknown-provider",
         now,

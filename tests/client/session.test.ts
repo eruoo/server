@@ -8,7 +8,10 @@ const session = {
   user: { id: "owner", name: "Owner" },
 }
 beforeEach(() => vi.restoreAllMocks())
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.useRealTimers()
+})
 
 describe("one Session controller", () => {
   it.each([false, true])(
@@ -160,4 +163,26 @@ describe("one Session controller", () => {
       "new-session-from-another-window",
     )
   })
+})
+
+it("skips brief visibility changes and coalesces checks after five minutes away", async () => {
+  vi.useFakeTimers()
+  const fetch = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async () => Response.json(session))
+  const controller = createSessionController()
+  await controller.refresh()
+  for (let i = 0; i < 10; i++) {
+    await controller.visibilityChanged(false)
+    vi.advanceTimersByTime(60_000)
+    await controller.visibilityChanged(true)
+  }
+  expect(fetch).toHaveBeenCalledTimes(1)
+  await controller.visibilityChanged(false)
+  vi.advanceTimersByTime(5 * 60_000)
+  await Promise.all([
+    controller.visibilityChanged(true),
+    controller.visibilityChanged(true),
+  ])
+  expect(fetch).toHaveBeenCalledTimes(2)
 })

@@ -1,13 +1,13 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi"
 
-import { parseAiExternalModelId } from "../../shared/api-key"
+import { readAiKeyConnectionGrant } from "../../shared/api-key"
 import { scheduleAuditEvent } from "../audit"
 import { inspectCredentialCarriers } from "../auth/carriers"
 import { limitAuthEntry } from "../auth/entry-limit"
 import { getRequestAuth } from "../auth/session"
 import { errorResponse, problem } from "../http/response"
 import type { AppBindings } from "../http/types"
-import { getAiConnectionBySlug } from "./connections"
+import { getAiConnection } from "./connections"
 import {
   assignAiInvocationIdentity,
   releaseAiInvocationReservation,
@@ -20,7 +20,7 @@ import {
   validateAiRequestCapabilities,
 } from "./model-authorization"
 import { listAiModels } from "./models"
-import { AI_INVOCATION_TOTAL_DEADLINE_MS, isAiConnectionSlug } from "./policy"
+import { AI_INVOCATION_TOTAL_DEADLINE_MS, isAiServerIdentifier } from "./policy"
 import { validateResponsesRequest } from "./responses-request"
 import { invokeDeepSeekResponses } from "./responses-transport"
 
@@ -270,7 +270,7 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
               capabilities: model.capabilities,
               discoveredAt: model.discoveredAt,
               displayName: model.displayName,
-              id: model.externalModelId,
+              id: model.upstreamModelId,
             })),
           },
           200,
@@ -467,19 +467,16 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
       // both the invoke operation and the exact model grant. Unknown and
       // ungranted models answer identically, so the endpoint is not a
       // catalog oracle.
-      const parts = parseAiExternalModelId(validated.value.model)
+      const grant = readAiKeyConnectionGrant(key.permissions)
       let observedCredentialVersion = -1
       let observedPermissionVersion = -1
       let connectionId: string | null = null
       let upstreamModelId: string | null = null
       let modelCapabilities: string | null = null
-      // A malformed slug is an unresolvable model, not a service failure.
-      if (parts !== null && isAiConnectionSlug(parts.connectionSlug)) {
+      // A caller key routes only to its one explicitly bound connection.
+      if (grant !== null && isAiServerIdentifier(grant.connectionId)) {
         try {
-          const connection = await getAiConnectionBySlug(
-            c.env.DB,
-            parts.connectionSlug,
-          )
+          const connection = await getAiConnection(c.env.DB, grant.connectionId)
           if (
             connection !== null &&
             connection.enabled &&
@@ -488,7 +485,7 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
             const models = await listAiModels(c.env.DB, connection.id)
             const model = models.find(
               (candidate) =>
-                candidate.upstreamModelId === parts.upstreamModelId,
+                candidate.upstreamModelId === validated.value.model,
             )
             if (
               model !== undefined &&
@@ -497,7 +494,7 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
               observedCredentialVersion = connection.credentialVersion
               observedPermissionVersion = connection.permissionVersion
               connectionId = connection.id
-              upstreamModelId = parts.upstreamModelId
+              upstreamModelId = validated.value.model
               modelCapabilities = model.capabilities
             }
           }

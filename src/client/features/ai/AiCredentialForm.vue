@@ -12,9 +12,12 @@ const emit = defineEmits<{
 }>()
 const apiKey = shallowRef("")
 const session = useSession()
-watch([session.status, () => session.data.value?.session.id], () => {
-  apiKey.value = ""
-})
+watch(
+  [() => session.data.value?.session.id, () => session.data.value?.user.id],
+  () => {
+    apiKey.value = ""
+  },
+)
 onUnmounted(() => {
   apiKey.value = ""
 })

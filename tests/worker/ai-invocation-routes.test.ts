@@ -15,9 +15,9 @@ import { ownerSession } from "./fixtures/session"
 
 const connectionId = "11111111-1111-1111-1111-111111111111"
 const upstreamModelId = "gpt-test"
-const externalModelId = "codex-main/gpt-test"
+const externalModelId = "gpt-test"
 const reasoningUpstreamModelId = "gpt-reasoning"
-const reasoningExternalModelId = `codex-main/${reasoningUpstreamModelId}`
+const reasoningExternalModelId = `${reasoningUpstreamModelId}`
 
 function sseFrame(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
@@ -161,7 +161,7 @@ async function createAiKey(
 ): Promise<string> {
   const sessionCookie = cookie ?? (await ownerSession()).cookie
   const response = await call("/api/auth/api-key/create", {
-    body: { modelIds, name: "ai route probe", purpose: "ai" },
+    body: { connectionId, modelIds, name: "ai route probe", purpose: "ai" },
     cookie: sessionCookie,
   })
   expect(response.status).toBe(200)
@@ -194,6 +194,44 @@ describe("AI invocation routes", () => {
     expect(body.models.map((model) => model.id)).toEqual([externalModelId])
   })
 
+  it("routes a native model only through the key's bound connection", async () => {
+    const otherId = "99999999-9999-9999-9999-999999999999"
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO ai_connections SELECT ?1,?1,name,providerType,enabled,authorizationStatus,credentialVersion,permissionVersion,credentialCiphertext,createdAt,updatedAt FROM ai_connections WHERE id=?2`,
+      ).bind(otherId, connectionId),
+      env.DB.prepare(
+        `INSERT INTO ai_models SELECT ?,upstreamModelId,displayName,capabilities,snapshotCredentialVersion,discoveredAt FROM ai_models WHERE connectionId=?`,
+      ).bind(otherId, connectionId),
+    ])
+    const key = await createAiKey([externalModelId])
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => sseUpstream(completedFrames))
+    try {
+      const response = await call("/api/ai/responses", {
+        body: { input: "hi", model: externalModelId, stream: false },
+        headers: { "x-api-key": key },
+      })
+      expect(response.status).toBe(200)
+      await response.text()
+      expect(
+        await env.DB.prepare("SELECT connectionId FROM ai_invocations").first(),
+      ).toEqual({ connectionId })
+      await env.DB.prepare("UPDATE ai_connections SET enabled=0 WHERE id=?")
+        .bind(connectionId)
+        .run()
+      const refused = await call("/api/ai/responses", {
+        body: { input: "hi", model: externalModelId },
+        headers: { "x-api-key": key },
+      })
+      expect(refused.status).toBe(403)
+      expect(fetch).toHaveBeenCalledTimes(1)
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
   it("rejects session and bearer carriers on the API-key surface", async () => {
     const session = await ownerSession()
     const withSession = await call("/api/ai/models", { cookie: session.cookie })
@@ -213,7 +251,7 @@ describe("AI invocation routes", () => {
     expect(unknown.status).toBe(401)
 
     // A key granted a different model cannot invoke this one.
-    const key = await createAiKey(["codex-main/other-model"])
+    const key = await createAiKey(["other-model"])
     const response = await call("/api/ai/responses", {
       body: { input: "hi", model: externalModelId },
       headers: { "x-api-key": key },
@@ -226,7 +264,7 @@ describe("AI invocation routes", () => {
   it("rejects an unknown model and an invalid body", async () => {
     const key = await createAiKey([externalModelId])
     const unknownModel = await call("/api/ai/responses", {
-      body: { input: "hi", model: "codex-main/not-in-catalog" },
+      body: { input: "hi", model: "not-in-catalog" },
       headers: { "x-api-key": key },
     })
     expect(unknownModel.status).toBe(403)
@@ -349,10 +387,7 @@ describe("AI invocation routes", () => {
   it("releases the slot and calls no upstream when the request never starts", async () => {
     const session = await ownerSession()
     const key = await createAiKey([externalModelId], session.cookie)
-    const ungrantedKey = await createAiKey(
-      ["codex-main/other-model"],
-      session.cookie,
-    )
+    const ungrantedKey = await createAiKey(["other-model"], session.cookie)
     const cases: {
       body?: unknown
       expected: number
@@ -369,7 +404,7 @@ describe("AI invocation routes", () => {
         key,
       },
       {
-        body: { input: "hi", model: "codex-main/not-in-catalog" },
+        body: { input: "hi", model: "not-in-catalog" },
         expected: 403,
         key,
       },
@@ -464,4 +499,210 @@ describe("AI invocation routes", () => {
     )
     expect(row?.status).toBe("reserved")
   })
+})
+
+it("returns structured JSON through the authenticated route with default max", async () => {
+  await env.DB.prepare(
+    "UPDATE ai_models SET capabilities=? WHERE connectionId=? AND upstreamModelId=?",
+  )
+    .bind(
+      JSON.stringify({
+        supportedInApi: true,
+        reasoningEfforts: ["max"],
+        structuredOutput: true,
+      }),
+      connectionId,
+      upstreamModelId,
+    )
+    .run()
+  const key = await createAiKey([upstreamModelId])
+  const format = {
+    type: "json_schema",
+    name: "echo_result",
+    schema: {
+      type: "object",
+      properties: { echo: { type: "string" } },
+      required: ["echo"],
+      additionalProperties: false,
+    },
+  }
+  const upstreamBodies: unknown[] = []
+  const fetch = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async (_input, init) => {
+      upstreamBodies.push(JSON.parse(String(init?.body)))
+      return sseUpstream([
+        sseFrame("response.completed", {
+          type: "response.completed",
+          response: {
+            status: "completed",
+            reasoning: { effort: "max" },
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: '{"echo":"hello"}' }],
+              },
+            ],
+            usage: { total_tokens: 12 },
+          },
+        }),
+      ])
+    })
+  try {
+    const response = await call("/api/ai/responses", {
+      headers: { "x-api-key": key },
+      body: {
+        model: upstreamModelId,
+        input: "Return JSON with echo=hello",
+        text: { format },
+        stream: false,
+      },
+    })
+    expect(response.status).toBe(200)
+    const body = await response.json<{
+      status: string
+      output: { content: { text: string }[] }[]
+    }>()
+    expect(body.status).toBe("completed")
+    expect(JSON.parse(body.output[0].content[0].text)).toEqual({
+      echo: "hello",
+    })
+    expect(upstreamBodies).toEqual([
+      expect.objectContaining({
+        model: upstreamModelId,
+        reasoning: { effort: "max" },
+        text: { format },
+      }),
+    ])
+    expect(
+      await env.DB.prepare("SELECT status, usage FROM ai_invocations").first(),
+    ).toEqual({ status: "succeeded", usage: '{"total_tokens":12}' })
+  } finally {
+    fetch.mockRestore()
+  }
+})
+
+it("completes a two-request tool round trip with returned reasoning history and default max", async () => {
+  await env.DB.prepare(
+    "UPDATE ai_models SET capabilities=? WHERE connectionId=? AND upstreamModelId=?",
+  )
+    .bind(
+      JSON.stringify({
+        supportedInApi: true,
+        reasoningEfforts: ["max"],
+        functionTools: true,
+      }),
+      connectionId,
+      upstreamModelId,
+    )
+    .run()
+  const key = await createAiKey([upstreamModelId])
+  const reasoning = {
+    type: "reasoning",
+    content: [{ type: "reasoning_text", text: "synthetic tool reasoning" }],
+  }
+  const toolCall = {
+    type: "function_call",
+    name: "test_echo",
+    call_id: "call_roundtrip",
+    arguments: '{"text":"hello"}',
+  }
+  const upstreamBodies: Record<string, unknown>[] = []
+  const fetch = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async (_input, init) => {
+      upstreamBodies.push(JSON.parse(String(init?.body)))
+      const output =
+        upstreamBodies.length === 1
+          ? [reasoning, toolCall]
+          : [
+              {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "hello" }],
+              },
+            ]
+      return sseUpstream([
+        sseFrame("response.completed", {
+          type: "response.completed",
+          response: {
+            status: "completed",
+            reasoning: { effort: "max" },
+            output,
+            usage: { total_tokens: 12 },
+          },
+        }),
+      ])
+    })
+  try {
+    const prompt = {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Call test_echo with text=hello" }],
+    }
+    const tools = [
+      {
+        type: "function",
+        name: "test_echo",
+        parameters: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          required: ["text"],
+          additionalProperties: false,
+        },
+      },
+    ]
+    const first = await call("/api/ai/responses", {
+      headers: { "x-api-key": key },
+      body: {
+        model: upstreamModelId,
+        input: [prompt],
+        stream: false,
+        tools,
+        tool_choice: { type: "function", name: "test_echo" },
+      },
+    })
+    expect(first.status).toBe(200)
+    const body = await first.json<{
+      output: [typeof reasoning, typeof toolCall]
+    }>()
+    expect(body.output).toEqual([reasoning, toolCall])
+    const [returnedReasoning, returnedCall] = body.output
+    const args = JSON.parse(returnedCall.arguments) as { text: string }
+    const input = [
+      prompt,
+      returnedReasoning,
+      returnedCall,
+      {
+        type: "function_call_output",
+        call_id: returnedCall.call_id,
+        output: JSON.stringify({ echo: args.text }),
+      },
+    ]
+    const second = await call("/api/ai/responses", {
+      headers: { "x-api-key": key },
+      body: { model: upstreamModelId, input, stream: false },
+    })
+    expect(second.status).toBe(200)
+    expect(await second.json()).toMatchObject({
+      status: "completed",
+      output: [{ type: "message", content: [{ text: "hello" }] }],
+    })
+    expect(upstreamBodies).toEqual([
+      expect.objectContaining({
+        input: [prompt],
+        tools,
+        tool_choice: { type: "function", name: "test_echo" },
+        reasoning: { effort: "max" },
+      }),
+      expect.objectContaining({ input, reasoning: { effort: "max" } }),
+    ])
+    expect(await reservedRowCount()).toBe(0)
+    expect(
+      (await env.DB.prepare("SELECT status FROM ai_invocations").all()).results,
+    ).toEqual([{ status: "succeeded" }, { status: "succeeded" }])
+  } finally {
+    fetch.mockRestore()
+  }
 })

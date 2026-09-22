@@ -25,6 +25,7 @@ const pending = computed(() =>
   </p>
   <fieldset
     v-if="session.data.value"
+    :key="session.data.value.session.id"
     :disabled="session.status.value !== 'authenticated'"
     :aria-busy="pending"
   >

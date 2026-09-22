@@ -4,8 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest"
 import {
   API_KEY_AI_OPERATIONS,
   apiKeyAiModelPermissionKey,
-  formatAiExternalModelId,
-  parseAiExternalModelId,
+  readAiKeyConnectionGrant,
 } from "../../src/shared/api-key"
 import {
   createAiConnection,
@@ -56,16 +55,14 @@ async function encryptPackage(): Promise<string> {
 
 async function createConnectedConnection(input: {
   id: string
-  slug: string
-  seed: string
+  name: string
 }): Promise<void> {
   const now = Date.now()
   const created = await createAiConnection(env.DB, {
     id: input.id,
-    name: input.slug,
+    name: input.name,
     now,
     providerType: "deepseek",
-    slug: input.slug,
   })
   expect(created).toMatchObject({ created: true })
   await env.DB.prepare(
@@ -130,68 +127,26 @@ beforeEach(async () => {
   ])
   await createConnectedConnection({
     id: connectionId,
-    seed: "1",
-    slug: "codex-main",
+    name: "Main",
   })
 })
 
 describe("AI model authorization", () => {
-  it("resolves selected external IDs against the exact catalog", async () => {
-    const resolved = await resolveAiModelSelection(env.DB, [
-      "codex-main/gpt-test",
-      "codex-main/openai/gpt-other",
+  it("resolves native IDs, including slashes, within the selected connection", async () => {
+    const resolved = await resolveAiModelSelection(env.DB, connectionId, [
+      "gpt-test",
+      "openai/gpt-other",
     ])
     expect(resolved).toEqual({
-      entries: [
-        {
-          connectionId,
-          permissionVersion: 0,
-          connectionSlug: "codex-main",
-          upstreamModelId: "gpt-test",
-        },
-        {
-          connectionId,
-          permissionVersion: 0,
-          connectionSlug: "codex-main",
-          upstreamModelId: "openai/gpt-other",
-        },
-      ],
       ok: true,
+      selection: {
+        connectionId,
+        permissionVersion: 0,
+        modelIds: ["gpt-test", "openai/gpt-other"],
+      },
     })
-  })
-
-  it("rejects duplicates, malformed IDs, and models outside the catalog", async () => {
-    await expect(
-      resolveAiModelSelection(env.DB, [
-        "codex-main/gpt-test",
-        "codex-main/gpt-test",
-      ]),
-    ).resolves.toEqual({ ok: false, reason: "duplicate-model" })
-    await expect(
-      resolveAiModelSelection(env.DB, ["codex-main/gpt-test".toUpperCase()]),
-    ).resolves.toEqual({ ok: false, reason: "unknown-model" })
-    await expect(
-      resolveAiModelSelection(env.DB, ["missing-connection/gpt-test"]),
-    ).resolves.toEqual({ ok: false, reason: "unknown-model" })
-    await expect(
-      resolveAiModelSelection(env.DB, ["codex-main/not-in-catalog"]),
-    ).resolves.toEqual({ ok: false, reason: "unknown-model" })
-    await expect(
-      resolveAiModelSelection(env.DB, ["no-slash"]),
-    ).resolves.toEqual({
-      ok: false,
-      reason: "unknown-model",
-    })
-  })
-
-  it("binds permissions to the connection UUID, sorted and deduplicated", async () => {
-    const resolved = await resolveAiModelSelection(env.DB, [
-      "codex-main/openai/gpt-other",
-      "codex-main/gpt-test",
-    ])
     if (!resolved.ok) throw new Error("resolution failed")
-    const permissions = buildAiKeyPermissions(resolved.entries)
-    expect(permissions).toEqual({
+    expect(buildAiKeyPermissions(resolved.selection)).toEqual({
       ai: [...API_KEY_AI_OPERATIONS],
       [apiKeyAiModelPermissionKey(connectionId)]: [
         "gpt-test",
@@ -200,7 +155,23 @@ describe("AI model authorization", () => {
     })
   })
 
-  it("requires both the invoke operation and the exact model grant", () => {
+  it("rejects duplicate, unknown and formerly prefixed model IDs", async () => {
+    await expect(
+      resolveAiModelSelection(env.DB, connectionId, ["gpt-test", "gpt-test"]),
+    ).resolves.toEqual({ ok: false, reason: "duplicate-model" })
+    for (const id of ["GPT-TEST", "codex-main/gpt-test", "not-in-catalog"]) {
+      await expect(
+        resolveAiModelSelection(env.DB, connectionId, [id]),
+      ).resolves.toEqual({ ok: false, reason: "unknown-model" })
+    }
+    for (const id of ["invalid-id", secondConnectionId]) {
+      await expect(
+        resolveAiModelSelection(env.DB, id, ["gpt-test"]),
+      ).resolves.toEqual({ ok: false, reason: "unknown-connection" })
+    }
+  })
+
+  it("requires invoke permission and the exact connection, version and model", () => {
     const permissions = {
       ai: ["invoke", "models:read"],
       [apiKeyAiModelPermissionKey(connectionId)]: ["gpt-test"],
@@ -215,11 +186,11 @@ describe("AI model authorization", () => {
       authorizeAiInvocation(permissions, secondConnectionId, "gpt-test"),
     ).toBe(false)
     expect(
+      authorizeAiInvocation(permissions, connectionId, "gpt-test", 1),
+    ).toBe(false)
+    expect(
       authorizeAiInvocation(
-        {
-          ai: ["models:read"],
-          [apiKeyAiModelPermissionKey(connectionId)]: ["gpt-test"],
-        },
+        { ...permissions, ai: ["models:read"] },
         connectionId,
         "gpt-test",
       ),
@@ -229,16 +200,14 @@ describe("AI model authorization", () => {
     expect(authorizeAiModelRead({ ai: ["invoke"] })).toBe(false)
   })
 
-  it("lists only grants that still exist in the current catalog", async () => {
+  it("lists only models in the bound connection even when another has the same IDs", async () => {
+    await createConnectedConnection({ id: secondConnectionId, name: "Main" })
     const permissions = {
       ai: ["invoke", "models:read"],
       [apiKeyAiModelPermissionKey(connectionId)]: ["gpt-test", "retired-model"],
-      [apiKeyAiModelPermissionKey(secondConnectionId)]: ["gpt-test"],
     }
     const models = await listAiAuthorizedModels(env.DB, permissions)
-    expect(models.map((model) => model.externalModelId)).toEqual([
-      "codex-main/gpt-test",
-    ])
+    expect(models.map((model) => model.upstreamModelId)).toEqual(["gpt-test"])
     expect(models[0]).toMatchObject({
       capabilities: { reasoningEfforts: ["low", "max"] },
       connectionId,
@@ -246,47 +215,64 @@ describe("AI model authorization", () => {
     })
   })
 
-  it("keeps a stale slug grant dead after the connection is recreated", async () => {
+  it("rejects ambiguous old multi-connection grants instead of selecting an upstream", async () => {
+    await createConnectedConnection({ id: secondConnectionId, name: "Other" })
     const permissions = {
-      ai: ["invoke"],
+      ai: ["invoke", "models:read"],
+      [apiKeyAiModelPermissionKey(connectionId)]: ["gpt-test"],
       [apiKeyAiModelPermissionKey(secondConnectionId)]: ["gpt-test"],
     }
-    // The old connection is deleted, then a new one reuses its slug with a
-    // different UUID.
-    const deleted = await deleteAiConnection(env.DB, { id: connectionId })
-    expect(deleted).toMatchObject({ deleted: true })
-    await createConnectedConnection({
-      id: secondConnectionId,
-      seed: "2",
-      slug: "codex-main",
-    })
-    const models = await listAiAuthorizedModels(env.DB, permissions)
-    expect(models.map((model) => model.externalModelId)).toEqual([
-      "codex-main/gpt-test",
-    ])
-    // The old UUID grant never resolves against the recreated slug.
-    const resolved = await resolveAiModelSelection(env.DB, [
-      "codex-main/gpt-test",
-    ])
-    expect(resolved).toMatchObject({ ok: true })
-    if (!resolved.ok) throw new Error("resolution failed")
-    expect(resolved.entries[0]?.connectionId).toBe(secondConnectionId)
+    expect(readAiKeyConnectionGrant(permissions)).toBeNull()
+    expect(authorizeAiInvocation(permissions, connectionId, "gpt-test")).toBe(
+      false,
+    )
+    expect(await listAiAuthorizedModels(env.DB, permissions)).toEqual([])
   })
 
-  it("parses external model IDs without normalizing the upstream part", () => {
-    expect(parseAiExternalModelId("codex-main/gpt-test")).toEqual({
-      connectionSlug: "codex-main",
-      upstreamModelId: "gpt-test",
-    })
-    expect(parseAiExternalModelId("codex-main/openai/gpt-other")).toEqual({
-      connectionSlug: "codex-main",
-      upstreamModelId: "openai/gpt-other",
-    })
-    expect(parseAiExternalModelId("/gpt-test")).toBeNull()
-    expect(parseAiExternalModelId("codex-main/")).toBeNull()
-    expect(parseAiExternalModelId("codex-main")).toBeNull()
-    expect(formatAiExternalModelId("codex-main", "GPT-Test")).toBe(
-      "codex-main/GPT-Test",
+  it("never revives a deleted connection grant when its name and models are reused", async () => {
+    const permissions = {
+      ai: ["invoke"],
+      [apiKeyAiModelPermissionKey(connectionId)]: ["gpt-test"],
+    }
+    expect(
+      await deleteAiConnection(env.DB, { id: connectionId }),
+    ).toMatchObject({ deleted: true })
+    await createConnectedConnection({ id: secondConnectionId, name: "Main" })
+    expect(await listAiAuthorizedModels(env.DB, permissions)).toEqual([])
+    expect(
+      authorizeAiInvocation(permissions, secondConnectionId, "gpt-test"),
+    ).toBe(false)
+  })
+
+  it("retains the connection binding when all models are revoked, even while disconnected", async () => {
+    await env.DB.prepare(
+      "UPDATE ai_connections SET authorizationStatus='never_authorized', credentialCiphertext=NULL WHERE id=?",
     )
+      .bind(connectionId)
+      .run()
+    const resolved = await resolveAiModelSelection(env.DB, connectionId, [])
+    if (!resolved.ok) throw new Error("resolution failed")
+    const permissions = buildAiKeyPermissions(resolved.selection)
+    expect(readAiKeyConnectionGrant(permissions)).toEqual({
+      connectionId,
+      permissionVersion: 0,
+      modelIds: [],
+    })
+    expect(authorizeAiInvocation(permissions, connectionId, "gpt-test")).toBe(
+      false,
+    )
+    expect(await listAiAuthorizedModels(env.DB, permissions)).toEqual([])
+  })
+
+  it("rejects malformed permission scopes", () => {
+    for (const scope of [
+      `ai-model:${connectionId}`,
+      `ai-model:${connectionId}:-1`,
+      `ai-model:${connectionId}:01`,
+      `ai-model:${connectionId}:0:1`,
+    ]) {
+      expect(readAiKeyConnectionGrant({ [scope]: ["gpt-test"] })).toBeNull()
+    }
+    expect(readAiKeyConnectionGrant({ ai: ["invoke"] })).toBeNull()
   })
 })

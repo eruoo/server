@@ -23,6 +23,7 @@ export function createSessionController() {
   let generation = 0
   let current: Promise<void> | undefined
   let lastChecked = 0
+  let hiddenAt: number | undefined
 
   function captureCredentialFailureHandler() {
     const ownGeneration = generation
@@ -50,7 +51,7 @@ export function createSessionController() {
     }
   }
 
-  function refresh(force = false): Promise<void> {
+  function refresh(force = false, background = false): Promise<void> {
     if (status.value === "authenticating" || status.value === "signing-out")
       return Promise.resolve()
     if (current) return current
@@ -58,7 +59,8 @@ export function createSessionController() {
       return Promise.resolve()
     const ownGeneration = generation
     const handleCredentialFailure = captureCredentialFailureHandler()
-    status.value = data.value ? "refreshing" : "checking"
+    if (!background || !data.value)
+      status.value = data.value ? "refreshing" : "checking"
     current = (async () => {
       try {
         const result = await requestJson<SessionData | null>(
@@ -72,13 +74,27 @@ export function createSessionController() {
       } catch (error) {
         if (ownGeneration !== generation) return
         if (handleCredentialFailure(error)) return
-        status.value = "unavailable"
+        status.value =
+          background && data.value ? "authenticated" : "unavailable"
         message.value = "暂时无法确认登录状态，请重试。"
       } finally {
         if (ownGeneration === generation) current = undefined
       }
     })()
     return current
+  }
+
+  /** Brief window/Space switches keep the current UI; long absences recheck quietly. */
+  function visibilityChanged(visible: boolean): Promise<void> {
+    if (!visible) {
+      hiddenAt ??= Date.now()
+      return Promise.resolve()
+    }
+    const leftAt = hiddenAt
+    hiddenAt = undefined
+    if (leftAt === undefined || Date.now() - leftAt < 5 * 60_000)
+      return Promise.resolve()
+    return refresh(false, true)
   }
 
   function invalidate() {
@@ -179,6 +195,7 @@ export function createSessionController() {
     data: readonly(data),
     message: readonly(message),
     refresh,
+    visibilityChanged,
     signIn,
     signInPasskey,
     signOut,

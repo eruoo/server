@@ -105,16 +105,16 @@ describe("AI management routes", () => {
     expect(providerBody.providers[0]?.providerType).toBe("deepseek")
 
     const created = await call("/api/ai/connections", {
-      body: { name: "Main", slug: "codex-main" },
+      body: { name: "Main" },
       cookie: session.cookie,
     })
     expect(created.status).toBe(200)
     const createdBody = await created.json<{
-      connection: { authorizationStatus: string; id: string; slug: string }
+      connection: { authorizationStatus: string; id: string; name: string }
     }>()
     expect(createdBody.connection).toMatchObject({
       authorizationStatus: "never_authorized",
-      slug: "codex-main",
+      name: "Main",
     })
     const connectionId = createdBody.connection.id
 
@@ -136,13 +136,6 @@ describe("AI management routes", () => {
     ).first<{ metadata: string }>()
     expect(event).not.toBeNull()
     expect(event?.metadata).not.toContain("synthetic-deepseek-key")
-
-    // The slug is unique: a second create with the same slug is rejected.
-    const duplicate = await call("/api/ai/connections", {
-      body: { name: "Other", slug: "codex-main" },
-      cookie: session.cookie,
-    })
-    expect(duplicate.status).toBe(422)
 
     const listed = await call("/api/ai/connections", { cookie: session.cookie })
     const listedBody = await listed.json<{
@@ -238,7 +231,7 @@ describe("AI management routes", () => {
       const fetch = vi.spyOn(globalThis, "fetch")
       const connectionId = "11111111-1111-4111-8111-111111111111"
       for (const [method, path, body] of [
-        ["POST", "/api/ai/connections", { name: "Rejected", slug: "rejected" }],
+        ["POST", "/api/ai/connections", { name: "Rejected" }],
         ["PATCH", `/api/ai/connections/${connectionId}`, { name: "Rejected" }],
         ["DELETE", `/api/ai/connections/${connectionId}`, undefined],
         ["POST", `/api/ai/connections/${connectionId}/disconnect`, undefined],
@@ -273,7 +266,7 @@ describe("AI management routes", () => {
     const context = createExecutionContext()
     const noOrigin = await worker.fetch(
       new Request(`${env.APP_ORIGIN}/api/ai/connections`, {
-        body: JSON.stringify({ name: "Main", slug: "codex-main" }),
+        body: JSON.stringify({ name: "Main" }),
         headers: {
           "cf-connecting-ip": `ai-management-${++sequence}`,
           "content-type": "application/json",
@@ -288,7 +281,7 @@ describe("AI management routes", () => {
     expect(noOrigin.status).toBe(403)
 
     const crossOrigin = await call("/api/ai/connections", {
-      body: { name: "Main", slug: "codex-main" },
+      body: { name: "Main" },
       cookie: session.cookie,
       headers: { origin: "https://sibling.eruoo.me" },
     })
@@ -296,7 +289,7 @@ describe("AI management routes", () => {
 
     // The general 1 MiB management bound applies to this entry.
     const oversized = await call("/api/ai/connections", {
-      body: { name: "x".repeat(1_048_576), slug: "codex-main" },
+      body: { name: "x".repeat(1_048_576) },
       cookie: session.cookie,
     })
     expect(oversized.status).toBe(413)
@@ -310,7 +303,7 @@ describe("AI management routes", () => {
     })
     expect(invalidSlug.status).toBe(422)
     const unknownField = await call("/api/ai/connections", {
-      body: { name: "Main", slug: "codex-main", providerType: "other" },
+      body: { name: "Main", providerType: "other" },
       cookie: session.cookie,
     })
     expect(unknownField.status).toBe(422)
@@ -336,4 +329,89 @@ describe("AI management routes", () => {
     )
     expect(badCursor.status).toBe(422)
   })
+})
+
+it("allows model discovery with an older valid session but protects caller-key grants", async () => {
+  const session = await ownerSession()
+  const created = await call("/api/ai/connections", {
+    cookie: session.cookie,
+    body: { name: "Session acceptance" },
+  })
+  expect(created.status).toBe(200)
+  const { connection } = await created.json<{ connection: { id: string } }>()
+  const saved = await call(`/api/ai/connections/${connection.id}/credential`, {
+    cookie: session.cookie,
+    method: "PUT",
+    body: { apiKey: "synthetic-session-test", expectedVersion: 0 },
+  })
+  expect(saved.status).toBe(200)
+  const oldAuth = new Date(Date.now() - 20 * 60_000).toISOString()
+  await env.DB.prepare("UPDATE session SET reauthenticatedAt=? WHERE id=?")
+    .bind(oldAuth, session.id)
+    .run()
+  const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    Response.json({
+      data: [{ id: "deepseek-flash", object: "model", owned_by: "deepseek" }],
+    }),
+  )
+  const discovered = await call(
+    `/api/ai/connections/${connection.id}/models/refresh`,
+    { cookie: session.cookie, method: "POST" },
+  )
+  expect(discovered.status).toBe(200)
+  expect(await discovered.json()).toEqual({
+    modelCount: 1,
+    status: "committed",
+  })
+  expect(fetch).toHaveBeenCalledTimes(1)
+  const body = {
+    name: "session-boundary",
+    purpose: "ai",
+    connectionId: connection.id,
+    modelIds: ["deepseek-flash"],
+  }
+  const staleCreate = await call("/api/auth/api-key/create", {
+    cookie: session.cookie,
+    body,
+  })
+  expect(staleCreate.status).toBe(403)
+  expect(await staleCreate.json()).toMatchObject({
+    type: "https://auth.eruoo.me/problems/recent-authentication-required",
+  })
+  await env.DB.prepare("UPDATE session SET reauthenticatedAt=? WHERE id=?")
+    .bind(new Date().toISOString(), session.id)
+    .run()
+  const freshCreate = await call("/api/auth/api-key/create", {
+    cookie: session.cookie,
+    body,
+  })
+  expect(freshCreate.status).toBe(200)
+  const key = await freshCreate.json<{ id: string }>()
+  const before = await env.DB.prepare(
+    "SELECT permissions FROM apikey WHERE id=?",
+  )
+    .bind(key.id)
+    .first()
+  await env.DB.prepare("UPDATE session SET reauthenticatedAt=? WHERE id=?")
+    .bind(oldAuth, session.id)
+    .run()
+  const staleUpdate = await call("/api/auth/api-key/update", {
+    cookie: session.cookie,
+    body: {
+      configId: "ai",
+      keyId: key.id,
+      name: body.name,
+      connectionId: connection.id,
+      modelIds: [],
+    },
+  })
+  expect(staleUpdate.status).toBe(403)
+  expect(await staleUpdate.json()).toMatchObject({
+    type: "https://auth.eruoo.me/problems/recent-authentication-required",
+  })
+  expect(
+    await env.DB.prepare("SELECT permissions FROM apikey WHERE id=?")
+      .bind(key.id)
+      .first(),
+  ).toEqual(before)
 })

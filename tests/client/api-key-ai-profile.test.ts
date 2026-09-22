@@ -49,7 +49,6 @@ const connection = {
   ],
   name: "Main",
   providerType: "deepseek",
-  slug: "codex-main",
   updatedAt: 1,
 }
 
@@ -187,7 +186,7 @@ it("does not interleave a second profile switch while one is loading", async () 
   expect(statusTab()?.attributes("disabled")).toBeUndefined()
 })
 
-it("keeps the grant draft verbatim and parses it when saving", async () => {
+it("revokes all models while retaining the selected connection", async () => {
   vi.mocked(listAiConnections).mockResolvedValue([connection] as never)
   const key = {
     configId: "ai",
@@ -208,29 +207,18 @@ it("keeps the grant draft verbatim and parses it when saving", async () => {
   await aiTab(wrapper)?.trigger("click")
   await flushPromises()
 
-  const grant = wrapper.get('[data-testid="key-grant"]')
-  await grant.setValue("codex-main/gpt-test,")
-  // A typed separator is part of the draft, not something to normalise away.
-  expect((grant.element as HTMLInputElement).value).toBe("codex-main/gpt-test,")
-  await grant.setValue("codex-main/gpt-test, codex-main/other-model")
-  const save = () =>
-    wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("保存模型许可"))
-  await save()?.trigger("click")
-  await flushPromises()
-  expect(updateAiKeyModelGrants).toHaveBeenCalledWith("ai-key-id", "ai probe", [
-    "codex-main/gpt-test",
-    "codex-main/other-model",
-  ])
-
-  // Clearing the field and saving still means: revoke every model grant.
-  await grant.setValue("")
-  await save()?.trigger("click")
+  const grant = wrapper.get('li input[type="checkbox"]')
+  expect((grant.element as HTMLInputElement).checked).toBe(true)
+  await grant.setValue(false)
+  const save = wrapper
+    .findAll("button")
+    .find((button) => button.text().includes("保存模型许可"))
+  await save?.trigger("click")
   await flushPromises()
   expect(updateAiKeyModelGrants).toHaveBeenLastCalledWith(
     "ai-key-id",
     "ai probe",
+    connection.id,
     [],
   )
 })
@@ -264,11 +252,12 @@ it("creates an ai key with the selected model grants", async () => {
     "ai",
   )
 
-  // The grant picker lists the catalog's external model IDs and gates create.
+  // The owner selects a connection before choosing its native model IDs.
   const createButton = wrapper
     .findAll("button")
     .find((button) => button.text().includes("创建密钥"))
   expect(createButton?.attributes("disabled")).toBeDefined()
+  await wrapper.get('[data-testid="key-connection"]').setValue(connection.id)
   const checkbox = wrapper.get(
     '[data-testid="ai-model-grants"] input[type="checkbox"]',
   )
@@ -285,7 +274,8 @@ it("creates an ai key with the selected model grants", async () => {
   expect(createApiKeyForProfile).toHaveBeenCalledWith(
     expect.objectContaining({
       configId: "ai",
-      modelIds: ["codex-main/gpt-test"],
+      connectionId: connection.id,
+      modelIds: ["gpt-test"],
     }),
   )
   expect(
@@ -293,8 +283,13 @@ it("creates an ai key with the selected model grants", async () => {
   ).toBe("eruoo_ai_secret")
 })
 
-it("saves a replacement model grant for an existing ai key", async () => {
-  vi.mocked(listAiConnections).mockResolvedValue([connection] as never)
+it("requires model selection again when switching an existing key to a connection with the same models", async () => {
+  const other = {
+    ...connection,
+    id: "99999999-9999-9999-9999-999999999999",
+    name: "Other",
+  }
+  vi.mocked(listAiConnections).mockResolvedValue([connection, other] as never)
   const key = {
     configId: "ai",
     expiresAt: null,
@@ -318,20 +313,22 @@ it("saves a replacement model grant for an existing ai key", async () => {
   await aiTab?.trigger("click")
   await flushPromises()
 
-  // The stored grant is shown, edited, and replaced wholesale.
-  const grantInput = wrapper.get('[data-testid="key-grant"]')
-  expect((grantInput.element as HTMLInputElement).value).toBe(
-    "codex-main/gpt-test",
-  )
-  await grantInput.setValue("codex-main/gpt-test, codex-main/other-model")
+  const select = wrapper.get('li [data-testid="key-connection"]')
+  const checkbox = () => wrapper.get('li input[type="checkbox"]')
+  expect((select.element as HTMLSelectElement).value).toBe(connection.id)
+  expect((checkbox().element as HTMLInputElement).checked).toBe(true)
+  await select.setValue(other.id)
+  expect((checkbox().element as HTMLInputElement).checked).toBe(false)
+  await checkbox().setValue(true)
   const save = wrapper
     .findAll("button")
     .find((button) => button.text().includes("保存模型许可"))
   await save?.trigger("click")
   await flushPromises()
-  // The update contract always carries the key name alongside the grants.
-  expect(updateAiKeyModelGrants).toHaveBeenCalledWith("ai-key-id", "ai probe", [
-    "codex-main/gpt-test",
-    "codex-main/other-model",
-  ])
+  expect(updateAiKeyModelGrants).toHaveBeenCalledWith(
+    "ai-key-id",
+    "ai probe",
+    other.id,
+    ["gpt-test"],
+  )
 })

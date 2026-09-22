@@ -82,7 +82,6 @@ beforeEach(async () => {
   await createAiConnection(env.DB, {
     id: connectionId,
     name: "DeepSeek",
-    slug: "main",
     providerType: "deepseek",
     now: Date.now(),
   })
@@ -181,11 +180,11 @@ describe("DeepSeek credentials and permissions", () => {
       modelsResponse(),
     )
     await discover()
-    const selected = await resolveAiModelSelection(env.DB, [
-      "main/deepseek-flash",
+    const selected = await resolveAiModelSelection(env.DB, connectionId, [
+      "deepseek-flash",
     ])
     if (!selected.ok) throw new Error("Expected selectable model")
-    const grants = buildAiKeyPermissions(selected.entries)
+    const grants = buildAiKeyPermissions(selected.selection)
     expect(await listAiAuthorizedModels(env.DB, grants)).toHaveLength(1)
     expect(await save("replacement", 1)).toBe("saved")
     expect(await listAiAuthorizedModels(env.DB, grants)).toHaveLength(0)
@@ -195,14 +194,14 @@ describe("DeepSeek credentials and permissions", () => {
     expect(await save("third-key", 3)).toBe("saved")
     await discover()
     expect(await listAiAuthorizedModels(env.DB, grants)).toHaveLength(0)
-    const current = await resolveAiModelSelection(env.DB, [
-      "main/deepseek-flash",
+    const current = await resolveAiModelSelection(env.DB, connectionId, [
+      "deepseek-flash",
     ])
     if (!current.ok) throw new Error("Expected selectable model")
     expect(
       await listAiAuthorizedModels(
         env.DB,
-        buildAiKeyPermissions(current.entries),
+        buildAiKeyPermissions(current.selection),
       ),
     ).toHaveLength(1)
   })
@@ -240,7 +239,9 @@ describe("DeepSeek discovery and capability contract", () => {
       new Headers(fetch.mock.calls[0][1]?.headers).get("authorization"),
     ).toBe("Bearer synthetic-first-key")
     expect(
-      await resolveAiModelSelection(env.DB, ["main/unknown-future-model"]),
+      await resolveAiModelSelection(env.DB, connectionId, [
+        "unknown-future-model",
+      ]),
     ).toMatchObject({ ok: false })
     expect(deepSeekModelCapabilities("deepseek-flash")).toMatchObject({
       vision: true,
@@ -302,7 +303,7 @@ describe("DeepSeek discovery and capability contract", () => {
   })
   it("allows multimodal requests with max effort only for the confirmed vision model", () => {
     const request = {
-      model: "main/deepseek-flash",
+      model: "deepseek-flash",
       reasoning: { effort: "max" },
       input: [
         {
@@ -360,7 +361,7 @@ describe("DeepSeek discovery and capability contract", () => {
     ]) {
       expect(
         validateResponsesRequest({
-          model: "main/deepseek-flash",
+          model: "deepseek-flash",
           input: "hello",
           ...extra,
         }).ok,

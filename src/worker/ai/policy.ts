@@ -70,22 +70,6 @@ export function isAiServerIdentifier(value: string): boolean {
 }
 
 /**
- * Connection slugs are immutable and unique among existing connections:
- * 1–64 lowercase ASCII letters or digits with single hyphens as separators,
- * no leading, trailing, or consecutive hyphens.
- */
-const AI_CONNECTION_SLUG_MAX_LENGTH = 64
-const aiConnectionSlugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
-
-export function isAiConnectionSlug(value: string): boolean {
-  return (
-    value.length >= 1 &&
-    value.length <= AI_CONNECTION_SLUG_MAX_LENGTH &&
-    aiConnectionSlugPattern.test(value)
-  )
-}
-
-/**
  * The credential package (static API key) is stored as one AES-256-GCM ciphertext. Application code caps
  * the serialized envelope at 4096 characters to keep the stored value
  * bounded; the envelope validator and every storage write enforce the same

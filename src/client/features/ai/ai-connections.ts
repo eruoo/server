@@ -15,7 +15,6 @@ export interface AiConnection {
   models: AiConnectionModel[]
   name: string
   providerType: string
-  slug: string
   updatedAt: number
 }
 export interface AiProviderDefinition {
@@ -88,14 +87,11 @@ export async function listAiProviders(
   return body.providers
 }
 
-export async function createAiConnection(
-  slug: string,
-  name: string,
-): Promise<AiConnection> {
+export async function createAiConnection(name: string): Promise<AiConnection> {
   const body = await requestJson<{ connection: AiConnection }>(
     "/api/ai/connections",
     {
-      body: JSON.stringify({ name, slug }),
+      body: JSON.stringify({ name }),
       headers: { "content-type": "application/json" },
       method: "POST",
     },

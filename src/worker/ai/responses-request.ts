@@ -196,7 +196,7 @@ const responsesRequestBodySchema = z
     max_output_tokens: z.number().int().positive().max(393216).optional(),
     model: z.string().min(1).meta({
       description:
-        "The external model identifier (connection slug / model id).",
+        "The native upstream model ID within this caller key's bound connection.",
     }),
     parallel_tool_calls: z
       .literal(true)

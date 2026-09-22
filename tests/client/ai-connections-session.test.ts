@@ -49,7 +49,6 @@ async function mountConnections(
           connections: [
             {
               id: connectionId,
-              slug: "main",
               name: "Main",
               enabled: true,
               authorizationStatus: "never_authorized",
@@ -187,3 +186,66 @@ it("does not start discovery from a late save success in another owner session",
     wrapper.unmount()
   }
 })
+
+it.each(["unchanged", "unavailable", "expired", "replaced"] as const)(
+  "keeps input usable during background checks and handles a %s session",
+  async (result) => {
+    const responses: Record<string, () => Response | Promise<Response>> = {}
+    const { wrapper, session } = await mountConnections(responses)
+    try {
+      await wrapper.get('input[type="password"]').setValue("unsaved-key")
+      let finish!: (response: Response) => void
+      responses["/api/auth/get-session"] = () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+      await session.visibilityChanged(false)
+      vi.advanceTimersByTime(5 * 60_000)
+      const checking = session.visibilityChanged(true)
+      await flushPromises()
+      const input = wrapper.get('input[type="password"]')
+        .element as HTMLInputElement
+      expect(input.value).toBe("unsaved-key")
+      expect(input.matches(":disabled")).toBe(false)
+      expect(session.status.value).toBe("authenticated")
+      finish(
+        result === "unavailable"
+          ? rejection(503, "service-unavailable")
+          : Response.json(
+              result === "expired"
+                ? null
+                : {
+                    session: {
+                      id:
+                        result === "replaced"
+                          ? "new-session"
+                          : "original-session",
+                      userId: "owner",
+                    },
+                    user: { id: "owner", name: "Owner" },
+                  },
+            ),
+      )
+      await checking
+      await flushPromises()
+      const nextInput = wrapper.find('input[type="password"]')
+      expect(nextInput.exists()).toBe(result !== "expired")
+      expect(session.status.value).toBe(
+        result === "expired" ? "anonymous" : "authenticated",
+      )
+      expect(
+        (wrapper.element as Element).querySelector<HTMLInputElement>(
+          'input[type="password"]',
+        )?.value,
+      ).toBe(
+        result === "expired"
+          ? undefined
+          : result === "replaced"
+            ? ""
+            : "unsaved-key",
+      )
+    } finally {
+      wrapper.unmount()
+    }
+  },
+)

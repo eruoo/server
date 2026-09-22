@@ -79,7 +79,6 @@ async function createConnectedConnection(): Promise<void> {
     name: "Main",
     now,
     providerType: "deepseek",
-    slug: "deepseek-main",
   })
   expect(created).toMatchObject({ created: true })
   await env.DB.prepare(
@@ -226,7 +225,7 @@ function requestBody(
 ): ResponsesRequestBody {
   return {
     input: "hello",
-    model: "deepseek-main/deepseek-flash",
+    model: "deepseek-flash",
     stream: true,
     ...overrides,
   }
@@ -980,3 +979,58 @@ it.each([true, false])(
     )
   },
 )
+
+it("forwards structured output and complete reasoning/tool history with default max", async () => {
+  await createConnectedConnection()
+  const startedAt = Date.now()
+  await reserve({ startedAt, deadlineAt: startedAt + 60000 })
+  const request = requestBody({
+    stream: false,
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Call echo" }],
+      },
+      {
+        type: "reasoning",
+        content: [{ type: "reasoning_text", text: "synthetic thought" }],
+      },
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "echo",
+        arguments: '{"text":"hello"}',
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_1",
+        output: '{"echo":"hello"}',
+      },
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "echo_result",
+        schema: {
+          type: "object",
+          properties: { echo: { type: "string" } },
+          required: ["echo"],
+          additionalProperties: false,
+        },
+      },
+    },
+  })
+  const mock = installUpstreamMock({
+    responses: () => sseUpstream(completedFrames),
+  })
+  const delivery = await invoke({ request })
+  expect(delivery.response.status).toBe(200)
+  await delivery.response.text()
+  await delivery.settled
+  expect(mock.calls[0].body).toMatchObject({
+    input: request.input,
+    text: request.text,
+    reasoning: { effort: "max" },
+  })
+})
