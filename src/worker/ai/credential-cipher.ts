@@ -18,7 +18,7 @@ import { AI_CREDENTIAL_CIPHERTEXT_MAX_LENGTH } from "./policy"
  * need it, never module initialization or the identity stack.
  */
 
-export type AiCipherPurpose = "credential-package" | "device-grant"
+export type AiCipherPurpose = "credential-package"
 
 export interface AiCipherAdditionalData {
   connectionId: string

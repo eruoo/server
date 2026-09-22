@@ -32,6 +32,10 @@ const invocationAdmissionSql = await readFile(
   path.resolve("migrations/0003_invocation_admission.sql"),
   "utf8",
 )
+const deepSeekSql = await readFile(
+  path.resolve("migrations/0004_deepseek_api.sql"),
+  "utf8",
+)
 const repositoryMigrations = [
   { name: "0001_foundation.sql", sql: foundationSql },
 ] as const
@@ -39,6 +43,7 @@ const fullRepositoryMigrations = [
   { name: "0001_foundation.sql", sql: foundationSql },
   { name: "0002_ai_service.sql", sql: aiServiceSql },
   { name: "0003_invocation_admission.sql", sql: invocationAdmissionSql },
+  { name: "0004_deepseek_api.sql", sql: deepSeekSql },
 ] as const
 
 function descriptor() {
@@ -851,4 +856,91 @@ describe("AI-era restore planning", () => {
       }
     },
   )
+})
+
+describe("DeepSeek reset and restore", () => {
+  it("drops all legacy AI state and AI caller keys while preserving identity and other keys", () => {
+    const database = new DatabaseSync(":memory:")
+    try {
+      database.exec("PRAGMA foreign_keys=ON")
+      database.exec(foundationSql)
+      database.exec(aiServiceSql)
+      database.exec(invocationAdmissionSql)
+      database.exec(aiAdmissionSeedSql)
+      database.exec(`INSERT INTO user (id,name,email,emailVerified,createdAt,updatedAt) VALUES ('owner','Owner','owner@example.invalid',1,1,1);
+        INSERT INTO session (id,expiresAt,token,createdAt,updatedAt,userId,reauthenticatedAt) VALUES ('session',9999999999999,'synthetic',1,1,'owner',1);
+        INSERT INTO apikey (id,configId,referenceId,key,createdAt,updatedAt) VALUES ('ai-key','ai','owner','synthetic-ai',1,1),('app-key','default','owner','synthetic-app',1,1);`)
+      database.exec(deepSeekSql)
+      for (const table of ["ai_connections", "ai_models", "ai_invocations"]) {
+        expect(
+          database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get(),
+        ).toEqual({ count: 0 })
+      }
+      expect(
+        database
+          .prepare(
+            "SELECT name FROM sqlite_schema WHERE name='ai_authorization_sessions'",
+          )
+          .get(),
+      ).toBeUndefined()
+      expect(database.prepare("SELECT id FROM user").all()).toEqual([
+        { id: "owner" },
+      ])
+      expect(database.prepare("SELECT id FROM session").all()).toEqual([
+        { id: "session" },
+      ])
+      expect(database.prepare("SELECT id FROM apikey").all()).toEqual([
+        { id: "app-key" },
+      ])
+    } finally {
+      database.close()
+    }
+  })
+
+  it("inspects and scrubs a DeepSeek snapshot without the removed authorization table", async () => {
+    const database = new DatabaseSync(":memory:")
+    try {
+      for (const migration of fullRepositoryMigrations)
+        database.exec(migration.sql)
+      const schema = (
+        database
+          .prepare(
+            "SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name LIKE 'ai!_%' ESCAPE '!' ORDER BY type DESC,name",
+          )
+          .all() as { sql: string }[]
+      )
+        .map((row) => row.sql + ";")
+        .join("\n")
+      const seed = `INSERT INTO ai_connections VALUES ('${connectedConnectionId}','main','DeepSeek','deepseek',1,'connected',2,4,'synthetic-ciphertext',1800000000000,1800000000000);`
+      const ledger = `${aiAdmissionLedgerSql}\nINSERT INTO d1_migrations (id,name,applied_at) VALUES (4,'0004_deepseek_api.sql','2026-09-22 00:00:00');`
+      const snapshot = await writeSql(await createDump(seed, ledger, schema))
+      const inspection = await inspectBackupSql(
+        snapshot,
+        fullRepositoryMigrations,
+      )
+      expect(inspection).toMatchObject({
+        hasAiApplicationTables: true,
+        hasLegacyAiAuthorizationSessions: false,
+        migration: { count: 4 },
+      })
+      database.exec(seed)
+      const scrub = createCredentialScrubSql(inspection)
+      expect(scrub).not.toContain("ai_authorization_sessions")
+      database.exec(scrub)
+      expect(
+        database
+          .prepare(
+            "SELECT credentialCiphertext,credentialVersion,permissionVersion,authorizationStatus FROM ai_connections",
+          )
+          .get(),
+      ).toEqual({
+        credentialCiphertext: null,
+        credentialVersion: 3,
+        permissionVersion: 5,
+        authorizationStatus: "reauthentication_required",
+      })
+    } finally {
+      database.close()
+    }
+  })
 })

@@ -1,21 +1,6 @@
 import { z } from "zod"
 
-/**
- * Strict request subset for the Responses-style AI invocation contract.
- *
- * docs/specs/ai-service.md §6.2 defines exactly which fields this service
- * accepts. Every unknown or unsupported field — including the SDK defaults
- * `temperature`, `max_output_tokens`, and `metadata`, which the Codex
- * reference removed or never supported — is rejected with a validation
- * failure instead of being silently dropped. Model-level capability checks
- * (reasoning efforts, structured output availability) are the caller's
- * responsibility in the invocation chain; this module only validates the
- * wire shape.
- *
- * The schemas stay composable so the route layer can reuse them for the
- * generated OpenAPI contract.
- */
-
+/** Strict DeepSeek Responses subset. Unsupported semantics fail locally with 422. */
 function base64DataUrlImage(value: string): boolean {
   const match =
     /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]*)$/.exec(value)
@@ -69,7 +54,7 @@ const messageInputItem = z
       .array(messageContentPart)
       .min(1)
       .meta({ description: "Message content parts." }),
-    role: z.enum(["system", "developer", "user", "assistant"]).meta({
+    role: z.enum(["system", "user", "assistant"]).meta({
       description: "The conversation role of this message.",
     }),
     type: z.literal("message"),
@@ -85,7 +70,12 @@ const functionCallInputItem = z
       .string()
       .min(1)
       .meta({ description: "The call identifier this item belongs to." }),
-    name: z.string().min(1).meta({ description: "The function name." }),
+    name: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .meta({ description: "The function name." }),
     type: z.literal("function_call"),
   })
   .strict()
@@ -103,27 +93,17 @@ const functionCallOutputInputItem = z
   })
   .strict()
 
-const reasoningSummaryText = z
-  .object({
-    text: z.string().meta({ description: "The summary text." }),
-    type: z.literal("summary_text"),
-  })
-  .strict()
-
 const reasoningInputItem = z
   .object({
-    encrypted_content: z.string().optional().meta({
-      description: "Opaque reasoning state returned by a previous response.",
-    }),
-    id: z
-      .string()
-      .optional()
-      .meta({ description: "The reasoning item identifier." }),
-    summary: z
-      .array(reasoningSummaryText)
-      .optional()
-      .meta({ description: "Reasoning summaries." }),
+    id: z.string().optional(),
     type: z.literal("reasoning"),
+    content: z
+      .array(
+        z
+          .object({ type: z.literal("reasoning_text"), text: z.string() })
+          .strict(),
+      )
+      .min(1),
   })
   .strict()
 
@@ -140,12 +120,7 @@ const inputSchema = z.union([
 ])
 
 const reasoningSchema = z
-  .object({
-    effort: z
-      .string()
-      .min(1)
-      .meta({ description: "Reasoning effort declared by the model catalog." }),
-  })
+  .object({ effort: z.enum(["none", "low", "high", "max"]) })
   .strict()
 
 const textFormatSchema = z
@@ -154,11 +129,9 @@ const textFormatSchema = z
       .string()
       .min(1)
       .meta({ description: "The structured output schema name." }),
-    schema: z.unknown().meta({ description: "The JSON schema object." }),
-    strict: z
-      .boolean()
-      .optional()
-      .meta({ description: "Whether strict schema mode is enabled." }),
+    schema: z
+      .record(z.string(), z.unknown())
+      .meta({ description: "The JSON schema object." }),
     type: z.literal("json_schema"),
   })
   .strict()
@@ -177,15 +150,16 @@ const functionTool = z
       .string()
       .optional()
       .meta({ description: "The function description." }),
-    name: z.string().min(1).meta({ description: "The function name." }),
+    name: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .meta({ description: "The function name." }),
     parameters: z
-      .unknown()
+      .record(z.string(), z.unknown())
       .optional()
       .meta({ description: "The JSON schema for the parameters." }),
-    strict: z
-      .boolean()
-      .optional()
-      .meta({ description: "Whether strict schema mode is enabled." }),
     type: z.literal("function"),
   })
   .strict()
@@ -194,10 +168,16 @@ const toolChoiceSchema = z.union([
   z
     .literal("auto")
     .meta({ description: "The model decides whether to call tools." }),
+  z.literal("required"),
   z.literal("none").meta({ description: "Tools are not called." }),
   z
     .object({
-      name: z.string().min(1).meta({ description: "The function to force." }),
+      name: z
+        .string()
+        .min(1)
+        .max(128)
+        .regex(/^[a-zA-Z0-9_-]+$/)
+        .meta({ description: "The function to force." }),
       type: z.literal("function"),
     })
     .strict()
@@ -206,13 +186,6 @@ const toolChoiceSchema = z.union([
 
 const responsesRequestBodySchema = z
   .object({
-    include: z
-      .array(z.literal("reasoning.encrypted_content"))
-      .meta({
-        description:
-          "Only reasoning.encrypted_content is supported, for carrying opaque multi-turn state.",
-      })
-      .optional(),
     input: inputSchema.meta({
       description: "The prompt or multi-turn input items.",
     }),
@@ -220,12 +193,13 @@ const responsesRequestBodySchema = z
       .string()
       .optional()
       .meta({ description: "System instructions." }),
+    max_output_tokens: z.number().int().positive().max(393216).optional(),
     model: z.string().min(1).meta({
       description:
         "The external model identifier (connection slug / model id).",
     }),
     parallel_tool_calls: z
-      .boolean()
+      .literal(true)
       .optional()
       .meta({ description: "Whether tools may run in parallel." }),
     reasoning: reasoningSchema
@@ -268,7 +242,51 @@ export function validateResponsesRequest(
   body: unknown,
 ): ResponsesRequestValidation {
   const parsed = responsesRequestBodySchema.safeParse(body)
-  if (parsed.success) return { ok: true, value: parsed.data }
+  if (parsed.success) {
+    const request = parsed.data
+    const reject = (
+      path: string,
+      message: string,
+    ): ResponsesRequestValidation => ({
+      ok: false,
+      issues: [{ path, message }],
+    })
+    const names = (request.tools ?? []).map((tool) => tool.name)
+    if (new Set(names).size !== names.length)
+      return reject("tools", "Function names must be unique")
+    if (
+      typeof request.tool_choice === "object" &&
+      !names.includes(request.tool_choice.name)
+    )
+      return reject("tool_choice", "The selected function must be declared")
+    if (request.tool_choice === "required" && names.length === 0)
+      return reject("tool_choice", "Required tools must be declared")
+    if (Array.isArray(request.input)) {
+      const calls = new Set<string>(),
+        outputs = new Set<string>()
+      for (const item of request.input) {
+        if (
+          item.type === "message" &&
+          item.role !== "user" &&
+          item.content.some((part) => part.type === "input_image")
+        )
+          return reject("input", "Images are supported in user messages only")
+        if (item.type === "function_call") {
+          if (calls.has(item.call_id))
+            return reject("input", "Duplicate function call id")
+          calls.add(item.call_id)
+        }
+        if (item.type === "function_call_output") {
+          if (outputs.has(item.call_id) || !calls.has(item.call_id))
+            return reject("input", "Function output must follow its call")
+          outputs.add(item.call_id)
+        }
+      }
+      if (calls.size !== outputs.size)
+        return reject("input", "Every function call must have an output")
+    }
+    return { ok: true, value: request }
+  }
   return {
     ok: false,
     issues: parsed.error.issues.map((issue) => ({

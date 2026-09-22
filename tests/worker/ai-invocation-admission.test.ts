@@ -107,34 +107,32 @@ beforeEach(async () => {
   const ciphertext = await encryptAiSecret(
     keyring,
     JSON.stringify({
-      accessToken: "access-token-1",
-      chatgptUserId: "user-main",
-      refreshToken: "refresh-token-1",
+      kind: "api-key",
+      apiKey: "access-token-1",
     }),
     {
       connectionId,
       environment: env.APP_ORIGIN,
-      providerType: "openai-codex",
+      providerType: "deepseek",
       purpose: "credential-package",
     },
   )
   await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO "ai_connections" ("id","slug","name","providerType","enabled","authorizationStatus","upstreamAccountId","credentialVersion","credentialCiphertext","credentialExpiresAt","refreshClaimId","refreshClaimExpiresAt","createdAt","updatedAt")
-       VALUES (?,?,?,?,1,'connected','account-main',1,?,?,NULL,NULL,?,?)`,
+      `INSERT INTO "ai_connections" ("id","slug","name","providerType","enabled","authorizationStatus","credentialVersion","credentialCiphertext","createdAt","updatedAt")
+       VALUES (?,?,?,?,1,'connected',1,?,?,?)`,
     ).bind(
       connectionId,
       "codex-main",
       "Main",
-      "openai-codex",
+      "deepseek",
       ciphertext,
-      now + 3_600_000,
       now,
       now,
     ),
     env.DB.prepare(
       `INSERT INTO "ai_models" ("connectionId","upstreamModelId","displayName","capabilities","snapshotCredentialVersion","discoveredAt")
-       VALUES (?,?,NULL,NULL,1,?)`,
+       VALUES (?,?,NULL,'{"supportedInApi":true,"reasoningEfforts":["max"]}',1,?)`,
     ).bind(connectionId, upstreamModelId, now),
   ])
 })

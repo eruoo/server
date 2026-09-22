@@ -2,7 +2,7 @@
 
 ## AI 服务架构草案
 
-- [ai-service.md](specs/ai-service.md)：面向多个应用的通用 AI 接入、凭证管理与调用架构；首版 Codex OAuth。AI 设计的唯一来源；存储、清理与恢复、连接器、协议、调用编排、AI Key 配置档、HTTP 路由与管理界面均已实施。staging 已部署（2026-09-19，含 0003 迁移）：真实设备授权、授权会话恢复与含 AI 数据的隔离恢复演练通过；模型目录请求返回 403（原因未确认），真实推理链路未验收（见实施记录 §4.21）。
+- [ai-service.md](specs/ai-service.md)：AI 服务唯一设计来源。现改为 DeepSeek 官方 API Key 与原生 Responses，默认 effort=max；旧 AI 状态一次性清理。DeepSeek 部署与真实上游验收待授权，历史 Codex 验证见实施记录。
 
 ## 完整架构规格（2026-09-09，服务端与 Web 已实施，平台验收另列）
 

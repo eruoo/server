@@ -6,6 +6,7 @@ import {
   parseAiExternalModelId,
 } from "../../shared/api-key"
 import { getAiConnection, getAiConnectionBySlug } from "./connections"
+import { DEEPSEEK_DEFAULT_EFFORT } from "./deepseek-connector"
 import { listAiModels } from "./models"
 import { isAiConnectionSlug, isAiServerIdentifier } from "./policy"
 import type { ResponsesRequestBody } from "./responses-request"
@@ -24,6 +25,7 @@ import type { ResponsesRequestBody } from "./responses-request"
 
 export interface AiAuthorizedModelEntry {
   connectionId: string
+  permissionVersion: number
   connectionSlug: string
   upstreamModelId: string
 }
@@ -62,12 +64,18 @@ export async function resolveAiModelSelection(
     }
     const models = await listAiModels(database, connection.id)
     if (
-      !models.some((model) => model.upstreamModelId === parts.upstreamModelId)
+      !models.some(
+        (model) =>
+          model.upstreamModelId === parts.upstreamModelId &&
+          model.snapshotCredentialVersion === connection.credentialVersion &&
+          hasResponsesCapability(model.capabilities),
+      )
     ) {
       return { ok: false, reason: "unknown-model" }
     }
     entries.push({
       connectionId: connection.id,
+      permissionVersion: connection.permissionVersion,
       connectionSlug: connection.slug,
       upstreamModelId: parts.upstreamModelId,
     })
@@ -77,7 +85,7 @@ export async function resolveAiModelSelection(
 
 /**
  * Builds the plugin `permissions` object for an AI key: the fixed operations
- * plus one `ai-model:<connection UUID>` action list per connection, sorted
+ * plus one `ai-model:<connection UUID>:<permission version>` action list per connection, sorted
  * for a deterministic stored value.
  */
 export function buildAiKeyPermissions(
@@ -88,12 +96,16 @@ export function buildAiKeyPermissions(
   }
   const byConnection = new Map<string, Set<string>>()
   for (const entry of entries) {
-    const models = byConnection.get(entry.connectionId) ?? new Set<string>()
+    const scope = apiKeyAiModelPermissionKey(
+      entry.connectionId,
+      entry.permissionVersion,
+    )
+    const models = byConnection.get(scope) ?? new Set<string>()
     models.add(entry.upstreamModelId)
-    byConnection.set(entry.connectionId, models)
+    byConnection.set(scope, models)
   }
   for (const connectionId of [...byConnection.keys()].sort()) {
-    permissions[apiKeyAiModelPermissionKey(connectionId)] = [
+    permissions[connectionId] = [
       ...(byConnection.get(connectionId) ?? []),
     ].sort()
   }
@@ -117,10 +129,11 @@ export function authorizeAiInvocation(
   permissions: Record<string, string[]> | null | undefined,
   connectionId: string,
   upstreamModelId: string,
+  permissionVersion = 0,
 ): boolean {
   if (!readActionList(permissions?.ai).includes("invoke")) return false
   const granted = readActionList(
-    permissions?.[apiKeyAiModelPermissionKey(connectionId)],
+    permissions?.[apiKeyAiModelPermissionKey(connectionId, permissionVersion)],
   )
   return granted.includes(upstreamModelId)
 }
@@ -151,19 +164,37 @@ export async function listAiAuthorizedModels(
   const views: AiAuthorizedModelView[] = []
   for (const [key, grantedModels] of Object.entries(permissions ?? {})) {
     if (!key.startsWith(API_KEY_AI_MODEL_PERMISSION_PREFIX)) continue
-    const connectionId = key.slice(API_KEY_AI_MODEL_PERMISSION_PREFIX.length)
+    const [connectionId, version] = key
+      .slice(API_KEY_AI_MODEL_PERMISSION_PREFIX.length)
+      .split(":")
     // A tampered or legacy permission key must be skipped, not thrown on:
     // the stored JSON is not a trusted identifier source.
-    if (!isAiServerIdentifier(connectionId)) continue
+    if (
+      !isAiServerIdentifier(connectionId) ||
+      key !== apiKeyAiModelPermissionKey(connectionId, Number(version))
+    )
+      continue
     const connection = await getAiConnection(database, connectionId)
-    if (connection === null) continue
+    if (
+      connection === null ||
+      !connection.enabled ||
+      connection.authorizationStatus !== "connected" ||
+      String(connection.permissionVersion) !== version
+    )
+      continue
     const models = await listAiModels(database, connectionId)
     const granted = readActionList(grantedModels)
     for (const model of models) {
-      if (!granted.includes(model.upstreamModelId)) continue
+      if (
+        !granted.includes(model.upstreamModelId) ||
+        model.snapshotCredentialVersion !== connection.credentialVersion ||
+        !hasResponsesCapability(model.capabilities)
+      )
+        continue
       views.push({
         capabilities: parseCapabilities(model.capabilities),
         connectionId,
+        permissionVersion: connection.permissionVersion,
         connectionSlug: connection.slug,
         discoveredAt: model.discoveredAt,
         displayName: model.displayName,
@@ -190,43 +221,48 @@ function parseCapabilities(raw: string | null): unknown {
   }
 }
 
-/**
- * Reads the reasoning efforts the catalog declared for one model. A missing,
- * malformed or differently shaped payload declares nothing, so nothing is
- * treated as supported.
- */
-function readDeclaredReasoningEfforts(raw: string | null): string[] {
+export function hasResponsesCapability(raw: string | null): boolean {
   const parsed = parseCapabilities(raw)
-  if (typeof parsed !== "object" || parsed === null) return []
-  const efforts = (parsed as { reasoningEfforts?: unknown }).reasoningEfforts
-  return Array.isArray(efforts) &&
-    efforts.every((value) => typeof value === "string")
-    ? (efforts as string[])
-    : []
+  return (
+    parsed !== null &&
+    typeof parsed === "object" &&
+    (parsed as { supportedInApi?: unknown }).supportedInApi === true
+  )
 }
 
-/**
- * Checks the request fields whose support the model catalog must confirm.
- * `reasoning.effort` is accepted only when the selected model's catalog entry
- * declares that exact value; structured output stays closed until the catalog
- * carries a confirmation field for it (the snapshot records reasoning efforts,
- * API availability and visibility only, so no model is confirmed today).
- * Unconfirmed capability is never treated as support, and a refused request
- * never reaches the upstream.
- */
 export function validateAiRequestCapabilities(input: {
   capabilities: string | null
   request: ResponsesRequestBody
-}): { ok: true } | { ok: false; field: "reasoning.effort" | "text.format" } {
-  const effort = input.request.reasoning?.effort
+}): { ok: true } | { ok: false; field: string } {
+  const parsed = parseCapabilities(input.capabilities)
+  const capabilities = (
+    typeof parsed === "object" && parsed !== null ? parsed : {}
+  ) as Record<string, unknown>
+  if (capabilities.supportedInApi !== true) return { ok: false, field: "model" }
+  const effort = input.request.reasoning?.effort ?? DEEPSEEK_DEFAULT_EFFORT
   if (
-    effort !== undefined &&
-    !readDeclaredReasoningEfforts(input.capabilities).includes(effort)
-  ) {
+    !Array.isArray(capabilities.reasoningEfforts) ||
+    !capabilities.reasoningEfforts.includes(effort)
+  )
     return { ok: false, field: "reasoning.effort" }
-  }
-  if (input.request.text?.format !== undefined) {
+  if (
+    input.request.max_output_tokens !== undefined &&
+    capabilities.maxOutputTokens !== true
+  )
+    return { ok: false, field: "max_output_tokens" }
+  if (input.request.text && capabilities.structuredOutput !== true)
     return { ok: false, field: "text.format" }
-  }
+  if (input.request.tools?.length && capabilities.functionTools !== true)
+    return { ok: false, field: "tools" }
+  if (
+    Array.isArray(input.request.input) &&
+    input.request.input.some(
+      (item) =>
+        item.type === "message" &&
+        item.content.some((part) => part.type === "input_image"),
+    ) &&
+    capabilities.vision !== true
+  )
+    return { ok: false, field: "input_image" }
   return { ok: true }
 }

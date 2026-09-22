@@ -8,11 +8,6 @@ import {
   parseAiExternalModelId,
 } from "../../src/shared/api-key"
 import {
-  claimAiAuthorizationPoll,
-  completeAiAuthorization,
-  createAiAuthorizationSession,
-} from "../../src/worker/ai/authorizations"
-import {
   createAiConnection,
   deleteAiConnection,
   getAiConnection,
@@ -47,14 +42,13 @@ async function encryptPackage(): Promise<string> {
   return encryptAiSecret(
     keyring,
     JSON.stringify({
-      accessToken: "access-token-1",
-      chatgptUserId: "user-main",
-      refreshToken: "refresh-token-1",
+      kind: "api-key",
+      apiKey: "access-token-1",
     }),
     {
       connectionId,
       environment,
-      providerType: "openai-codex",
+      providerType: "deepseek",
       purpose: "credential-package",
     },
   )
@@ -70,52 +64,29 @@ async function createConnectedConnection(input: {
     id: input.id,
     name: input.slug,
     now,
-    providerType: "openai-codex",
+    providerType: "deepseek",
     slug: input.slug,
   })
   expect(created).toMatchObject({ created: true })
-  const sessionId = `22222222-2222-2222-2222-${input.seed.padStart(12, "0")}`
-  const claimId = `55555555-5555-5555-5555-${input.seed.padStart(12, "0")}`
-  const session = await createAiAuthorizationSession(env.DB, {
-    connectionId: input.id,
-    deviceGrantCiphertext: "device-grant",
-    id: sessionId,
-    ownerSessionId,
-    ownerUserId,
-    pollIntervalMs: 5_000,
-    sessionTtlMs: 900_000,
-    now,
-  })
-  expect(session).toMatchObject({ created: true })
-  const claimed = await claimAiAuthorizationPoll(env.DB, {
-    claimId,
-    now: now + 6_000,
-    ownerSessionId,
-    ownerUserId,
-    sessionId,
-  })
-  expect(claimed).toMatchObject({ claimed: true })
-  const completed = await completeAiAuthorization(env.DB, {
-    claimId,
-    completionId: `66666666-6666-6666-6666-${input.seed.padStart(12, "0")}`,
-    credentialCiphertext: await encryptPackage(),
-    credentialExpiresAt: now + 3_600_000,
-    now: now + 7_000,
-    sessionId,
-    upstreamAccountId: "account-main",
-  })
-  expect(completed).toMatchObject({ completed: true })
+  await env.DB.prepare(
+    "UPDATE ai_connections SET authorizationStatus='connected', credentialCiphertext=?, credentialVersion=1 WHERE id=?",
+  )
+    .bind(await encryptPackage(), input.id)
+    .run()
   const connection = await getAiConnection(env.DB, input.id)
   const snapshot = await commitAiModelSnapshot(env.DB, {
     connectionId: input.id,
     models: [
       {
-        capabilities: JSON.stringify({ reasoningEfforts: ["low"] }),
+        capabilities: JSON.stringify({
+          supportedInApi: true,
+          reasoningEfforts: ["low", "max"],
+        }),
         displayName: "GPT Test",
         upstreamModelId: "gpt-test",
       },
       {
-        capabilities: null,
+        capabilities: JSON.stringify({ supportedInApi: true }),
         displayName: "GPT Other",
         upstreamModelId: "openai/gpt-other",
       },
@@ -174,11 +145,13 @@ describe("AI model authorization", () => {
       entries: [
         {
           connectionId,
+          permissionVersion: 0,
           connectionSlug: "codex-main",
           upstreamModelId: "gpt-test",
         },
         {
           connectionId,
+          permissionVersion: 0,
           connectionSlug: "codex-main",
           upstreamModelId: "openai/gpt-other",
         },
@@ -267,7 +240,7 @@ describe("AI model authorization", () => {
       "codex-main/gpt-test",
     ])
     expect(models[0]).toMatchObject({
-      capabilities: { reasoningEfforts: ["low"] },
+      capabilities: { reasoningEfforts: ["low", "max"] },
       connectionId,
       displayName: "GPT Test",
     })

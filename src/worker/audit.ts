@@ -5,9 +5,7 @@ import { securityAuditEvents } from "./db/schema"
 import type { AppBindings } from "./http/types"
 
 export const auditEventTypes = [
-  "ai_authorization_cancelled",
-  "ai_authorization_completed",
-  "ai_authorization_started",
+  "ai_credential_saved",
   "ai_connection_created",
   "ai_connection_deleted",
   "ai_connection_disconnected",
@@ -91,9 +89,7 @@ async function fingerprintIp(
 }
 
 const metadataFields: Record<AuditEventType, readonly string[]> = {
-  ai_authorization_cancelled: ["connectionId", "providerType"],
-  ai_authorization_completed: ["connectionId", "providerType"],
-  ai_authorization_started: ["connectionId", "providerType"],
+  ai_credential_saved: ["connectionId", "providerType"],
   ai_connection_created: ["connectionId", "providerType"],
   ai_connection_deleted: ["connectionId", "providerType"],
   ai_connection_disconnected: ["connectionId", "providerType"],

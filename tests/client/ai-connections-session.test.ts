@@ -8,10 +8,7 @@ import {
 import AiConnectionsView from "../../src/client/views/AiConnectionsView.vue"
 
 const connectionId = "11111111-1111-4111-8111-111111111111"
-const authorizationId = "22222222-2222-4222-8222-222222222222"
-const startPath = `/api/ai/connections/${connectionId}/authorizations`
-const statusPath = `/api/ai/authorizations/${authorizationId}`
-const pollPath = `${statusPath}/poll`
+const savePath = `/api/ai/connections/${connectionId}/credential`
 const refreshPath = `/api/ai/connections/${connectionId}/models/refresh`
 
 afterEach(() => {
@@ -56,29 +53,17 @@ async function mountConnections(
               name: "Main",
               enabled: true,
               authorizationStatus: "never_authorized",
-              providerType: "openai-codex",
-              upstreamAccount: "未绑定账号",
-              credentialExpiresAt: null,
+              providerType: "deepseek",
+              credentialVersion: 0,
+              permissionVersion: 0,
               createdAt: Date.now(),
               updatedAt: Date.now(),
               models: [],
             },
           ],
         })
-      if (path === startPath)
-        return Response.json({
-          authorizationId,
-          expiresAt: Date.now() + 900_000,
-          intervalMs: 5_000,
-          userCode: "TEST-CODE",
-          verificationUrl: "https://auth.openai.com/codex/device",
-        })
-      if (path === statusPath || path === pollPath)
-        return Response.json({
-          status: "pending",
-          expiresAt: Date.now() + 900_000,
-          nextPollAt: Date.now() + 5_000,
-        })
+      if (path === savePath) return Response.json({ saved: true })
+      if (path === refreshPath) return Response.json({ modelCount: 0 })
       throw new Error(`Unexpected request: ${path}`)
     })
   const session = createSessionController()
@@ -91,16 +76,13 @@ async function mountConnections(
     fetch,
     session,
     wrapper,
-    async start() {
-      const authorize = wrapper
-        .findAll("button")
-        .find((button) => button.text().includes("开始设备授权"))
-      expect(authorize).toBeDefined()
-      await authorize!.trigger("click")
+    async save() {
+      const input = wrapper.get('input[type="password"]')
+      await input.setValue("synthetic-deepseek-key")
+      await input.element
+        .closest("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }))
       await flushPromises()
-      expect(wrapper.find('input[aria-label="设备授权代码"]').exists()).toBe(
-        true,
-      )
     },
     async replaceSession() {
       sessionId = "replacement-session"
@@ -110,108 +92,98 @@ async function mountConnections(
   }
 }
 
-it.each(["poll", "read-back", "resume", "model-refresh", "provider"] as const)(
-  "returns to login and stops authorization after a trusted 401 from %s",
+it.each(["save", "model-refresh", "provider", "list"] as const)(
+  "returns to login after a trusted 401 from %s",
   async (failureAt) => {
-    const responses: Record<string, () => Response> = {}
-    if (failureAt === "poll") {
-      responses[pollPath] = () => rejection()
-      // A cached read must not conceal the poll's authoritative refusal.
-      responses[statusPath] = () => Response.json({ status: "cancelled" })
-    } else if (failureAt === "read-back") {
-      responses[pollPath] = () => rejection(503, "service-unavailable")
-      responses[statusPath] = () => rejection()
-    } else if (failureAt === "resume") {
-      sessionStorage.setItem(
-        "ai-pending-authorization",
-        JSON.stringify({
-          authorizationId,
-          connectionId,
-        }),
-      )
-      responses[statusPath] = () => rejection()
-    } else if (failureAt === "model-refresh") {
-      responses[pollPath] = () => Response.json({ status: "completed" })
-      responses[refreshPath] = () => rejection()
-    } else {
-      responses["/api/ai/providers"] = () => rejection()
-    }
-    const { fetch, session, wrapper, start } = await mountConnections(responses)
+    const path =
+      failureAt === "save"
+        ? savePath
+        : failureAt === "model-refresh"
+          ? refreshPath
+          : failureAt === "provider"
+            ? "/api/ai/providers"
+            : "/api/ai/connections"
+    const { session, wrapper, save } = await mountConnections({
+      [path]: () => rejection(),
+    })
     try {
-      if (failureAt !== "resume" && failureAt !== "provider") {
-        await start()
-        await vi.advanceTimersByTimeAsync(5_000)
-        await flushPromises()
-      }
+      if (failureAt === "save" || failureAt === "model-refresh") await save()
       expect(session.status.value).toBe("anonymous")
       expect(wrapper.text()).toContain("请先登录")
-      expect(wrapper.find('input[aria-label="设备授权代码"]').exists()).toBe(
-        false,
-      )
-      expect(sessionStorage.getItem("ai-pending-authorization")).toBeNull()
-      expect(fetch.mock.calls.some(([path]) => path === statusPath)).toBe(
-        failureAt === "read-back" || failureAt === "resume",
-      )
-      const requestCount = fetch.mock.calls.length
-      await vi.advanceTimersByTimeAsync(60_000)
-      expect(fetch).toHaveBeenCalledTimes(requestCount)
+      expect(wrapper.find('input[type="password"]').exists()).toBe(false)
     } finally {
       wrapper.unmount()
     }
   },
 )
-
 it.each([
   [401, "unclassified"],
   [403, "permission-denied"],
   [503, "service-unavailable"],
-] as const)(
-  "preserves login after a poll returns %s %s",
-  async (status, slug) => {
-    const { session, wrapper, start } = await mountConnections({
-      [pollPath]: () => rejection(status, slug),
-    })
-    try {
-      await start()
-      await vi.advanceTimersByTimeAsync(5_000)
-      await flushPromises()
-      expect(session.status.value).toBe("authenticated")
-      expect(wrapper.text()).toContain("AI 连接")
-      expect(wrapper.text()).not.toContain("请先登录")
-    } finally {
-      wrapper.unmount()
-    }
-  },
-)
-
+  [503, "ai-reauthorization-required"],
+  [429, "ai-upstream-quota-exceeded"],
+] as const)("preserves owner login after %s %s", async (status, slug) => {
+  const { session, wrapper, save } = await mountConnections({
+    [refreshPath]: () => rejection(status, slug),
+  })
+  try {
+    await save()
+    expect(session.status.value).toBe("authenticated")
+    expect(wrapper.text()).toContain("模型发现失败")
+  } finally {
+    wrapper.unmount()
+  }
+})
 it.each(["replacement-session", "unmounted"] as const)(
-  "ignores a late poll credential rejection after %s",
+  "ignores a late save rejection after %s",
   async (change) => {
-    let rejectPoll!: (response: Response) => void
-    const pendingPoll = new Promise<Response>((resolve) => {
-      rejectPoll = resolve
+    let finish!: (response: Response) => void
+    const pending = new Promise<Response>((resolve) => {
+      finish = resolve
     })
-    const { fetch, session, wrapper, start, replaceSession } =
-      await mountConnections({
-        [pollPath]: () => pendingPoll,
-        [statusPath]: () => Response.json({ status: "cancelled" }),
-      })
-    try {
-      await start()
-      await vi.advanceTimersByTimeAsync(5_000)
-      expect(fetch.mock.calls.some(([path]) => path === pollPath)).toBe(true)
-      if (change === "replacement-session") await replaceSession()
-      else wrapper.unmount()
-      rejectPoll(rejection())
-      await flushPromises()
-      expect(session.status.value).toBe("authenticated")
-      expect(session.data.value?.session.id).toBe(
-        change === "replacement-session"
-          ? "replacement-session"
-          : "original-session",
-      )
-    } finally {
-      if (change !== "unmounted") wrapper.unmount()
-    }
+    const { session, wrapper, save, replaceSession } = await mountConnections({
+      [savePath]: () => pending,
+    })
+    await save()
+    if (change === "replacement-session") await replaceSession()
+    else wrapper.unmount()
+    finish(rejection())
+    await flushPromises()
+    expect(session.status.value).toBe("authenticated")
+    if (change !== "unmounted") wrapper.unmount()
   },
 )
+it("clears the entered key and never persists it in browser storage", async () => {
+  const { wrapper, save, fetch } = await mountConnections({})
+  try {
+    await save()
+    expect(
+      (wrapper.get('input[type="password"]').element as HTMLInputElement).value,
+    ).toBe("")
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+    expect(fetch.mock.calls.some(([path]) => path === savePath)).toBe(true)
+    expect(fetch.mock.calls.some(([path]) => path === refreshPath)).toBe(true)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it("does not start discovery from a late save success in another owner session", async () => {
+  let finish!: (response: Response) => void
+  const pending = new Promise<Response>((resolve) => {
+    finish = resolve
+  })
+  const { wrapper, save, replaceSession, fetch } = await mountConnections({
+    [savePath]: () => pending,
+  })
+  try {
+    await save()
+    await replaceSession()
+    finish(Response.json({ saved: true }))
+    await flushPromises()
+    expect(fetch.mock.calls.some(([path]) => path === refreshPath)).toBe(false)
+  } finally {
+    wrapper.unmount()
+  }
+})

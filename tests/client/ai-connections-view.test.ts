@@ -6,7 +6,6 @@ import {
   describeAiProtocols,
   readAiConnectionState,
   readAiModelCapabilities,
-  readAiPollDelayMs,
 } from "../../src/client/features/ai/ai-connections"
 
 it("maps the durable status onto the four states design §9 requires", () => {
@@ -28,9 +27,9 @@ it("maps the durable status onto the four states design §9 requires", () => {
   expect(
     readAiConnectionState({ authorizationStatus: "connected", enabled: false }),
   ).toBe("disabled")
-  expect(AI_AUTHORIZATION_STATE_LABELS.authorized).toBe("连接已授权")
+  expect(AI_AUTHORIZATION_STATE_LABELS.authorized).toBe("Key 已配置")
   expect(AI_AUTHORIZATION_STATE_LABELS["reauthentication-required"]).toBe(
-    "需要重新授权",
+    "需要配置有效 Key",
   )
 })
 
@@ -39,44 +38,33 @@ it("reads the stored capability payload defensively", () => {
     readAiModelCapabilities({
       reasoningEfforts: ["low", "high"],
       supportedInApi: true,
-      visibility: "list",
+      vision: false,
     }),
   ).toEqual({
     reasoningEfforts: ["low", "high"],
     supportedInApi: true,
-    visibility: "list",
+    vision: false,
   })
   expect(readAiModelCapabilities(null)).toEqual({
     reasoningEfforts: [],
     supportedInApi: false,
-    visibility: null,
+    vision: false,
   })
   expect(readAiModelCapabilities({ reasoningEfforts: [1, "low"] })).toEqual({
     reasoningEfforts: ["low"],
     supportedInApi: false,
-    visibility: null,
+    vision: false,
   })
   expect(
     describeAiModelCapabilities({
       reasoningEfforts: ["low"],
       supportedInApi: true,
-      visibility: null,
+      vision: false,
     }),
-  ).toBe("推理强度 low · API 可用")
+  ).toBe("文本 · effort low · 默认 max")
 })
 
 it("describes the provider protocol capability", () => {
   expect(describeAiProtocols("responses-subset")).toBe("Responses（子集）")
   expect(describeAiProtocols("something-else")).toBe("something-else")
-})
-
-it("follows the server poll schedule, clamped to at least one second", () => {
-  const now = 1_000_000
-  expect(readAiPollDelayMs({ nextPollAt: now + 4_000 }, now)).toBe(4_000)
-  // A stale or invalid schedule never makes the client poll faster than 1 s.
-  expect(readAiPollDelayMs({ nextPollAt: now - 5_000 }, now)).toBe(1_000)
-  expect(readAiPollDelayMs({ intervalMs: 7_500 }, now)).toBe(7_500)
-  expect(readAiPollDelayMs({ intervalMs: 200 }, now)).toBe(1_000)
-  expect(readAiPollDelayMs({}, now)).toBe(5_000)
-  expect(readAiPollDelayMs({ intervalMs: Number.NaN }, now)).toBe(5_000)
 })

@@ -22,7 +22,7 @@ import {
 import { listAiModels } from "./models"
 import { AI_INVOCATION_TOTAL_DEADLINE_MS, isAiConnectionSlug } from "./policy"
 import { validateResponsesRequest } from "./responses-request"
-import { invokeCodexResponses } from "./responses-transport"
+import { invokeDeepSeekResponses } from "./responses-transport"
 
 /**
  * Responses invocation endpoints (§6.2).
@@ -309,7 +309,7 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
       // work still completes — the underlying D1 write cannot be cancelled —
       // and its late result is only observed, never continued: a late
       // reservation is released by the guarded cleanup or its lease, and no
-      // late chain reads the body, refreshes credentials or starts an
+      // late chain reads the body, decrypts credentials or starts an
       // inference.
       const startedAt = Date.now()
       const admissionDeadline = startedAt + AI_INVOCATION_ADMISSION_BUDGET_MS
@@ -468,6 +468,8 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
       // ungranted models answer identically, so the endpoint is not a
       // catalog oracle.
       const parts = parseAiExternalModelId(validated.value.model)
+      let observedCredentialVersion = -1
+      let observedPermissionVersion = -1
       let connectionId: string | null = null
       let upstreamModelId: string | null = null
       let modelCapabilities: string | null = null
@@ -488,7 +490,12 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
               (candidate) =>
                 candidate.upstreamModelId === parts.upstreamModelId,
             )
-            if (model !== undefined) {
+            if (
+              model !== undefined &&
+              model.snapshotCredentialVersion === connection.credentialVersion
+            ) {
+              observedCredentialVersion = connection.credentialVersion
+              observedPermissionVersion = connection.permissionVersion
               connectionId = connection.id
               upstreamModelId = parts.upstreamModelId
               modelCapabilities = model.capabilities
@@ -502,7 +509,12 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
       if (
         connectionId === null ||
         upstreamModelId === null ||
-        !authorizeAiInvocation(key.permissions, connectionId, upstreamModelId)
+        !authorizeAiInvocation(
+          key.permissions,
+          connectionId,
+          upstreamModelId,
+          observedPermissionVersion,
+        )
       ) {
         await abandonReservation()
         return problem("permission-denied", requestId)
@@ -539,8 +551,10 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
         return problem("service-unavailable", requestId)
       }
 
-      const delivery = await invokeCodexResponses({
+      const delivery = await invokeDeepSeekResponses({
         apiKeyId: key.id,
+        observedCredentialVersion,
+        observedPermissionVersion,
         connectionId,
         credentialKeys: c.env.AI_CREDENTIAL_KEYS,
         database: c.env.DB,

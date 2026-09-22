@@ -9,7 +9,10 @@ import ConfirmAction from "../../components/security/ConfirmAction.vue"
 import { useManagedList } from "../../composables/managed-list"
 import { useSession } from "../../composables/session"
 import { copyCredential, clipboardBusy } from "../../lib/clipboard"
-import { listAiConnections } from "../ai/ai-connections"
+import {
+  listAiConnections,
+  readAiModelCapabilities,
+} from "../ai/ai-connections"
 import type { AiConnection } from "../ai/ai-connections"
 import {
   createApiKeyForProfile,
@@ -45,9 +48,18 @@ const loadingProfile = shallowRef(true)
 const panelBusy = computed(() => list.busy.value || loadingProfile.value)
 const aiProfile = computed(() => profile.value === API_KEY_AI_CONFIG_ID)
 const availableModels = computed(() =>
-  connections.value.flatMap((connection) =>
-    connection.models.map((model) => `${connection.slug}/${model.id}`),
-  ),
+  connections.value
+    .filter(
+      (connection) =>
+        connection.enabled && connection.authorizationStatus === "connected",
+    )
+    .flatMap((connection) =>
+      connection.models
+        .filter(
+          (model) => readAiModelCapabilities(model.capabilities).supportedInApi,
+        )
+        .map((model) => `${connection.slug}/${model.id}`),
+    ),
 )
 let generation = 0
 let disposed = false
@@ -139,9 +151,13 @@ function grantedModels(key: KeyWithGrants): string[] {
   return Object.entries(permissions)
     .filter(([action]) => action.startsWith(AI_MODEL_PERMISSION_PREFIX))
     .flatMap(([action, models]) => {
-      const connectionId = action.slice(AI_MODEL_PERMISSION_PREFIX.length)
+      const [connectionId, version] = action
+        .slice(AI_MODEL_PERMISSION_PREFIX.length)
+        .split(":")
       const connection = connections.value.find(
-        (candidate) => candidate.id === connectionId,
+        (candidate) =>
+          candidate.id === connectionId &&
+          String(candidate.permissionVersion) === version,
       )
       return connection === undefined
         ? []
@@ -259,7 +275,7 @@ onUnmounted(() => {
     >
       <legend>模型许可（至少选择一个）</legend>
       <p v-if="availableModels.length === 0">
-        暂无可选模型：请先创建连接并完成设备授权、刷新模型目录。
+        暂无可选模型：请先创建连接、保存 DeepSeek Key 并刷新模型目录。
       </p>
       <label v-for="model in availableModels" :key="model">
         <input

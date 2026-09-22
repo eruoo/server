@@ -67,6 +67,7 @@ const plan = {
   generatedSql: {
     credentialScrub: createCredentialScrubSql({
       hasAiApplicationTables: sql.hasAiApplicationTables,
+      hasLegacyAiAuthorizationSessions: sql.hasLegacyAiAuthorizationSessions,
       hasDeploymentReceipt: sql.hasDeploymentReceipt,
     }),
     targetMigrationReceipt: createMigrationReceiptSql(
