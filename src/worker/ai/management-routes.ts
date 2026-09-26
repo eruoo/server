@@ -1,9 +1,15 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi"
+import { routePath } from "hono/route"
 
 import { scheduleAuditEvent } from "../audit"
 import { limitAuthEntry } from "../auth/entry-limit"
 import { readOwnerSession } from "../auth/session"
-import { boundedRequest, errorResponse, problem } from "../http/response"
+import {
+  boundedRequest,
+  errorResponse,
+  problem,
+  withReadDeadline,
+} from "../http/response"
 import type { AppBindings, OwnerSession } from "../http/types"
 import {
   createAiConnection,
@@ -67,8 +73,7 @@ function stageBudget(now: number) {
 }
 
 /**
- * Reads one bounded JSON body. Management entries keep the general 1 MiB
- * rule; only the invocation route carries the 8 MiB exception.
+ * Parses the body already bounded before Session and credential inspection.
  */
 async function readJson(
   c: AppContext,
@@ -77,11 +82,8 @@ async function readJson(
   | { ok: false; response: ReturnType<typeof problem> }
 > {
   const requestId = c.get("requestId")
-  const request = await boundedRequest(c.req.raw)
-  if (!request)
-    return { ok: false, response: problem("payload-too-large", requestId) }
   try {
-    const raw = await request.text()
+    const raw = await c.req.raw.text()
     return { body: JSON.parse(raw) as unknown, ok: true }
   } catch {
     return { ok: false, response: problem("invalid-request", requestId) }
@@ -110,6 +112,25 @@ function rejectMutationRequest(
     return problem("unsupported-media-type", requestId)
   }
   return undefined
+}
+
+async function authorizeManagementMutation(
+  c: AppContext,
+): Promise<OwnerSession | ReturnType<typeof problem>> {
+  const rejected = rejectMutationRequest(c)
+  if (rejected) return rejected
+  const limited = await limitAuthEntry(
+    c,
+    `${c.req.method} ${routePath(c)}`,
+    c.env.AI_RATE_LIMITER,
+  )
+  if (limited) return limited
+  // Bound the stream before readOwnerSession clones and parses its body.
+  // This also covers mutations that do not otherwise consume JSON.
+  const request = await boundedRequest(c.req.raw)
+  if (!request) return problem("payload-too-large", c.get("requestId"))
+  c.req.raw = request
+  return readOwnerSession(c, false, true)
 }
 
 const connectionIdParam = z.object({ id: z.string() })
@@ -157,12 +178,6 @@ const credentialBodySchema = z
   .strict()
 
 export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
-  const owner = async (
-    c: AppContext,
-    persistent = false,
-  ): Promise<OwnerSession | ReturnType<typeof problem>> =>
-    readOwnerSession(c, false, persistent)
-
   app.openapi(
     createRoute({
       method: "get",
@@ -191,11 +206,15 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       },
     }),
     async (c) => {
-      const session = await owner(c)
-      if (session instanceof Response) return session
-      return c.json({ providers: [getDeepSeekProviderDefinition()] }, 200, {
-        "cache-control": "private, no-store",
-      })
+      const response = (async () => {
+        const session = await readOwnerSession(c)
+        if (session instanceof Response) return session
+        return c.json({ providers: [getDeepSeekProviderDefinition()] }, 200, {
+          "cache-control": "private, no-store",
+        })
+      })()
+      c.executionCtx.waitUntil(response)
+      return withReadDeadline(response, c.get("requestId"))
     },
   )
 
@@ -220,33 +239,37 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       },
     }),
     async (c) => {
-      const requestId = c.get("requestId")
-      const session = await owner(c)
-      if (session instanceof Response) return session
-      try {
-        const connections = await listAiConnections(c.env.DB)
-        const views = []
-        for (const connection of connections) {
-          const models = await listAiModels(c.env.DB, connection.id)
-          views.push({
-            ...connectionView(connection),
-            models: models.map((model) => ({
-              capabilities:
-                model.capabilities === null
-                  ? null
-                  : JSON.parse(model.capabilities),
-              discoveredAt: model.discoveredAt,
-              displayName: model.displayName,
-              id: model.upstreamModelId,
-            })),
+      const response = (async () => {
+        const requestId = c.get("requestId")
+        const session = await readOwnerSession(c)
+        if (session instanceof Response) return session
+        try {
+          const connections = await listAiConnections(c.env.DB)
+          const views = []
+          for (const connection of connections) {
+            const models = await listAiModels(c.env.DB, connection.id)
+            views.push({
+              ...connectionView(connection),
+              models: models.map((model) => ({
+                capabilities:
+                  model.capabilities === null
+                    ? null
+                    : JSON.parse(model.capabilities),
+                discoveredAt: model.discoveredAt,
+                displayName: model.displayName,
+                id: model.upstreamModelId,
+              })),
+            })
+          }
+          return c.json({ connections: views }, 200, {
+            "cache-control": "private, no-store",
           })
+        } catch {
+          return problem("service-unavailable", requestId)
         }
-        return c.json({ connections: views }, 200, {
-          "cache-control": "private, no-store",
-        })
-      } catch {
-        return problem("service-unavailable", requestId)
-      }
+      })()
+      c.executionCtx.waitUntil(response)
+      return withReadDeadline(response, c.get("requestId"))
     },
   )
 
@@ -270,15 +293,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
-      const rejected = rejectMutationRequest(c)
-      if (rejected) return rejected
-      const limited = await limitAuthEntry(
-        c,
-        `${c.req.method} ${new URL(c.req.url).pathname}`,
-        c.env.AI_RATE_LIMITER,
-      )
-      if (limited) return limited
-      const session = await owner(c, true)
+      const session = await authorizeManagementMutation(c)
       if (session instanceof Response) return session
       const body = await readJson(c)
       if (!body.ok) return body.response
@@ -331,15 +346,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
-      const rejected = rejectMutationRequest(c)
-      if (rejected) return rejected
-      const limited = await limitAuthEntry(
-        c,
-        `${c.req.method} ${new URL(c.req.url).pathname}`,
-        c.env.AI_RATE_LIMITER,
-      )
-      if (limited) return limited
-      const session = await owner(c, true)
+      const session = await authorizeManagementMutation(c)
       if (session instanceof Response) return session
       const id = c.req.param("id")
       if (!isAiServerIdentifier(id)) return problem("not-found", requestId)
@@ -404,15 +411,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
-      const rejected = rejectMutationRequest(c)
-      if (rejected) return rejected
-      const limited = await limitAuthEntry(
-        c,
-        `${c.req.method} ${new URL(c.req.url).pathname}`,
-        c.env.AI_RATE_LIMITER,
-      )
-      if (limited) return limited
-      const session = await owner(c, true)
+      const session = await authorizeManagementMutation(c)
       if (session instanceof Response) return session
       const id = c.req.param("id")
       if (!isAiServerIdentifier(id)) return problem("not-found", requestId)
@@ -456,15 +455,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
-      const rejected = rejectMutationRequest(c)
-      if (rejected) return rejected
-      const limited = await limitAuthEntry(
-        c,
-        `${c.req.method} ${new URL(c.req.url).pathname}`,
-        c.env.AI_RATE_LIMITER,
-      )
-      if (limited) return limited
-      const session = await owner(c, true)
+      const session = await authorizeManagementMutation(c)
       if (session instanceof Response) return session
       const id = c.req.param("id")
       if (!isAiServerIdentifier(id)) return problem("not-found", requestId)
@@ -516,15 +507,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
   )
   app.put("/api/ai/connections/:id/credential", async (c) => {
     const requestId = c.get("requestId")
-    const rejected = rejectMutationRequest(c)
-    if (rejected) return rejected
-    const limited = await limitAuthEntry(
-      c,
-      "PUT /api/ai/connections/credential",
-      c.env.AI_RATE_LIMITER,
-    )
-    if (limited) return limited
-    const session = await owner(c, true)
+    const session = await authorizeManagementMutation(c)
     if (session instanceof Response) return session
     const id = c.req.param("id")
     if (!isAiServerIdentifier(id)) return problem("not-found", requestId)
@@ -594,15 +577,7 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
     }),
     async (c) => {
       const requestId = c.get("requestId")
-      const rejected = rejectMutationRequest(c)
-      if (rejected) return rejected
-      const limited = await limitAuthEntry(
-        c,
-        `${c.req.method} ${new URL(c.req.url).pathname}`,
-        c.env.AI_RATE_LIMITER,
-      )
-      if (limited) return limited
-      const session = await owner(c, true)
+      const session = await authorizeManagementMutation(c)
       if (session instanceof Response) return session
       const id = c.req.param("id")
       if (!isAiServerIdentifier(id)) return problem("not-found", requestId)
@@ -660,46 +635,50 @@ export function registerAiManagementRoutes(app: OpenAPIHono<AppBindings>) {
       },
     }),
     async (c) => {
-      const requestId = c.get("requestId")
-      const session = await owner(c)
-      if (session instanceof Response) return session
-      const limitRaw = c.req.query("limit")
-      const limit =
-        limitRaw === undefined
-          ? AI_INVOCATION_HISTORY_DEFAULT_LIMIT
-          : Number(limitRaw)
-      if (
-        !Number.isSafeInteger(limit) ||
-        limit < 1 ||
-        limit > AI_INVOCATION_HISTORY_MAX_LIMIT
-      ) {
-        return problem("validation-failed", requestId)
-      }
-      const beforeStartedAt = c.req.query("beforeStartedAt")
-      const beforeRequestId = c.req.query("beforeRequestId")
-      let before
-      if (beforeStartedAt !== undefined || beforeRequestId !== undefined) {
-        const startedAt = Number(beforeStartedAt)
+      const response = (async () => {
+        const requestId = c.get("requestId")
+        const session = await readOwnerSession(c)
+        if (session instanceof Response) return session
+        const limitRaw = c.req.query("limit")
+        const limit =
+          limitRaw === undefined
+            ? AI_INVOCATION_HISTORY_DEFAULT_LIMIT
+            : Number(limitRaw)
         if (
-          beforeRequestId === undefined ||
-          !Number.isSafeInteger(startedAt) ||
-          startedAt < 0 ||
-          !isAiServerIdentifier(beforeRequestId)
+          !Number.isSafeInteger(limit) ||
+          limit < 1 ||
+          limit > AI_INVOCATION_HISTORY_MAX_LIMIT
         ) {
           return problem("validation-failed", requestId)
         }
-        before = { requestId: beforeRequestId, startedAt }
-      }
-      try {
-        const page = await listAiInvocationHistory(c.env.DB, {
-          ...(before === undefined ? {} : { before }),
-          limit,
-          now: Date.now(),
-        })
-        return c.json(page, 200, { "cache-control": "private, no-store" })
-      } catch {
-        return problem("service-unavailable", requestId)
-      }
+        const beforeStartedAt = c.req.query("beforeStartedAt")
+        const beforeRequestId = c.req.query("beforeRequestId")
+        let before
+        if (beforeStartedAt !== undefined || beforeRequestId !== undefined) {
+          const startedAt = Number(beforeStartedAt)
+          if (
+            beforeRequestId === undefined ||
+            !Number.isSafeInteger(startedAt) ||
+            startedAt < 0 ||
+            !isAiServerIdentifier(beforeRequestId)
+          ) {
+            return problem("validation-failed", requestId)
+          }
+          before = { requestId: beforeRequestId, startedAt }
+        }
+        try {
+          const page = await listAiInvocationHistory(c.env.DB, {
+            ...(before === undefined ? {} : { before }),
+            limit,
+            now: Date.now(),
+          })
+          return c.json(page, 200, { "cache-control": "private, no-store" })
+        } catch {
+          return problem("service-unavailable", requestId)
+        }
+      })()
+      c.executionCtx.waitUntil(response)
+      return withReadDeadline(response, c.get("requestId"))
     },
   )
 }

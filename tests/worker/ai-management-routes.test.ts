@@ -6,10 +6,13 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import worker from "../../src/worker"
-import { ownerSession } from "./fixtures/session"
+import { instrumentDatabase, ownerSession } from "./fixtures/session"
 
 let sequence = 0
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.useRealTimers()
+})
 async function call(
   path: string,
   options: {
@@ -57,6 +60,156 @@ beforeEach(async () => {
 })
 
 describe("AI management routes", () => {
+  it.each([false, true])(
+    "bounds every mutation body before Session inspection (authenticated: %s)",
+    async (authenticated) => {
+      const cookie = authenticated ? (await ownerSession()).cookie : undefined
+      const id = crypto.randomUUID()
+      const bytes = new TextEncoder().encode(
+        JSON.stringify({ padding: "x".repeat(2 * 1_048_576) }),
+      )
+      const upstream = vi.spyOn(globalThis, "fetch")
+      let queries = 0
+      const database = instrumentDatabase(env.DB, () => {
+        queries++
+      })
+      for (const [method, path] of [
+        ["POST", "/api/ai/connections"],
+        ["PATCH", `/api/ai/connections/${id}`],
+        ["DELETE", `/api/ai/connections/${id}`],
+        ["PUT", `/api/ai/connections/${id}/credential`],
+        ["POST", `/api/ai/connections/${id}/disconnect`],
+        ["POST", `/api/ai/connections/${id}/models/refresh`],
+      ]) {
+        let consumed = 0
+        let cancelled = false
+        const context = createExecutionContext()
+        const request = new Request(env.APP_ORIGIN + path, {
+          method,
+          headers: {
+            "content-type": "application/json",
+            origin: env.APP_ORIGIN,
+            "cf-connecting-ip": `ai-body-${++sequence}`,
+            ...(cookie ? { cookie } : {}),
+          },
+          body: new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (consumed === bytes.length) {
+                controller.close()
+                return
+              }
+              const chunk = bytes.slice(consumed, consumed + 65_536)
+              consumed += chunk.length
+              controller.enqueue(chunk)
+            },
+            cancel() {
+              cancelled = true
+            },
+          }),
+        })
+        expect(request.headers.has("content-length")).toBe(false)
+        const response = await worker.fetch(
+          request,
+          { ...env, DB: database },
+          context,
+        )
+        await waitOnExecutionContext(context)
+        expect(response.status, `${method} ${path}`).toBe(413)
+        expect(consumed).toBeLessThan(bytes.length)
+        expect(cancelled).toBe(true)
+      }
+      expect(queries).toBe(0)
+      expect(upstream).not.toHaveBeenCalled()
+    },
+  )
+
+  it("shares each mutation's IP limit across arbitrary connection IDs", async () => {
+    const ip = `2001:db8::${crypto.randomUUID().slice(0, 4)}`
+    for (const [method, suffix] of [
+      ["PATCH", ""],
+      ["DELETE", ""],
+      ["PUT", "/credential"],
+      ["POST", "/disconnect"],
+      ["POST", "/models/refresh"],
+    ]) {
+      for (let attempt = 0; attempt < 61; attempt++) {
+        const context = createExecutionContext()
+        const response = await worker.fetch(
+          new Request(
+            `${env.APP_ORIGIN}/api/ai/connections/${crypto.randomUUID()}${suffix}`,
+            {
+              method,
+              headers: {
+                "content-type": "application/json",
+                origin: env.APP_ORIGIN,
+                "cf-connecting-ip": ip,
+              },
+            },
+          ),
+          env,
+          context,
+        )
+        await waitOnExecutionContext(context)
+        expect(response.status, `${method} ${suffix} attempt ${attempt}`).toBe(
+          attempt < 60 ? 401 : 429,
+        )
+      }
+    }
+  })
+
+  it("bounds all management reads including Session lookup and discards late cookies", async () => {
+    const session = await ownerSession()
+    let release!: () => void
+    let enter!: () => void
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve
+    })
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const database = instrumentDatabase(env.DB, async () => {
+      enter()
+      await blocked
+    })
+    const paths = [
+      "/api/ai/providers",
+      "/api/ai/connections",
+      "/api/ai/invocations",
+    ]
+    const contexts = paths.map(() => createExecutionContext())
+    const observed: number[] = []
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+    const pending = paths.map((path, index) =>
+      Promise.resolve(
+        worker.fetch(
+          new Request(env.APP_ORIGIN + path, {
+            headers: { cookie: session.cookie },
+          }),
+          { ...env, DB: database },
+          contexts[index],
+        ),
+      ).then((response) => {
+        observed.push(response.status)
+        return response
+      }),
+    )
+    try {
+      await entered
+      await vi.advanceTimersByTimeAsync(5_001)
+      expect(observed).toEqual([504, 504, 504])
+    } finally {
+      release()
+      const responses = await Promise.all(pending)
+      await Promise.all(
+        contexts.map((context) => waitOnExecutionContext(context)),
+      )
+      for (const response of responses) {
+        expect(response.status).toBe(504)
+        expect(response.headers.has("set-cookie")).toBe(false)
+      }
+    }
+  })
+
   it("requires an owner session on every management route", async () => {
     // Every registered §6.1 operation is covered, including the
     // authorization and model-refresh entries.

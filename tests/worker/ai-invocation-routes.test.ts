@@ -11,7 +11,7 @@ import {
   encryptAiSecret,
 } from "../../src/worker/ai/credential-cipher"
 import { readAiInvocation } from "../../src/worker/ai/invocations"
-import { ownerSession } from "./fixtures/session"
+import { instrumentDatabase, ownerSession } from "./fixtures/session"
 
 const connectionId = "11111111-1111-1111-1111-111111111111"
 const upstreamModelId = "gpt-test"
@@ -184,6 +184,142 @@ beforeEach(async () => {
 })
 
 describe("AI invocation routes", () => {
+  it("bounds model listing while API key verification is pending", async () => {
+    const key = await createAiKey([externalModelId])
+    let release!: () => void
+    let enter!: () => void
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve
+    })
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const database = instrumentDatabase(env.DB, async () => {
+      enter()
+      await blocked
+    })
+    const context = createExecutionContext()
+    let status: number | undefined
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+    const pending = Promise.resolve(
+      worker.fetch(
+        new Request(`${env.APP_ORIGIN}/api/ai/models`, {
+          headers: {
+            "x-api-key": key,
+            "cf-connecting-ip": `ai-read-${++sequence}`,
+          },
+        }),
+        { ...env, DB: database },
+        context,
+      ),
+    ).then((response) => {
+      status = response.status
+      return response
+    })
+    try {
+      await entered
+      await vi.advanceTimersByTimeAsync(5_001)
+      expect(status).toBe(504)
+    } finally {
+      release()
+      await pending
+      await waitOnExecutionContext(context)
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    ["connection lookup", 'FROM "ai_connections"'],
+    ["model lookup", 'FROM "ai_models"'],
+    ["identity write", 'SET "connectionId" = ?2'],
+    ["reservation cleanup", 'DELETE FROM "ai_invocations"'],
+    ["terminal write", 'SET "status" = ?2'],
+  ])(
+    "returns at the total deadline during %s and observes late work",
+    async (stage, query) => {
+      const key = await createAiKey([externalModelId])
+      let release!: () => void
+      let enter!: () => void
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve
+      })
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const queriesAfterBlocking: string[] = []
+      let hasEntered = false
+      const database = instrumentDatabase(env.DB, async (sql) => {
+        if (hasEntered) queriesAfterBlocking.push(sql)
+        if (sql.includes(query)) {
+          hasEntered = true
+          enter()
+          await blocked
+        }
+      })
+      const upstream = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async () => sseUpstream(completedFrames))
+      const decrypt = vi.spyOn(crypto.subtle, "decrypt")
+      const context = createExecutionContext()
+      let response: Response | undefined
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
+      const pending = Promise.resolve(
+        worker.fetch(
+          new Request(`${env.APP_ORIGIN}/api/ai/responses`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-api-key": key,
+              "cf-connecting-ip": `ai-deadline-${++sequence}`,
+            },
+            body: JSON.stringify(
+              stage === "reservation cleanup"
+                ? {}
+                : { model: externalModelId, input: "hi", stream: false },
+            ),
+          }),
+          { ...env, DB: database },
+          context,
+        ),
+      ).then((value) => {
+        response = value
+        return value
+      })
+      try {
+        await entered
+        await vi.advanceTimersByTimeAsync(300_001)
+        expect(response?.status).toBe(504)
+        const timedOutBody = await response?.clone().text()
+        release()
+        await pending
+        await waitOnExecutionContext(context)
+        expect(await response?.text()).toBe(timedOutBody)
+        expect(upstream).toHaveBeenCalledTimes(
+          stage === "terminal write" ? 1 : 0,
+        )
+        expect(await reservedRowCount()).toBe(0)
+        expect(decrypt).toHaveBeenCalledTimes(
+          stage === "terminal write" ? 1 : 0,
+        )
+        const requestId = response!.headers.get("x-request-id")!
+        const record = await readAiInvocation(env.DB, requestId, Date.now())
+        expect(record?.status).toBe(
+          stage === "terminal write" ? "succeeded" : undefined,
+        )
+        expect(
+          queriesAfterBlocking.some((sql) => sql.includes('FROM "ai_models"')),
+        ).toBe(false)
+      } finally {
+        release()
+        await pending
+        await waitOnExecutionContext(context)
+        vi.useRealTimers()
+        upstream.mockRestore()
+        decrypt.mockRestore()
+      }
+    },
+  )
+
   it("lists only the models the key was granted", async () => {
     const key = await createAiKey([externalModelId])
     const response = await call("/api/ai/models", {
