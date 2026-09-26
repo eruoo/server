@@ -17,6 +17,25 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM oauthRefreshTokenFamilyRevocation"),
   ])
 })
+it("rejects duplicate token parameters without consuming a valid refresh grant", async () => {
+  const session = await ownerSession()
+  const grant = await issueGrant(session.cookie)
+  const values = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: "eruoo-desktop",
+    refresh_token: grant.refresh_token,
+  })
+  values.append("grant_type", "refresh_token")
+  const rejected = await oauthFetch("/api/auth/oauth2/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: values,
+  })
+  expect(rejected.status).toBe(400)
+  expect(await rejected.json()).toMatchObject({ error: "invalid_request" })
+  expect((await refresh(grant.refresh_token)).status).toBe(200)
+})
+
 it("does not branch a refresh family under two simultaneous rotations", async () => {
   const session = await ownerSession()
   const grant = await issueGrant(session.cookie)

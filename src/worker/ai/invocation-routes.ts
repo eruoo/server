@@ -5,7 +5,7 @@ import { scheduleAuditEvent } from "../audit"
 import { inspectCredentialCarriers } from "../auth/carriers"
 import { limitAuthEntry } from "../auth/entry-limit"
 import { getRequestAuth } from "../auth/session"
-import { errorResponse, problem } from "../http/response"
+import { errorResponse, problem, withReadDeadline } from "../http/response"
 import type { AppBindings } from "../http/types"
 import { getAiConnection } from "./connections"
 import {
@@ -248,37 +248,44 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
       },
     }),
     async (c) => {
-      const requestId = c.get("requestId")
-      const rejected = rejectNonApiKeyCarrier(c)
-      if (rejected) return rejected
-      const limited = await limitAuthEntry(
-        c,
-        "GET /api/ai/models",
-        c.env.AI_RATE_LIMITER,
-      )
-      if (limited) return limited
-      const key = await verifyAiKey(c)
-      if (key instanceof Response) return key
-      if (!authorizeAiModelRead(key.permissions)) {
-        return problem("permission-denied", requestId)
-      }
-      try {
-        const models = await listAiAuthorizedModels(c.env.DB, key.permissions)
-        return c.json(
-          {
-            models: models.map((model) => ({
-              capabilities: model.capabilities,
-              discoveredAt: model.discoveredAt,
-              displayName: model.displayName,
-              id: model.upstreamModelId,
-            })),
-          },
-          200,
-          { "cache-control": "private, no-store" },
+      const startedAt = Date.now()
+      const response = (async () => {
+        const requestId = c.get("requestId")
+        const rejected = rejectNonApiKeyCarrier(c)
+        if (rejected) return rejected
+        const limited = await limitAuthEntry(
+          c,
+          "GET /api/ai/models",
+          c.env.AI_RATE_LIMITER,
         )
-      } catch {
-        return problem("service-unavailable", requestId)
-      }
+        if (limited) return limited
+        if (Date.now() - startedAt >= 5_000)
+          return problem("request-timeout", requestId)
+        const key = await verifyAiKey(c)
+        if (key instanceof Response) return key
+        if (!authorizeAiModelRead(key.permissions)) {
+          return problem("permission-denied", requestId)
+        }
+        try {
+          const models = await listAiAuthorizedModels(c.env.DB, key.permissions)
+          return c.json(
+            {
+              models: models.map((model) => ({
+                capabilities: model.capabilities,
+                discoveredAt: model.discoveredAt,
+                displayName: model.displayName,
+                id: model.upstreamModelId,
+              })),
+            },
+            200,
+            { "cache-control": "private, no-store" },
+          )
+        } catch {
+          return problem("service-unavailable", requestId)
+        }
+      })()
+      c.executionCtx.waitUntil(response)
+      return withReadDeadline(response, c.get("requestId"))
     },
   )
 
@@ -452,131 +459,167 @@ export function registerAiInvocationRoutes(app: OpenAPIHono<AppBindings>) {
       }
       stopAdmissionTimer()
 
-      const parsed = await readBoundedBody(c)
-      if (!parsed.ok) {
-        await abandonReservation()
-        return parsed.response
+      const rejectExpiredInvocation = () => {
+        c.executionCtx.waitUntil(abandonReservation())
+        return problem("request-timeout", requestId)
       }
-      const validated = validateResponsesRequest(parsed.body)
-      if (!validated.ok) {
-        await abandonReservation()
-        return problem("validation-failed", requestId)
-      }
+      let totalTimer: ReturnType<typeof setTimeout> | undefined
+      const totalDeadline = new Promise<null>((resolve) => {
+        totalTimer = setTimeout(
+          () => resolve(null),
+          Math.max(0, deadlineAt - Date.now()),
+        )
+      })
+      const completion = (async () => {
+        const parsed = await readBoundedBody(c)
+        if (Date.now() >= deadlineAt) return rejectExpiredInvocation()
+        if (!parsed.ok) {
+          await abandonReservation()
+          return parsed.response
+        }
+        const validated = validateResponsesRequest(parsed.body)
+        if (!validated.ok) {
+          await abandonReservation()
+          return problem("validation-failed", requestId)
+        }
 
-      // Resolve the public model ID against the live catalog, then require
-      // both the invoke operation and the exact model grant. Unknown and
-      // ungranted models answer identically, so the endpoint is not a
-      // catalog oracle.
-      const grant = readAiKeyConnectionGrant(key.permissions)
-      let observedCredentialVersion = -1
-      let observedPermissionVersion = -1
-      let connectionId: string | null = null
-      let upstreamModelId: string | null = null
-      let modelCapabilities: string | null = null
-      // A caller key routes only to its one explicitly bound connection.
-      if (grant !== null && isAiServerIdentifier(grant.connectionId)) {
-        try {
-          const connection = await getAiConnection(c.env.DB, grant.connectionId)
-          if (
-            connection !== null &&
-            connection.enabled &&
-            connection.authorizationStatus === "connected"
-          ) {
-            const models = await listAiModels(c.env.DB, connection.id)
-            const model = models.find(
-              (candidate) =>
-                candidate.upstreamModelId === validated.value.model,
+        // Resolve the public model ID against the live catalog, then require
+        // both the invoke operation and the exact model grant. Unknown and
+        // ungranted models answer identically, so the endpoint is not a
+        // catalog oracle.
+        const grant = readAiKeyConnectionGrant(key.permissions)
+        let observedCredentialVersion = -1
+        let observedPermissionVersion = -1
+        let connectionId: string | null = null
+        let upstreamModelId: string | null = null
+        let modelCapabilities: string | null = null
+        // A caller key routes only to its one explicitly bound connection.
+        if (grant !== null && isAiServerIdentifier(grant.connectionId)) {
+          try {
+            const connection = await getAiConnection(
+              c.env.DB,
+              grant.connectionId,
             )
+            if (Date.now() >= deadlineAt) return rejectExpiredInvocation()
             if (
-              model !== undefined &&
-              model.snapshotCredentialVersion === connection.credentialVersion
+              connection !== null &&
+              connection.enabled &&
+              connection.authorizationStatus === "connected"
             ) {
-              observedCredentialVersion = connection.credentialVersion
-              observedPermissionVersion = connection.permissionVersion
-              connectionId = connection.id
-              upstreamModelId = validated.value.model
-              modelCapabilities = model.capabilities
+              const models = await listAiModels(c.env.DB, connection.id)
+              if (Date.now() >= deadlineAt) return rejectExpiredInvocation()
+              const model = models.find(
+                (candidate) =>
+                  candidate.upstreamModelId === validated.value.model,
+              )
+              if (
+                model !== undefined &&
+                model.snapshotCredentialVersion === connection.credentialVersion
+              ) {
+                observedCredentialVersion = connection.credentialVersion
+                observedPermissionVersion = connection.permissionVersion
+                connectionId = connection.id
+                upstreamModelId = validated.value.model
+                modelCapabilities = model.capabilities
+              }
             }
+          } catch {
+            await abandonReservation()
+            return problem("service-unavailable", requestId)
+          }
+        }
+        if (
+          connectionId === null ||
+          upstreamModelId === null ||
+          !authorizeAiInvocation(
+            key.permissions,
+            connectionId,
+            upstreamModelId,
+            observedPermissionVersion,
+          )
+        ) {
+          await abandonReservation()
+          return problem("permission-denied", requestId)
+        }
+
+        // Capabilities are checked after the grant check, so an ungranted model
+        // never reveals what its catalog entry declares. Unconfirmed capability
+        // is never treated as support: the request is refused here, before any
+        // upstream call.
+        const capabilityCheck = validateAiRequestCapabilities({
+          capabilities: modelCapabilities,
+          request: validated.value,
+        })
+        if (!capabilityCheck.ok) {
+          await abandonReservation()
+          return problem("validation-failed", requestId)
+        }
+
+        // The reservation is identified only now: the slot was held from the
+        // start, and a reservation that is already gone means the call must not
+        // start.
+        try {
+          const assigned = await assignAiInvocationIdentity(c.env.DB, {
+            connectionId,
+            requestId,
+            upstreamModelId,
+          })
+          if (Date.now() >= deadlineAt) return rejectExpiredInvocation()
+          if (!assigned.assigned) {
+            await abandonReservation()
+            return problem("service-unavailable", requestId)
           }
         } catch {
           await abandonReservation()
           return problem("service-unavailable", requestId)
         }
-      }
-      if (
-        connectionId === null ||
-        upstreamModelId === null ||
-        !authorizeAiInvocation(
-          key.permissions,
-          connectionId,
-          upstreamModelId,
+
+        const delivery = await invokeDeepSeekResponses({
+          apiKeyId: key.id,
+          observedCredentialVersion,
           observedPermissionVersion,
-        )
-      ) {
-        await abandonReservation()
-        return problem("permission-denied", requestId)
-      }
-
-      // Capabilities are checked after the grant check, so an ungranted model
-      // never reveals what its catalog entry declares. Unconfirmed capability
-      // is never treated as support: the request is refused here, before any
-      // upstream call.
-      const capabilityCheck = validateAiRequestCapabilities({
-        capabilities: modelCapabilities,
-        request: validated.value,
-      })
-      if (!capabilityCheck.ok) {
-        await abandonReservation()
-        return problem("validation-failed", requestId)
-      }
-
-      // The reservation is identified only now: the slot was held from the
-      // start, and a reservation that is already gone means the call must not
-      // start.
-      try {
-        const assigned = await assignAiInvocationIdentity(c.env.DB, {
           connectionId,
+          credentialKeys: c.env.AI_CREDENTIAL_KEYS,
+          database: c.env.DB,
+          deadlineAt,
+          environment: c.env.APP_ORIGIN,
+          request: validated.value,
           requestId,
+          signal: c.req.raw.signal,
+          startedAt,
           upstreamModelId,
         })
-        if (!assigned.assigned) {
-          await abandonReservation()
-          return problem("service-unavailable", requestId)
-        }
-      } catch {
-        await abandonReservation()
-        return problem("service-unavailable", requestId)
+        // The streaming path settles after the stream closes; the caller keeps
+        // it alive so the invocation outcome is always committed. A commit that
+        // cannot land rejects, and the row stays reserved for lease recovery,
+        // so the rejection is reported instead of escaping.
+        c.executionCtx.waitUntil(
+          delivery.settled.catch((error: unknown) => {
+            console.warn({
+              event: "ai_invocation_settle_failed",
+              message: error instanceof Error ? error.message : "unknown",
+              requestId,
+            })
+          }),
+        )
+        return delivery.response
+      })()
+      try {
+        const response = await Promise.race([completion, totalDeadline])
+        if (response !== null) return response
+        // D1 cannot be cancelled. Observe the late result, but never deliver
+        // it or wait for its cleanup before returning the deadline response.
+        c.executionCtx.waitUntil(
+          completion
+            .then((late) => late.body?.cancel())
+            .catch(() => {
+              console.warn({ event: "ai_invocation_late_failed", requestId })
+            }),
+        )
+        return rejectExpiredInvocation()
+      } finally {
+        clearTimeout(totalTimer)
       }
-
-      const delivery = await invokeDeepSeekResponses({
-        apiKeyId: key.id,
-        observedCredentialVersion,
-        observedPermissionVersion,
-        connectionId,
-        credentialKeys: c.env.AI_CREDENTIAL_KEYS,
-        database: c.env.DB,
-        deadlineAt,
-        environment: c.env.APP_ORIGIN,
-        request: validated.value,
-        requestId,
-        signal: c.req.raw.signal,
-        startedAt,
-        upstreamModelId,
-      })
-      // The streaming path settles after the stream closes; the caller keeps
-      // it alive so the invocation outcome is always committed. A commit that
-      // cannot land rejects, and the row stays reserved for lease recovery,
-      // so the rejection is reported instead of escaping.
-      c.executionCtx.waitUntil(
-        delivery.settled.catch((error: unknown) => {
-          console.warn({
-            event: "ai_invocation_settle_failed",
-            message: error instanceof Error ? error.message : "unknown",
-            requestId,
-          })
-        }),
-      )
-      return delivery.response
     },
   )
 }

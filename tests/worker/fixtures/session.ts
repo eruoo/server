@@ -62,24 +62,28 @@ export async function ownerSession(
 
 export function instrumentDatabase(
   database: D1Database,
-  beforeQuery: () => Promise<void> | void,
+  beforeQuery: (sql: string) => Promise<void> | void,
 ) {
-  const wrap = (statement: D1PreparedStatement): D1PreparedStatement =>
+  const wrap = (
+    statement: D1PreparedStatement,
+    sql: string,
+  ): D1PreparedStatement =>
     new Proxy(statement, {
       get(target, key) {
         if (key === "bind")
-          return (...values: unknown[]) => wrap(target.bind(...values))
+          return (...values: unknown[]) => wrap(target.bind(...values), sql)
         const value = Reflect.get(target, key)
         if (typeof value !== "function") return value
         return async (...args: unknown[]) => {
-          await beforeQuery()
+          await beforeQuery(sql)
           return Reflect.apply(value, target, args)
         }
       },
     })
   return new Proxy(database, {
     get(target, key) {
-      if (key === "prepare") return (sql: string) => wrap(target.prepare(sql))
+      if (key === "prepare")
+        return (sql: string) => wrap(target.prepare(sql), sql)
       const value = Reflect.get(target, key)
       return typeof value === "function" ? value.bind(target) : value
     },
