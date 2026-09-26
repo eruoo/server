@@ -1,8 +1,10 @@
 import { stripAccessTokenAuthorizationScheme } from "better-auth/oauth2"
 import type { MiddlewareHandler } from "hono"
 
+import { supportsOfflineAccess } from "../../shared/oauth"
 import { scheduleAuditEvent } from "../audit"
 import type { AppBindings } from "../http/types"
+import { readOAuthClientPolicy } from "./client-policy"
 import { parseOAuthFormRequest } from "./protocol"
 
 interface RefreshFamilyCapture {
@@ -317,12 +319,14 @@ export const enforceOAuthRefreshFamilyRevocation: MiddlewareHandler<
     return
   }
   if (operation === "revoke") {
-    const client = await context.env.DB.prepare(
-      "SELECT 1 FROM oauthClient WHERE clientId=? AND disabled=0 AND tokenEndpointAuthMethod='none'",
+    const client = await readOAuthClientPolicy(
+      context.env.DB,
+      requestedClientId,
     )
-      .bind(requestedClientId)
-      .first()
-    if (!client || requestedClientId !== "eruoo-desktop") {
+    if (
+      client.tokenEndpointAuthMethod !== "none" ||
+      !supportsOfflineAccess(client)
+    ) {
       await next()
       return
     }

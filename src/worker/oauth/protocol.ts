@@ -3,15 +3,23 @@ import {
   oauthProviderOpenIdConfigMetadata,
 } from "@better-auth/oauth-provider"
 import type { Context, MiddlewareHandler } from "hono"
+import { decodeJwt } from "jose"
 
 import {
-  enabledOAuthClients,
+  findOAuthClient,
   oauthScopes,
   OAUTH_RESOURCE,
+  type OAuthStaticClient,
 } from "../../shared/oauth"
 import { hasUnsupportedBodyAccessToken } from "../auth/carriers"
 import { getRequestAuth } from "../auth/session"
 import type { AppBindings } from "../http/types"
+import {
+  clientAllowsScopes,
+  matchesRegisteredRedirect,
+  OAuthClientPolicyError,
+  readOAuthClientPolicy,
+} from "./client-policy"
 
 export const oauthMetadataPaths = [
   "/.well-known/oauth-authorization-server",
@@ -28,6 +36,7 @@ type OAuthErrorCode =
   | "invalid_request"
   | "invalid_scope"
   | "invalid_target"
+  | "unauthorized_client"
   | "temporarily_unavailable"
 
 interface OAuthValidationFailure {
@@ -201,60 +210,12 @@ async function readFormValues(
   return values
 }
 
-interface OAuthClientRow {
-  disabled: number | null
-  redirectUris: string
-  requirePKCE: number | null
-  tokenEndpointAuthMethod: string | null
-}
-
-function matchesRegisteredRedirect(
-  requestedValue: string,
-  registeredValues: readonly string[],
-  applicationType: "native" | "web",
-): boolean {
-  if (registeredValues.includes(requestedValue)) return true
-  if (applicationType !== "native") return false
-
-  const requested =
-    /^http:\/\/(127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})(\/[^#]*)$/.exec(
-      requestedValue,
-    )
-  const requestedHost = requested?.[1]
-  const requestedPort = requested?.[2]
-  const requestedSuffix = requested?.[3]
-
-  if (
-    !requestedHost ||
-    !requestedPort ||
-    !requestedSuffix ||
-    Number(requestedPort) > 65_535
-  ) {
-    return false
-  }
-
-  return registeredValues.some((registeredValue) => {
-    const registered = new URL(registeredValue)
-    const registeredHost = registered.hostname
-
-    return (
-      registered.protocol === "http:" &&
-      registeredHost === requestedHost &&
-      registered.port === "" &&
-      registered.username === "" &&
-      registered.password === "" &&
-      registered.hash === "" &&
-      `${registered.pathname}${registered.search}` === requestedSuffix
-    )
-  })
-}
-
 async function validateAuthorizationClient(
   context: Context<AppBindings>,
   clientIds: readonly string[],
   redirectUris: readonly string[],
 ): Promise<
-  | { redirectUri: string }
+  | { redirectUri: string; policy: OAuthStaticClient }
   | {
       failure: OAuthValidationFailure
       redirectUri?: string
@@ -280,10 +241,8 @@ async function validateAuthorizationClient(
     }
   }
 
-  const client = enabledOAuthClients.find(
-    (candidate) => candidate.clientId === clientId,
-  )
-  if (!client) {
+  const client = findOAuthClient(clientId)
+  if (!client?.enabled) {
     return {
       failure: {
         error: "invalid_client",
@@ -310,36 +269,7 @@ async function validateAuthorizationClient(
   }
 
   try {
-    const row = await context.env.DB.prepare(
-      `SELECT disabled, redirectUris, requirePKCE, tokenEndpointAuthMethod
-       FROM oauthClient
-       WHERE clientId = ?1
-       LIMIT 1`,
-    )
-      .bind(clientId)
-      .first<OAuthClientRow>()
-    const storedRedirectUris = row
-      ? (JSON.parse(row.redirectUris) as unknown)
-      : undefined
-
-    if (
-      !row ||
-      row.disabled !== 0 ||
-      row.requirePKCE !== 1 ||
-      row.tokenEndpointAuthMethod !== "none" ||
-      !Array.isArray(storedRedirectUris) ||
-      !storedRedirectUris.every((value) => typeof value === "string") ||
-      JSON.stringify(storedRedirectUris) !== JSON.stringify(client.redirectUris)
-    ) {
-      return {
-        failure: {
-          error: "temporarily_unavailable",
-          errorDescription: "the OAuth client configuration is unavailable",
-        },
-        redirectUri,
-        status: 503,
-      }
-    }
+    await readOAuthClientPolicy(context.env.DB, clientId)
   } catch (error) {
     console.error({
       error: error instanceof Error ? error.name : "unknown_error",
@@ -356,7 +286,7 @@ async function validateAuthorizationClient(
     }
   }
 
-  return { redirectUri }
+  return { redirectUri, policy: client }
 }
 
 function redirectAuthorizationError(
@@ -498,7 +428,15 @@ export const validateOAuthAuthorizationRequest: MiddlewareHandler<
       duplicate,
       states[0],
     )
-  const scopeError = validateScopeValues(scopes)
+  const scopeError =
+    validateScopeValues(scopes) ??
+    (scopes[0] !== undefined &&
+    !clientAllowsScopes(client.policy, scopes[0].split(" "))
+      ? {
+          error: "invalid_scope" as const,
+          errorDescription: "scope is not allowed for this client",
+        }
+      : undefined)
   if (scopeError) {
     return redirectAuthorizationError(
       context,
@@ -519,6 +457,44 @@ export const validateOAuthAuthorizationRequest: MiddlewareHandler<
   }
 
   await next()
+}
+
+async function readFormClientPolicy(
+  context: Context<AppBindings>,
+  values: URLSearchParams,
+): Promise<OAuthStaticClient | Response> {
+  // All currently managed clients are public. Never let the family-revocation
+  // shortcut authenticate a confidential client or bypass supplied credentials.
+  if (
+    context.req.header("authorization") ||
+    ["client_secret", "client_assertion", "client_assertion_type"].some((key) =>
+      values.has(key),
+    )
+  ) {
+    return oauthError(context, {
+      error: "invalid_client",
+      errorDescription: "this client requires public-client authentication",
+    })
+  }
+  try {
+    return await readOAuthClientPolicy(
+      context.env.DB,
+      values.get("client_id") ?? "",
+    )
+  } catch (error) {
+    const code =
+      error instanceof OAuthClientPolicyError
+        ? error.error
+        : "temporarily_unavailable"
+    return oauthError(
+      context,
+      {
+        error: code,
+        errorDescription: "the OAuth client configuration is unavailable",
+      },
+      code === "invalid_client" ? 400 : 503,
+    )
+  }
 }
 
 export const validateOAuthTokenRequest: MiddlewareHandler<AppBindings> = async (
@@ -559,6 +535,24 @@ export const validateOAuthTokenRequest: MiddlewareHandler<AppBindings> = async (
   const resourceError = validateResourceValues(resources, requiresResource)
   if (resourceError) return oauthError(context, resourceError)
 
+  const client = await readFormClientPolicy(context, values)
+  if (client instanceof Response) return client
+  if (grantType === "authorization_code" || grantType === "refresh_token") {
+    if (!client.grantTypes.includes(grantType))
+      return oauthError(context, {
+        error: "unauthorized_client",
+        errorDescription: "grant_type is not allowed for this client",
+      })
+  }
+  if (
+    scopes[0] !== undefined &&
+    !clientAllowsScopes(client, scopes[0].split(" "))
+  )
+    return oauthError(context, {
+      error: "invalid_scope",
+      errorDescription: "scope is not allowed for this client",
+    })
+
   await next()
 }
 
@@ -574,6 +568,73 @@ export const validateOAuthRevocationRequest: MiddlewareHandler<
   )
   if (singletonError) return oauthError(context, singletonError)
 
+  const client = await readFormClientPolicy(context, values)
+  if (client instanceof Response) return client
+
+  await next()
+}
+
+export const validateOAuthEndSessionRequest: MiddlewareHandler<
+  AppBindings
+> = async (context, next) => {
+  // Confirmation has its own signed cookie and CSRF checks in the provider.
+  if (context.req.path.endsWith("/confirm")) return next()
+  const query = new URL(context.req.url).searchParams
+  const form =
+    context.req.method === "POST"
+      ? await readFormValues(context)
+      : new URLSearchParams()
+  if (form instanceof Response) return form
+  const values = new URLSearchParams([...query, ...form])
+  const duplicate = validateSingletonFormParameters(values, [
+    "client_id",
+    "id_token_hint",
+    "post_logout_redirect_uri",
+    "state",
+  ])
+  if (duplicate) return oauthError(context, duplicate)
+  let clientId = values.get("client_id")
+  if (!clientId && values.has("id_token_hint")) {
+    try {
+      // This unverified hint only selects a policy to restrict the request.
+      // The provider still verifies the ID token before authorizing logout.
+      const hint = decodeJwt(values.get("id_token_hint")!)
+      const audiences = typeof hint.aud === "string" ? [hint.aud] : hint.aud
+      clientId =
+        typeof hint.azp === "string"
+          ? hint.azp
+          : audiences?.length === 1
+            ? audiences[0]!
+            : null
+    } catch {
+      return oauthError(context, {
+        error: "invalid_request",
+        errorDescription: "invalid id_token_hint",
+      })
+    }
+  }
+  if (clientId) {
+    try {
+      const client = await readOAuthClientPolicy(context.env.DB, clientId)
+      if (!client.enableEndSession)
+        return context.json({ error: "invalid_client" }, 401, {
+          "cache-control": "no-store",
+        })
+    } catch (error) {
+      const code =
+        error instanceof OAuthClientPolicyError
+          ? error.error
+          : "temporarily_unavailable"
+      return oauthError(
+        context,
+        {
+          error: code,
+          errorDescription: "the OAuth client configuration is unavailable",
+        },
+        code === "invalid_client" ? 400 : 503,
+      )
+    }
+  }
   await next()
 }
 

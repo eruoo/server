@@ -4,6 +4,7 @@ import path from "node:path"
 
 import { parse } from "jsonc-parser"
 
+import { staticOAuthRegistrationSnapshot } from "../src/shared/oauth-registration"
 import { artifactDigests, digest } from "./lib/release-artifact"
 const environment = process.argv[2]
 if (environment !== "staging" && environment !== "production")
@@ -40,6 +41,10 @@ await cp("migrations", path.join(destination, "migrations"), {
 for (const file of ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"])
   await cp(file, path.join(destination, file))
 await cp("patches", path.join(destination, "patches"), { recursive: true })
+await writeFile(
+  path.join(destination, "oauth-registration.json"),
+  JSON.stringify(staticOAuthRegistrationSnapshot(), null, 2) + "\n",
+)
 const deploy = JSON.parse(
   await readFile(".wrangler/deploy/config.json", "utf8"),
 )

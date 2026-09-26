@@ -1,14 +1,15 @@
 import type { Context, MiddlewareHandler } from "hono"
 
-import { assertAuditSecret, scheduleAuditEvent } from "../audit"
+import { assertAuditSecret } from "../audit"
 import { inspectCredentialCarriers } from "../auth/carriers"
 import { limitAuthEntry } from "../auth/entry-limit"
-import { getRequestAuth, readOwnerSession } from "../auth/session"
+import { handleRequestAuth, readOwnerSession } from "../auth/session"
 import { withReadDeadline } from "../http/response"
 import type { AppBindings } from "../http/types"
 import { enforceOAuthRefreshFamilyRevocation } from "./families"
 import {
   validateOAuthAuthorizationRequest,
+  validateOAuthEndSessionRequest,
   validateOAuthTokenRequest,
   validateOAuthRevocationRequest,
   validateOAuthUserInfoRequest,
@@ -98,6 +99,7 @@ export async function handleOAuthRequest(
   const validators: MiddlewareHandler<AppBindings>[] = []
   if (operation === "authorize")
     validators.push(validateOAuthAuthorizationRequest)
+  if (operation === "logout") validators.push(validateOAuthEndSessionRequest)
   if (operation === "token")
     validators.push(
       validateOAuthTokenRequest,
@@ -137,36 +139,8 @@ export async function handleOAuthRequest(
             context.req.raw = new Request(context.req.raw, { headers })
           }
         }
-        const response = await getRequestAuth(context).handler(context.req.raw)
+        const response = await handleRequestAuth(context, context.req.raw)
         context.res = response
-        if (
-          ["authorize", "browser"].includes(operation) &&
-          response.status < 400
-        ) {
-          let location = response.headers.get("location")
-          if (
-            !location &&
-            response.ok &&
-            response.headers.get("content-type")?.includes("application/json")
-          ) {
-            const body = (await response.clone().json()) as { url?: string }
-            location = body.url ?? null
-          }
-          if (location) {
-            const target = new URL(location, context.env.APP_ORIGIN)
-            if (
-              target.searchParams.has("code") &&
-              !target.searchParams.has("error")
-            )
-              scheduleAuditEvent(context, {
-                type: "oauth_grant_created",
-                outcome: "success",
-                subjectId: context.get("principal")?.subject,
-                clientId: "eruoo-desktop",
-                metadata: { status: response.status },
-              })
-          }
-        }
       }
       const chain = [...validators, terminal]
       async function dispatch(index: number): Promise<void> {

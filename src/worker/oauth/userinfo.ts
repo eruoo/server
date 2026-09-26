@@ -4,6 +4,12 @@ import { OAUTH_RESOURCE } from "../../shared/oauth"
 import { inspectCredentialCarriers } from "../auth/carriers"
 import type { AppBindings } from "../http/types"
 import { verifyOAuthAccessToken } from "./access-token"
+import {
+  clientAllowsResources,
+  clientAllowsScopes,
+  OAuthClientPolicyError,
+  readOAuthClientPolicy,
+} from "./client-policy"
 import { createD1OAuthJwksResolver, OAuthJwksDependencyError } from "./jwks"
 export const verifyUserInfoCredential: MiddlewareHandler<AppBindings> = async (
   c,
@@ -51,16 +57,29 @@ export const verifyUserInfoCredential: MiddlewareHandler<AppBindings> = async (
   }
   if (!verified.principal.scopes.includes("openid"))
     return fail(403, "insufficient_scope")
-  if (verified.principal.clientId !== "eruoo-desktop")
-    return fail(401, "invalid_token")
+  if (!verified.principal.clientId) return fail(401, "invalid_token")
   try {
+    const client = await readOAuthClientPolicy(
+      c.env.DB,
+      verified.principal.clientId,
+    )
+    if (
+      !clientAllowsScopes(client, verified.principal.scopes) ||
+      !clientAllowsResources(client, [OAUTH_RESOURCE])
+    )
+      return fail(401, "invalid_token")
     const owner = await c.env.DB.prepare(
       "SELECT 1 FROM account WHERE userId=? AND providerId='github' AND accountId=? LIMIT 1",
     )
       .bind(verified.principal.subject, c.env.OWNER_GITHUB_ID)
       .first()
     if (!owner) return fail(401, "invalid_token")
-  } catch {
+  } catch (error) {
+    if (
+      error instanceof OAuthClientPolicyError &&
+      error.error === "invalid_client"
+    )
+      return fail(401, "invalid_token")
     return fail(503, "temporarily_unavailable")
   }
   await next()

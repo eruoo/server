@@ -1,6 +1,6 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi"
 
-import { oauthClients } from "../../shared/oauth"
+import { oauthClients, supportsOfflineAccess } from "../../shared/oauth"
 import {
   oauthAuthorizationListSchema,
   revokeOAuthAuthorizationSchema,
@@ -94,7 +94,7 @@ export function registerOAuthAuthorizations(app: OpenAPIHono<AppBindings>) {
       if (owner instanceof Response) return owner
       const client = oauthClients.find((value) => value.clientId === clientId)
       if (!client) return problem("not-found", requestId)
-      if (!client.enabled || !client.supportsOfflineAccess)
+      if (!client.enabled || !supportsOfflineAccess(client))
         return problem("permission-denied", requestId)
       const result = await revokeClientFamilies(
         c.env.DB,

@@ -40,7 +40,13 @@ onMounted(list.load)
         <h2>{{ app.name }}</h2>
         <p>
           {{
-            !app.enabled ? "尚未开放" : app.authorized ? "已授权" : "尚未授权"
+            !app.enabled
+              ? "尚未开放"
+              : !app.supportsOfflineAccess
+                ? "仅用于登录，登录状态由应用管理"
+                : app.authorized
+                  ? "已授权"
+                  : "尚未授权"
           }}
         </p>
         <p v-if="app.authorized">权限：{{ app.scopes.join("、") }}</p>

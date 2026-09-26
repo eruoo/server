@@ -38,6 +38,20 @@ const clients = [
     scopes: [],
     supportsOfflineAccess: false,
   },
+  {
+    activeRefreshTokenCount: 0,
+    authorized: false,
+    clientId: "hako-web",
+    consentCount: 0,
+    enabled: true,
+    lastAuthorizedAt: null,
+    name: "Hako",
+    offlineAccess: false,
+    platform: "web",
+    resources: [],
+    scopes: [],
+    supportsOfflineAccess: false,
+  },
 ]
 
 it("renders authorization state and revokes through the delete endpoint", async () => {
@@ -64,12 +78,15 @@ it("renders authorization state and revokes through the delete endpoint", async 
   })
   await flushPromises()
   const items = wrapper.findAll("li")
-  expect(items).toHaveLength(2)
+  expect(items).toHaveLength(3)
   expect(items[0]!.text()).toContain("eruoo Desktop")
   expect(items[0]!.text()).toContain("已授权")
   expect(items[0]!.text()).toContain("权限：api:read、offline_access")
   expect(items[1]!.text()).toContain("Future Client")
   expect(items[1]!.text()).toContain("尚未开放")
+  expect(items[2]!.text()).toContain("Hako")
+  expect(items[2]!.text()).toContain("仅用于登录，登录状态由应用管理")
+  expect(items[2]!.text()).not.toContain("尚未授权")
   expect(wrapper.findAll(".revoke")).toHaveLength(1)
   await wrapper.find(".revoke").trigger("click")
   await flushPromises()

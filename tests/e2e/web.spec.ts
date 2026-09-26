@@ -231,6 +231,29 @@ test("Web management and complete Passkey registration/login/logout", async ({
     "browser-continuation-state",
   )
   expect(new URL(page.url()).searchParams.get("code")).toBeTruthy()
+
+  await context.clearCookies()
+  const hakoCallback = "https://hako.eruoo.me/api/auth/callback"
+  await page.route(`${hakoCallback}**`, (route) =>
+    route.fulfill({
+      contentType: "text/html; charset=utf-8",
+      body: "<h1>Hako callback received</h1>",
+    }),
+  )
+  query.set("client_id", "hako-web")
+  query.set("redirect_uri", hakoCallback)
+  query.set("scope", "openid profile")
+  query.set("state", "hako-passkey-state")
+  query.set("nonce", "hako-passkey-nonce")
+  await page.goto(`/api/auth/oauth2/authorize?${query}`)
+  await page.getByRole("button", { name: "使用 Passkey 登录" }).click()
+  await expect(
+    page.getByRole("heading", { name: "Hako callback received" }),
+  ).toBeVisible()
+  expect(new URL(page.url()).searchParams.get("state")).toBe(
+    "hako-passkey-state",
+  )
+  expect(new URL(page.url()).searchParams.get("code")).toBeTruthy()
 })
 test("anonymous deep links never mount protected controls", async ({
   page,

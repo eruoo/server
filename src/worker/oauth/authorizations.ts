@@ -3,23 +3,19 @@ import { z } from "zod"
 import {
   enabledOAuthClients,
   oauthClients,
+  findOAuthClient,
+  supportsOfflineAccess,
   OAUTH_RESOURCE,
   type OAuthClientId,
   type OAuthScope,
   type OAuthStaticClient,
 } from "../../shared/oauth"
 import { oauthAuthorizationListSchema } from "../../shared/oauth-authorizations"
+import { matchesOAuthClientRegistration } from "../../shared/oauth-registration"
 const storedDateSchema = z.union([z.string(), z.number().finite()])
 const storedNullableDateSchema = storedDateSchema.nullable()
 
-const storedClientRowsSchema = z.array(
-  z
-    .object({
-      clientId: z.string(),
-      disabled: z.int().nullable(),
-    })
-    .strict(),
-)
+const storedClientRowsSchema = z.array(z.looseObject({ clientId: z.string() }))
 
 const storedConsentRowsSchema = z.array(
   z
@@ -65,10 +61,6 @@ const allowedResources = new Set<string>([OAUTH_RESOURCE])
 
 function invalidStoredAuthorization(): never {
   throw new InvalidStoredOAuthAuthorizationError()
-}
-
-function findStaticClient(clientId: string): OAuthStaticClient | undefined {
-  return oauthClients.find((client) => client.clientId === clientId)
 }
 
 function parseStoredDate(value: string | number): number {
@@ -169,10 +161,12 @@ function validateStoredClients(rows: unknown): void {
   }
 
   for (const row of clients) {
+    const policy = findOAuthClient(row.clientId)
     if (
       storedClientIds.has(row.clientId) ||
       !expectedClientIds.has(row.clientId) ||
-      row.disabled !== 0
+      !policy ||
+      !matchesOAuthClientRegistration(row, policy)
     ) {
       return invalidStoredAuthorization()
     }
@@ -203,7 +197,7 @@ function requireEnabledStoredClient(clientId: string): {
   aggregateClientId: OAuthClientId
   client: OAuthStaticClient
 } {
-  const client = findStaticClient(clientId)
+  const client = findOAuthClient(clientId)
 
   if (!client || !client.enabled) {
     return invalidStoredAuthorization()
@@ -236,28 +230,33 @@ export async function listOAuthAuthorizations(
   subjectId: string,
   now: number,
 ): Promise<z.infer<typeof oauthAuthorizationListSchema>> {
+  const clientIds = enabledOAuthClients.map((client) => client.clientId)
+  const clientFilter = clientIds.map(() => "?").join(",")
   const results = await database.batch<unknown>([
-    database.prepare(
-      `SELECT clientId, disabled
+    database
+      .prepare(
+        `SELECT *
        FROM oauthClient
+       WHERE clientId IN (${clientFilter})
        ORDER BY clientId ASC`,
-    ),
+      )
+      .bind(...clientIds),
     database
       .prepare(
         `SELECT clientId, createdAt, resources, scopes, updatedAt
          FROM oauthConsent
-         WHERE userId = ?1
+         WHERE userId = ? AND clientId IN (${clientFilter})
          ORDER BY id ASC LIMIT 1001`,
       )
-      .bind(subjectId),
+      .bind(subjectId, ...clientIds),
     database
       .prepare(
         `SELECT clientId, createdAt, expiresAt, resources, rotatedAt, scopes
          FROM oauthRefreshToken
-         WHERE userId = ?1 AND revoked IS NULL
+         WHERE userId = ? AND clientId IN (${clientFilter}) AND revoked IS NULL
          ORDER BY id ASC LIMIT 1001`,
       )
-      .bind(subjectId),
+      .bind(subjectId, ...clientIds),
   ])
 
   if (results.length !== 3) return invalidStoredAuthorization()
@@ -310,6 +309,7 @@ export async function listOAuthAuthorizations(
     const scopes = parseStoredScopes(row.scopes, client)
 
     if (rotatedAt !== null || expiresAt <= now) continue
+    if (!supportsOfflineAccess(client)) return invalidStoredAuthorization()
 
     aggregate.activeRefreshTokenCount += 1
     updateLatestAuthorization(aggregate, createdAt)
@@ -335,11 +335,11 @@ export async function listOAuthAuthorizations(
         lastAuthorizedAt: authorized ? aggregate.lastAuthorizedAt : null,
         name: client.name,
         offlineAccess:
-          client.supportsOfflineAccess && scopes.includes("offline_access"),
+          supportsOfflineAccess(client) && scopes.includes("offline_access"),
         platform: client.platform,
         resources,
         scopes,
-        supportsOfflineAccess: client.supportsOfflineAccess,
+        supportsOfflineAccess: supportsOfflineAccess(client),
       }
     }),
   )

@@ -11,6 +11,10 @@ import {
   oauthScopes,
   OAUTH_RESOURCE,
 } from "../../src/shared/oauth"
+import {
+  assertStaticOAuthRegistrations,
+  oauthClientRegistration,
+} from "../../src/shared/oauth-registration"
 import { AI_APPLICATION_TABLES } from "../../src/worker/ai/policy"
 import {
   BACKUP_FORMAT_VERSION,
@@ -772,18 +776,13 @@ function assertScrubbed(
     throw new Error("Credential scrub left sensitive account fields populated.")
   }
 
-  const actualClients = queryAll<{ clientId: string }>(
-    database,
-    'SELECT "clientId" FROM "oauthClient" ORDER BY "clientId"',
-  ).map(({ clientId }) => clientId)
-  const expectedClients = enabledOAuthClients
-    .map(({ clientId }) => clientId)
-    .sort((left, right) => left.localeCompare(right, "en"))
-  if (JSON.stringify(actualClients) !== JSON.stringify(expectedClients)) {
-    throw new Error(
-      "Credential scrub did not restore the static OAuth clients.",
-    )
-  }
+  assertStaticOAuthRegistrations(
+    queryAll(database, 'SELECT * FROM "oauthClient"'),
+    queryAll(
+      database,
+      'SELECT "clientId", "resourceId" FROM "oauthClientResource"',
+    ),
+  )
 
   const resources = queryAll<{ identifier: string }>(
     database,
@@ -793,21 +792,6 @@ function assertScrubbed(
     throw new Error(
       "Credential scrub did not restore the static OAuth resource.",
     )
-  }
-
-  const links = queryAll<{ clientId: string; resourceId: string }>(
-    database,
-    'SELECT "clientId", "resourceId" FROM "oauthClientResource" ORDER BY "clientId"',
-  )
-  if (
-    links.length !== expectedClients.length ||
-    links.some(
-      (link, index) =>
-        link.clientId !== expectedClients[index] ||
-        link.resourceId !== OAUTH_RESOURCE,
-    )
-  ) {
-    throw new Error("Credential scrub did not restore static OAuth links.")
   }
 
   if (hasAiApplicationTables) {
@@ -971,9 +955,30 @@ function createStaticOAuthSeedSql(): string {
   ]
 
   for (const client of enabledOAuthClients) {
+    const registration = {
+      id: `static-${client.clientId}`,
+      ...oauthClientRegistration(client),
+      name: client.name,
+      createdAt: 0,
+      updatedAt: 0,
+      metadata: '{"managedBy":"restore"}',
+    }
     statements.push(
-      `INSERT INTO "oauthClient" ("id", "clientId", "disabled", "skipConsent", "enableEndSession", "subjectType", "scopes", "createdAt", "updatedAt", "name", "redirectUris", "tokenEndpointAuthMethod", "applicationType", "grantTypes", "responseTypes", "requirePKCE", "dpopBoundAccessTokens", "metadata") VALUES (${sqlLiteral(`static-${client.clientId}`)}, ${sqlLiteral(client.clientId)}, 0, 1, 1, 'public', ${sqlLiteral(JSON.stringify(client.scopes))}, 0, 0, ${sqlLiteral(client.name)}, ${sqlLiteral(JSON.stringify(client.redirectUris))}, 'none', ${sqlLiteral(client.applicationType)}, '["authorization_code","refresh_token"]', '["code"]', 1, 0, '{"managedBy":"restore"}');`,
-      `INSERT INTO "oauthClientResource" ("id", "clientId", "resourceId", "metadata", "createdAt") VALUES (${sqlLiteral(`static-${client.clientId}-api`)}, ${sqlLiteral(client.clientId)}, ${sqlLiteral(OAUTH_RESOURCE)}, '{"managedBy":"restore"}', 0);`,
+      `INSERT INTO "oauthClient" (${Object.keys(registration)
+        .map((field) => `"${field}"`)
+        .join(", ")}) VALUES (${Object.values(registration)
+        .map((value) =>
+          value === null
+            ? "NULL"
+            : typeof value === "number"
+              ? value
+              : sqlLiteral(value),
+        )
+        .join(", ")});`,
+      ...client.resources.map(
+        (resource, index) =>
+          `INSERT INTO "oauthClientResource" ("id", "clientId", "resourceId", "metadata", "createdAt") VALUES (${sqlLiteral(`static-${client.clientId}-resource-${index}`)}, ${sqlLiteral(client.clientId)}, ${sqlLiteral(resource)}, '{"managedBy":"restore"}', 0);`,
+      ),
     )
   }
 

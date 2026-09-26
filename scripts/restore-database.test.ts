@@ -8,6 +8,7 @@ import { promisify } from "node:util"
 
 import { afterEach, describe, expect, it } from "vitest"
 
+import { assertStaticOAuthRegistrations } from "../src/shared/oauth-registration"
 import { createBackupObjectDescriptor } from "../src/worker/backup/storage"
 import { migrationReceiptTableSql } from "./lib/migration-receipt"
 import {
@@ -36,6 +37,10 @@ const deepSeekSql = await readFile(
   path.resolve("migrations/0004_deepseek_api.sql"),
   "utf8",
 )
+const hakoSql = await readFile(
+  path.resolve("migrations/0005_hako_oidc_client.sql"),
+  "utf8",
+)
 const repositoryMigrations = [
   { name: "0001_foundation.sql", sql: foundationSql },
 ] as const
@@ -44,6 +49,7 @@ const fullRepositoryMigrations = [
   { name: "0002_ai_service.sql", sql: aiServiceSql },
   { name: "0003_invocation_admission.sql", sql: invocationAdmissionSql },
   { name: "0004_deepseek_api.sql", sql: deepSeekSql },
+  { name: "0005_hako_oidc_client.sql", sql: hakoSql },
 ] as const
 
 function descriptor() {
@@ -416,6 +422,43 @@ describe("database restore planning", () => {
       database.close()
     }
   })
+
+  it.each([false, true])(
+    "restores exact client capabilities and permits the pending Hako migration (already applied=%s)",
+    (applied) => {
+      const database = new DatabaseSync(":memory:")
+      try {
+        database.exec(foundationSql)
+        if (applied) database.exec(hakoSql)
+        database.exec(createCredentialScrubSql())
+        if (!applied) database.exec(hakoSql)
+        const clients = database.prepare("SELECT * FROM oauthClient").all()
+        const links = database
+          .prepare("SELECT clientId, resourceId FROM oauthClientResource")
+          .all()
+        expect(() =>
+          assertStaticOAuthRegistrations(clients, links),
+        ).not.toThrow()
+        expect(
+          clients.find((client) => client.clientId === "hako-web"),
+        ).toMatchObject({
+          clientSecret: null,
+          scopes: '["openid","profile"]',
+          grantTypes: '["authorization_code"]',
+          enableEndSession: 0,
+          requirePKCE: 1,
+        })
+        expect(
+          clients.find((client) => client.clientId === "eruoo-desktop"),
+        ).toMatchObject({
+          grantTypes: '["authorization_code","refresh_token"]',
+          enableEndSession: 1,
+        })
+      } finally {
+        database.close()
+      }
+    },
+  )
 })
 
 describe("AI-era restore planning", () => {

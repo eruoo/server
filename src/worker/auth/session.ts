@@ -19,6 +19,13 @@ export function getRequestAuth(c: Context<AppBindings>) {
         githubClientId: c.env.GITHUB_CLIENT_ID,
         githubClientSecret: c.env.GITHUB_CLIENT_SECRET,
         ownerGitHubId: c.env.OWNER_GITHUB_ID,
+        onOAuthGrantRejected: (failure) => c.set("oauthGrantFailure", failure),
+        onOAuthGrantCreated: (grant) =>
+          scheduleAuditEvent(c, {
+            type: "oauth_grant_created",
+            outcome: "success",
+            ...grant,
+          }),
         onSigningKeyCreated: (key) =>
           scheduleAuditEvent(c, {
             type: "jwt_signing_key_rotated",
@@ -37,6 +44,27 @@ export function getRequestAuth(c: Context<AppBindings>) {
     c.set("auth", auth)
   }
   return auth
+}
+
+export async function handleRequestAuth(
+  c: Context<AppBindings>,
+  request: Request,
+): Promise<Response> {
+  const response = await getRequestAuth(c).handler(request)
+  const failure = c.get("oauthGrantFailure")
+  if (!failure) return response
+  // Better Auth 1.7.2 retains the original login 302/Location when its after
+  // hook fails. Preserve login cookies but do not turn a denied grant into a
+  // successful-looking navigation to the original login callback.
+  const headers = new Headers(response.headers)
+  headers.delete("location")
+  headers.delete("content-length")
+  headers.set("cache-control", "no-store")
+  headers.set("content-type", "application/json")
+  return Response.json(
+    { error: failure.error },
+    { status: failure.status, headers },
+  )
 }
 
 export async function readOwnerSession(

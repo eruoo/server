@@ -225,7 +225,7 @@ Vue 3 + `<script setup lang="ts">` + Vue Router。一个 Session 控制器管理
 | `/oauth/consent`        | 库要求的授权续接                                   | 只处理服务端签名 continuation                 |
 | `/api/docs`             | 私有 Scalar 文档                                   | owner Session；不存 token、不启用在线试请求   |
 
-页面按 [验收规格 §5.2](acceptance.md#52-各切片开放的能力) 随功能开放。R1 的根路由 `/` 提供最小账号状态与退出操作；R2 起重定向 Passkey 管理，不能在 R1 跳向尚不存在的页面。未登录访问受保护页面时进入登录流程，未启用页面返回明确的未开放/404 状态，不能靠隐藏导航代替关闭路由。Web/Mobile 在授权状态中保留“未启用”说明，不呈现可启用/可撤销按钮。页面容器负责请求，表单/列表接受 typed props 并 emit 操作意图；不在多层组件重复请求。
+页面按 [验收规格 §5.2](acceptance.md#52-各切片开放的能力) 随功能开放。R1 的根路由 `/` 提供最小账号状态与退出操作；R2 起重定向 Passkey 管理，不能在 R1 跳向尚不存在的页面。未登录访问受保护页面时进入登录流程，未启用页面返回明确的未开放/404 状态，不能靠隐藏导航代替关闭路由。保留的 `eruoo-web` / `eruoo-mobile` 显示“尚未开放”，不呈现可启用/可撤销按钮。Hako 等仅用于登录的客户端显示“登录状态由应用管理”，不根据本服务缺少 consent/refresh 记录推断其应用 Session。离线授权客户端保留授权状态与撤销按钮；客户端契约见 [协议 §4](protocol-contract.md#4-oauthoidc-客户端契约)。页面容器负责请求，表单/列表接受 typed props 并 emit 操作意图；不在多层组件重复请求。
 
 ### 6.2 Session 状态
 
