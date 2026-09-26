@@ -11,7 +11,10 @@ const oauthPlatformSchema = z.enum(
 const oauthAuthorizationSchema = z
   .object({
     activeRefreshTokenCount: z.int().nonnegative(),
-    authorized: z.boolean(),
+    authorized: z.boolean().openapi({
+      description:
+        "Whether this service holds consent or active refresh records. This does not describe the application's own login session.",
+    }),
     clientId: oauthClientIdSchema,
     consentCount: z.int().nonnegative(),
     enabled: z.boolean(),

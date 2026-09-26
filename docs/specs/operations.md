@@ -83,6 +83,7 @@ API Key 管理网关调用 `auth.api.*` 服务端 API，不再经过 Better Auth
 - 成功的普通列表/status/get-session 不逐请求记审计。429 不记拒绝审计，避免写入放大。
 - 不记录 Cookie、token、原始 key、Passkey assertion、SQL、原始 IP、OAuth state 或 signed URL。IP 仅用可信来源的 HMAC 指纹；metadata 每事件显式 allowlist。
 - 安全状态先在同步路径提交，审计以操作结果驱动。`waitUntil` 只可用于尽力审计，绝不托管撤销、token 签发或必须完成的数据变更。
+- `oauth_grant_created` 由授权码实际写入成功触发，clientId 与 subjectId 取自通过策略及 owner 校验的授权码记录，覆盖已有 Session、GitHub/Passkey 登录续接、consent/continue；不从回跳 URL 猜测 client，也不固定写成 Desktop。
 - 审计写入瞬时失败不回滚已完成操作；输出脱敏 `audit_write_failed` 与 requestId。该设计允许少量审计丢失，不宣称审计与所有库 mutation 跨表原子。
 - 查询保留 180 天，cursor 按 `(occurredAt DESC,id DESC)` 排他推进，默认 50/上限 100，绑定 type/outcome/from/to；输入变化使旧 cursor 失效，禁止 offsets 扫全表。
 - 每天 04:00 Asia/Shanghai 清理，Cron 为 `0 20 * * *`。审计正常物理保留约 181 天；失败会延长物理保留，查询仍过滤到 180 天。
@@ -190,6 +191,12 @@ bucket 保持私有，禁用 r2.dev、自定义域名、浏览器 CORS 和下载
 BETTER_AUTH_SECRETS 轮换先加入新主版本并保留仍被 D1 密文引用的旧版本，验证旧私钥/provider token 可解密、新数据使用新版本；再部署并验证真实登录。历史实测显示旧 Cookie 不一定跨主版本切换延续，因此对 owner 明示重新登录，不承诺无感轮换。确认旧密文已迁移且旧版本无引用后才能删除旧 secret；回滚代码不等于回滚 secret。GitHub secret、export token、审计 HMAC 各自独立轮换；审计 HMAC 轮换使旧 cursor 失效并改变新 IP 指纹，不重写旧审计记录。
 
 ## 6. 发布与回滚
+
+静态 OAuth 策略由 `src/shared/oauth.ts` 维护；新增客户端通过追加 migration 生效，不改写历史基线。构建产物携带受 manifest 摘要保护的 `oauth-registration.json`，部署在 migration 后、Worker 切换前按该产物的策略检查完整 client 集合、安全字段和 resource 关联，拒绝未知记录、缺失与漂移。旧产物没有此快照时保留原发布路径，不能宣称通过新检查。运行时只检查本次使用的 client；授权列表也只聚合静态启用集合，新增 D1 记录不应使其他客户端列表整体不可用。
+
+恢复清理从相同策略生成每个 client 的字段与关联，不能统一硬编码 Desktop 的 refresh/end-session 能力。`0005_hako_oidc_client.sql` 支持“旧快照清理已补种 Hako，再向前迁移”的顺序；清理后及迁移后均核验完整注册集合。Hako 的恢复与登录边界见[协议 §4](protocol-contract.md#4-oauthoidc-客户端契约)。
+
+Hako 开放前先准备含通用客户端准入、且不启用 Hako 的可回退版本，再发布 Hako 策略和 0005 migration。回退到该通用版本时保留 D1 中的 Hako 行，静态准入负责拒绝它；旧 Desktop 专用版本会因额外 client 行使授权列表失败，不能作为无条件安全的回退目标。回退产物的完整集合检查仍会拒绝额外行，因此常规发布路径不会静默越过这个差异；实际回退须按当次授权选择兼容产物或先调整精确客户端注册，不能自动删除数据。迁移、部署与 Hako/iPhone 真实联调均需要对应环境的当次授权。
 
 ### 6.1 一次检查构建，一次触发发布
 

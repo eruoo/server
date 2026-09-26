@@ -8,7 +8,7 @@ import {
 } from "./auth/api-key-management"
 import { limitAuthEntry } from "./auth/entry-limit"
 import { authOperations, loginErrors } from "./auth/routes"
-import { getRequestAuth, readOwnerSession } from "./auth/session"
+import { handleRequestAuth, readOwnerSession } from "./auth/session"
 import { isProblemSlug, problemTypeRegistry } from "./http/problem-registry"
 import { boundedRequest, problem, withReadDeadline } from "./http/response"
 import type { AppBindings } from "./http/types"
@@ -151,7 +151,7 @@ app.all("/api/auth/*", async (c) => {
     }
     const response = isApiKeyManagementOperation(c.req.method, path)
       ? await handleApiKeyManagementRequest(c)
-      : await getRequestAuth(c).handler(request)
+      : await handleRequestAuth(c, request)
     const events: Record<string, AuditEventType> = {
       "/api/auth/api-key/create": "api_key_created",
       "/api/auth/api-key/update": "api_key_updated",
@@ -188,7 +188,7 @@ app.all("/api/auth/*", async (c) => {
         },
       })
     }
-    return response.status >= 500
+    return response.status >= 500 && !c.get("oauthGrantFailure")
       ? problem("service-unavailable", requestId)
       : response
   })().catch(() => problem("service-unavailable", requestId))

@@ -7,7 +7,7 @@
 ## 完整架构规格（2026-09-09，服务端与 Web 已实施，平台验收另列）
 
 - [architecture.md](specs/architecture.md) — 总入口：产品范围、模块、认证、前端和数据；含已收敛需求选择与新旧规则差异
-- [protocol-contract.md](specs/protocol-contract.md) — HTTP、OAuth/OIDC、Desktop 登录/刷新/退出状态与撤销语义
+- [protocol-contract.md](specs/protocol-contract.md) — HTTP、OAuth/OIDC 客户端策略、Hako 登录与 Desktop 续期/退出语义
 - [operations.md](specs/operations.md) — 环境、审计、备份恢复、发布回滚与观测
 - [acceptance.md](specs/acceptance.md) — 消融证据、行为验收、实施切片与各阶段开放范围
 

@@ -1,4 +1,5 @@
 import type { Auth } from "../auth"
+import type { OAuthGrantFailure } from "../oauth/authorization-code"
 export interface OwnerSession {
   subject: string
   sessionId: string
@@ -8,6 +9,7 @@ export type AppBindings = {
   Bindings: Env
   Variables: {
     oauthRefreshFamilyRevocationManaged?: boolean
+    oauthGrantFailure?: OAuthGrantFailure
     sessionRead?: "weak" | "strong"
     requestId: string
     responseCookies: string[]

@@ -486,6 +486,26 @@ owner 补测确认结构化 JSON 与默认 max 成功。工具 A/B 对照仅切�
 
 回归先在未修复代码上执行：16 个非法组合被错误放行、17 个合法组合通过；修复后相关路由、DeepSeek 能力与 Responses 协议测试共 119 项通过。覆盖省略 effort/low/high/max、required/指定工具、JSON/SSE 两种响应方式的 422、零上游请求和名额释放；合法组合保持 effort/tool_choice 原样转发。完整 `pnpm run check` 通过：Worker 435、前端 72、脚本 71、Chromium 8，共 586 项；更新后的临时验收脚本通过合成完整流程验证。未将这些 mock 结果记为新的线上验收。
 
+### 4.25 2026-09-26：通用客户端策略与 Hako OIDC
+
+按 owner 当次指令，从本地最新 `main` 的 `2d63ee07a679542314a09358c3845e91062a91c3` 开始实施。客户端差异集中到 `src/shared/oauth.ts`，运行时取消 Desktop ID 特判；认证方式、grant、scope/resource、redirect、PKCE、consent、subject 与 end-session 均按策略约束，离线能力从 refresh grant 与 `offline_access` 推导。Hako 的具体契约由 [协议 §4](protocol-contract.md#4-oauthoidc-客户端契约) 维护。
+
+统一校验部署登记与静态策略，未知/静态禁用 client 不准入，已知 client 缺失或安全配置漂移拒绝继续。授权码写入前通过 Better Auth 的 verification create hook 再检查策略与持久 owner Session，覆盖直接授权、consent/continue 和 GitHub/Passkey 的内部续接；写入成功后才记录实际 client/subject 的 grant 审计。1.7.2 的 code client 默认也可进入 refresh grant，因此 token 入口保留显式的逐客户端 grant 门禁。
+
+故障测试发现，Better Auth 1.7.2 在 GitHub 登录的 after hook 抛错后会保留原 callback 的 302/Location。请求级授权失败结果现由统一 handler 输出明确 OAuth 错误，清除旧 Location，避免授权被拒绝却看似登录跳转成功。该处理只针对本服务授权码校验明确拒绝的结果，普通登录错误语义不变。
+
+新增 `0005_hako_oidc_client.sql`，未改写 0001–0004。恢复清理按相同策略重建客户端字段；0005 的 upsert 兼容旧快照先清理补种、再向前迁移。构建保存受摘要保护的注册快照，发布脚本在迁移后、Worker 切换前核对其完整集合；运行时授权列表只聚合静态启用集合，额外 D1 行不使已知客户端列表失效。Hako 在管理页显示登录状态由应用管理，不将缺少 consent/refresh 记录误报为未登录。
+
+专项验证使用真实 workerd/D1 与锁定插件：`oauth-client-policy.test.ts` 43 项通过，包含 ID token 验签及 nonce/audience/issuer、UserInfo、无 refresh、scope/grant/redirect 限制、D1 漂移、owner 与签名续接；Chromium 虚拟 WebAuthn 已完成 Hako callback 跳转。隔离副本中，Worker 基线 3 项与恢复基线 2 项通过；移除 grant 门禁、移除签发前校验、恢复时硬编码 end-session 三个变体分别触发断言失败，原件保持不变。
+
+首轮完整 `pnpm run check` 通过：格式、lint、类型检查、Worker 489、前端 72、脚本 76、OpenAPI 漂移检查与 Chromium 8，共 645 项测试。`build:release staging` 与 `build:release production` 本地构建通过；各 147 个产物文件的摘要核验通过，注册快照与当前策略一致且包含 0005 migration。日志保存在当前工作区 `.output/verification/`；这些是未提交工作区的本地证据，不是相同 SHA 的 CI 或线上验收。
+
+二次消融 review 确认两项测试覆盖缺口，现补入 `oauth-guard-regressions.test.ts` 的 11 项永久回归：使用真实 warm Session cookie，在入口 owner 查询完成后使持久 Session 删除、过期或 owner 关联失效，验证授权码与成功审计均不落库；向 public-client 撤销请求附加 secret（含空值）、Basic 或 assertion，验证拒绝且不撤销 token。正常签发与撤销、其他 client 的 token 和未知 token 均有对照。正式回归与客户端策略测试共 54 项通过；隔离副本中删除完整持久身份校验后恰有 3 项失败，删除公开客户端凭据拒绝后恰有 4 项失败，确认回归能检出对应失守。
+
+补齐回归后，完整 `pnpm run check` 再次通过：Worker 500、前端 72、脚本 76、Chromium 8，共 656 项，格式、lint、类型及 OpenAPI 漂移检查均通过。运行时与构建输入未变化，复用上述 staging/production 本地构建证据；不重复声明为提交 SHA 的构建结果。
+
+本轮未执行远端 migration 或部署；未修改 Hako 仓库，真实 Hako 后端和 iPhone PWA 仍需配套联调。提交与 CI 结果以关联 PR 记录为准。发布和回退准备见 [运维 §6](operations.md#6-发布与回滚)。
+
 ## 5. 后续验证与已知限制
 
 Cloudflare 与 GitHub 接线、staging 验收及 production 首次发布、真实登录和备份已按上述记录完成。以下限制与后续范围仍保留，不能由本地测试替代：

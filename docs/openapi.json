@@ -326,14 +326,16 @@
             "minimum": 0
           },
           "authorized": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether this service holds consent or active refresh records. This does not describe the application's own login session."
           },
           "clientId": {
             "type": "string",
             "enum": [
               "eruoo-web",
               "eruoo-desktop",
-              "eruoo-mobile"
+              "eruoo-mobile",
+              "hako-web"
             ]
           },
           "consentCount": {
@@ -417,7 +419,8 @@
             "enum": [
               "eruoo-web",
               "eruoo-desktop",
-              "eruoo-mobile"
+              "eruoo-mobile",
+              "hako-web"
             ]
           },
           "deletedConsentCount": {

@@ -94,6 +94,8 @@ Tests  3 passed (3)
 
 Desktop 延后实施；后续客户端切片将 A7/A8 扩展为 [协议规格 §4.6](protocol-contract.md#46-desktop-状态与流程) 的端到端行为测试：重复/错误 state 回调、取消后迟到的 code 响应、两个窗口同时 refresh、successor 保存失败、重启读取损坏或无法解锁的存储、轮换与退出竞争、撤销失败及本地清理失败。必须观察到单次兑换/单条轮换、token 不进入 WebView、持久化前不报告成功、故障不冒充匿名、退出后旧结果不恢复凭证。确认超时后的窗口内等价重试与超窗重新授权，不以 helper 单测替代 Rust 控制器和存储接线测试。A11 另验证跨端结果缺失或回退组合不匹配会阻止受影响能力发布。
 
+多客户端扩展补充 A7/A9/A11/A12：真实插件完成 Hako 的 S256 code exchange、ID token 签名/issuer/audience/nonce 与 UserInfo subject 对照；不产生 refresh，拒绝超额 scope、refresh grant、非精确 HTTPS redirect 与 end-session。覆盖未知/禁用 client、D1 安全字段与 resource 关联漂移、owner 丢失及签名登录上下文续接，检查授权码未落库、未产生成功 grant 审计；成功审计的 clientId 必须来自实际授权记录。GitHub/Passkey 续接失败不能沿用原登录 302 掩盖拒绝结果。保留 Desktop 的 refresh/revoke/reuse 竞态回归；发布完整集合校验拒绝额外 client，运行时列表仍可读取已知客户端；旧快照清理后再应用 Hako migration 与新快照清理都应恢复相同策略。浏览器测试可拦截 Hako callback 以验证跳转，真实 Hako 后端与 iPhone PWA 联调另记。
+
 ## 3. 消融门槛
 
 每条关键保障都要有“删除后哪个行为测试失败”的映射；失败原因必须是错误行为，不能仅因测试 import 了已删除函数。正常成功路径仍需通过，避免把全部拒绝当作安全。

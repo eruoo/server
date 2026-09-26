@@ -2,6 +2,10 @@ import { spawnSync } from "node:child_process"
 import { readFile, appendFile } from "node:fs/promises"
 import path from "node:path"
 
+import {
+  assertStaticOAuthRegistrations,
+  type staticOAuthRegistrationSnapshot,
+} from "../src/shared/oauth-registration"
 import { verifyBackupLifecycle } from "./lib/backup-lifecycle"
 import { prepareMigrationReceipt } from "./lib/migration-receipt"
 import { verifyArtifact } from "./lib/release-artifact"
@@ -298,6 +302,29 @@ await prepareMigrationReceipt({
 })
 if (ledger.length < migrations.length)
   runWrangler(["d1", "migrations", "apply", "DB", "--remote"])
+// The snapshot is covered by the release manifest, so an older artifact is
+// checked against its own policy rather than the workflow checkout's main.
+if (manifest.files["oauth-registration.json"]) {
+  const expected = JSON.parse(
+    await readFile(path.join(directory, "oauth-registration.json"), "utf8"),
+  ) as ReturnType<typeof staticOAuthRegistrationSnapshot>
+  const [clients, links] = await Promise.all(
+    [
+      "SELECT * FROM oauthClient",
+      "SELECT clientId, resourceId FROM oauthClientResource",
+    ].map((sql) =>
+      cloudflare<{ results: Record<string, unknown>[] }[]>(
+        `d1/database/${database.database_id}/query`,
+        { method: "POST", body: JSON.stringify({ sql }) },
+      ),
+    ),
+  )
+  assertStaticOAuthRegistrations(
+    clients[0]?.results ?? [],
+    links[0]?.results ?? [],
+    expected,
+  )
+}
 runWrangler(["deploy"])
 const [schedules, deployments] = await Promise.all([
   cloudflare<{ schedules: { cron: string }[] }>(`${scriptPath}/schedules`),

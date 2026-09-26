@@ -1,18 +1,22 @@
 import { DatabaseSync } from "node:sqlite"
 
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
+
+import { staticOAuthRegistrationSnapshot } from "../src/shared/oauth-registration"
 const mocks = vi.hoisted(() => ({
   spawnSync:
     vi.fn<
       (command: string, args: string[], options: unknown) => { status: number }
     >(),
   readFile: vi.fn<(filename: string, encoding?: string) => Promise<string>>(),
-  verifyArtifact:
-    vi.fn<
-      (
-        ...args: string[]
-      ) => Promise<{ repository: string; config: string; wrangler: string }>
-    >(),
+  verifyArtifact: vi.fn<
+    (...args: string[]) => Promise<{
+      repository: string
+      config: string
+      wrangler: string
+      files: Record<string, string>
+    }>
+  >(),
 }))
 vi.mock("node:child_process", () => ({ spawnSync: mocks.spawnSync }))
 vi.mock("node:fs/promises", () => ({
@@ -102,6 +106,7 @@ beforeEach(() => {
     repository: "eruoo/server",
     config: "config.json",
     wrangler: "4.124.0",
+    files: {},
   })
   mocks.readFile.mockImplementation(async (filename: string) =>
     JSON.stringify(
@@ -263,6 +268,64 @@ function selectEnvironment(environment: "staging" | "production") {
     vi.stubEnv("GITHUB_TRIGGERING_ACTOR", "LoTwT")
   }
 }
+it.each(["valid", "drift", "unknown"])(
+  "checks the artifact's OAuth registration before deployment: %s",
+  async (scenario) => {
+    failDeploy = false
+    const expected = staticOAuthRegistrationSnapshot()
+    mocks.verifyArtifact.mockResolvedValue({
+      repository: "eruoo/server",
+      config: "config.json",
+      wrangler: "4.124.0",
+      files: { "oauth-registration.json": "d".repeat(64) },
+    })
+    const read = mocks.readFile.getMockImplementation()!
+    mocks.readFile.mockImplementation((filename, encoding) =>
+      filename.endsWith("oauth-registration.json")
+        ? Promise.resolve(JSON.stringify(expected))
+        : read(filename, encoding),
+    )
+    const run = mocks.spawnSync.getMockImplementation()!
+    mocks.spawnSync.mockImplementation((command, args, options) => {
+      const result = run(command, args, options)
+      if (args.includes("migrations")) {
+        const fields = Object.keys(expected.clients[0]!)
+        db.exec(
+          `CREATE TABLE oauthClient (${fields.map((key) => `"${key}" ${typeof expected.clients[0]![key as keyof (typeof expected.clients)[0]] === "number" ? "INTEGER" : "TEXT"}`).join(",")}); CREATE TABLE oauthClientResource (clientId TEXT, resourceId TEXT);`,
+        )
+        for (const client of expected.clients)
+          db.prepare(
+            `INSERT INTO oauthClient VALUES (${fields.map(() => "?").join(",")})`,
+          ).run(...Object.values(client))
+        for (const link of expected.links)
+          db.prepare("INSERT INTO oauthClientResource VALUES (?,?)").run(
+            link.clientId,
+            link.resourceId,
+          )
+        if (scenario === "drift")
+          db.exec(
+            "UPDATE oauthClient SET enableEndSession=1 WHERE clientId='hako-web'",
+          )
+        if (scenario === "unknown")
+          db.exec(
+            "INSERT INTO oauthClient(clientId) VALUES ('unexpected-client')",
+          )
+      }
+      return result
+    })
+    const outcome = await deploy().then(
+      () => "deployed",
+      (error: Error) => error.message,
+    )
+    expect(outcome).toBe(
+      scenario === "valid"
+        ? "deployed"
+        : "Static OAuth client registration mismatch",
+    )
+    expect(deployed).toBe(scenario === "valid")
+    expect(mocks.spawnSync).toHaveBeenCalledTimes(scenario === "valid" ? 2 : 1)
+  },
+)
 it.each(["staging", "production"] as const)(
   "deploys %s with its stable resource names and verifies the deployed bindings",
   async (environment) => {

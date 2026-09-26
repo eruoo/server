@@ -26,6 +26,11 @@ import {
   AUTH_RATE_LIMIT_WINDOW_SECONDS,
 } from "./auth/persistent-rate-limit"
 import { OAUTH_ACCESS_TOKEN_JWKS_OPTIONS } from "./oauth/access-token"
+import {
+  authorizationCodeHooks,
+  type OAuthGrantCreated,
+  type OAuthGrantFailure,
+} from "./oauth/authorization-code"
 import { persistSigningKey } from "./oauth/signing-keys"
 
 const DAYS_IN_SECONDS = 24 * 60 * 60
@@ -93,6 +98,8 @@ export interface WorkerAuthConfig {
   ownerGitHubId: string
   onSigningKeyCreated?: (key: { id: string; alg?: string }) => void
   onSessionCreated?: (session: { id: string; userId: string }) => void
+  onOAuthGrantCreated?: (grant: OAuthGrantCreated) => void
+  onOAuthGrantRejected?: (failure: OAuthGrantFailure) => void
 }
 
 interface VersionedSecret {
@@ -151,6 +158,14 @@ export function createAuthOptions(
     database,
     logger: { disabled: true },
     databaseHooks: {
+      verification: {
+        create: authorizationCodeHooks(
+          database,
+          config.ownerGitHubId,
+          config.onOAuthGrantCreated,
+          config.onOAuthGrantRejected,
+        ),
+      },
       session: {
         create: {
           after: async (session) => {

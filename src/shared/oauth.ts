@@ -20,17 +20,36 @@ export type OAuthClientPlatform = "desktop" | "mobile" | "web"
 
 export interface OAuthStaticClient {
   applicationType: "native" | "web"
-  clientId: "eruoo-desktop" | "eruoo-mobile" | "eruoo-web"
+  clientId: string
   enabled: boolean
   name: string
   platform: OAuthClientPlatform
   redirectUris: readonly string[]
   scopes: readonly OAuthScope[]
-  supportsOfflineAccess: boolean
+  tokenEndpointAuthMethod: "none"
+  grantTypes: readonly ("authorization_code" | "refresh_token")[]
+  responseTypes: readonly "code"[]
+  resources: readonly string[]
+  requirePKCE: true
+  skipConsent: boolean
+  enableEndSession: boolean
+  subjectType: "public"
+  dpopBoundAccessTokens: false
 }
+
+const publicCodeClient = {
+  tokenEndpointAuthMethod: "none",
+  responseTypes: ["code"],
+  resources: [OAUTH_RESOURCE],
+  requirePKCE: true,
+  skipConsent: true,
+  subjectType: "public",
+  dpopBoundAccessTokens: false,
+} as const
 
 export const oauthClients = [
   {
+    ...publicCodeClient,
     applicationType: "web",
     clientId: "eruoo-web",
     enabled: false,
@@ -38,9 +57,11 @@ export const oauthClients = [
     platform: "web",
     redirectUris: [],
     scopes: ["openid", "profile", "api:read", "api:write"],
-    supportsOfflineAccess: false,
+    grantTypes: ["authorization_code"],
+    enableEndSession: false,
   },
   {
+    ...publicCodeClient,
     applicationType: "native",
     clientId: "eruoo-desktop",
     enabled: true,
@@ -51,9 +72,11 @@ export const oauthClients = [
       "http://[::1]/oauth/callback",
     ],
     scopes: ["openid", "profile", "api:read", "api:write", "offline_access"],
-    supportsOfflineAccess: true,
+    grantTypes: ["authorization_code", "refresh_token"],
+    enableEndSession: true,
   },
   {
+    ...publicCodeClient,
     applicationType: "native",
     clientId: "eruoo-mobile",
     enabled: false,
@@ -61,7 +84,20 @@ export const oauthClients = [
     platform: "mobile",
     redirectUris: [],
     scopes: ["openid", "profile", "api:read", "api:write", "offline_access"],
-    supportsOfflineAccess: true,
+    grantTypes: ["authorization_code", "refresh_token"],
+    enableEndSession: true,
+  },
+  {
+    ...publicCodeClient,
+    applicationType: "web",
+    clientId: "hako-web",
+    enabled: true,
+    name: "Hako",
+    platform: "web",
+    redirectUris: ["https://hako.eruoo.me/api/auth/callback"],
+    scopes: ["openid", "profile"],
+    grantTypes: ["authorization_code"],
+    enableEndSession: false,
   },
 ] as const satisfies readonly OAuthStaticClient[]
 
@@ -72,3 +108,14 @@ export const enabledOAuthClients = oauthClients.filter(
 export const enabledOAuthClientIds = new Set(
   enabledOAuthClients.map((client) => client.clientId),
 )
+
+export function supportsOfflineAccess(client: OAuthStaticClient): boolean {
+  return (
+    client.grantTypes.includes("refresh_token") &&
+    client.scopes.includes("offline_access")
+  )
+}
+
+export function findOAuthClient(clientId: string) {
+  return oauthClients.find((client) => client.clientId === clientId)
+}

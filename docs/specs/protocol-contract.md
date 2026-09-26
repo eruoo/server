@@ -109,19 +109,21 @@ Bearer challenge 固定 `realm="eruoo-api"`：缺少凭证不带 error；传输�
 
 OAuth/Better Auth 不套自有成功/错误包装。token body 超 1 MiB 返回 OAuth 400 `invalid_request`。token 在任何持久变更前发生明确、可取消的依赖超时，返回 HTTP 503/no-store 与稳定 transport code `OAUTH_TOKEN_SERVICE_UNAVAILABLE`，不伪造标准 OAuth error。持久操作开始后不使用无法取消工作的 handler timeout。
 
-## 4. Desktop 授权契约
+## 4. OAuth/OIDC 客户端契约
 
 本次验收 OAuth 服务端与 Web 授权管理，使用合成调用方执行真实插件协议测试；配套新版 Desktop 的实施与联调暂缓。首次切换可要求升级客户端并重新登录授权，不迁移旧凭证。端点、参数、响应或错误行为需要变化时，在客户端启动实施后，同一功能切片同步修改本规格、服务端与客户端；不维护两套协议或以旧版无修改可用作为门槛。下列安全规则继续作为目标测试依据。
 
 ### 4.1 client、redirect 与 continuation
 
-- 唯一启用 client 为 `eruoo-desktop`，public client、无 secret、系统浏览器登录；保留 `eruoo-web` / `eruoo-mobile` ID 但不创建启用记录。
+- 客户端策略唯一实现来源为 `src/shared/oauth.ts`：声明启用状态、application type、认证方法、redirect、grant/response types、scope/resource、PKCE、consent 与 end-session。`platform` 仅用于展示，不决定准入。当前启用 `eruoo-desktop` 与 `hako-web`，均为 public client、`token_endpoint_auth_method=none`、无 secret；保留 `eruoo-web` / `eruoo-mobile` ID 但不创建启用记录。新增 confidential client 需要相应认证实现，不可直接复用 public client 的撤销路径。
 - Desktop 精确登记 `http://127.0.0.1/oauth/callback` 与 `http://[::1]/oauth/callback`，只允许 loopback 端口按 RFC 8252 变化；端口为 1–65535 的 canonical 十进制。拒绝 localhost、host 别名、dot segment、百分号变体、额外 query/fragment。
+- Hako 精确登记 `https://hako.eruoo.me/api/auth/callback`，`applicationType=web`；不享受 native loopback 端口例外，不接受默认端口、编码、路径或 query 变体。仅支持 `authorization_code`、`response_type=code`、`openid profile`，跳过 consent、public subject，不启用 end-session 或 DPoP，不签发 refresh token。
 - 先验证 redirect，再附加 code/state/error；无效 redirect 绝不回跳该地址。不通过 URL 规范化扩大 allowlist。
 - Authorization Code 使用 PKCE S256、一次性 code，code 生命周期 600 秒，绑定 client、redirect、resource、owner 和 PKCE challenge。客户端严格比较 state，OIDC 另验证 nonce。
 - 登录中断时仅由库签名 `oauth_query` 保存授权上下文；GitHub/Passkey 登录、consent、continue 是明确的恢复路径。不信任前端拼装 callback。
 - continuation 过期或 `invalid_signature` 后清除该上下文，提示回调用应用重新发起；不循环自动登录。普通管理登录仍可用。
 - 静态 owner 自有 client 可以预授权跳过 consent；不因此跳过 Session、redirect、PKCE、scope/resource 校验。
+- 运行时按当前 client 检查完整 D1 安全配置及 resource 关联与静态策略一致。未知/静态禁用 client 不准入，已知 client 缺失或配置漂移视为依赖不可用。所有授权码写入前再次校验策略及持久 owner Session，覆盖 GitHub/Passkey 内部续接和 consent/continue；UserInfo 在验签后按 token 的 client 检查相同策略与 owner。`cachedTrustedClients` 只是插件缓存选项，不是准入白名单。
 
 ### 4.2 resource 与 scope
 
@@ -139,7 +141,11 @@ scope 按集合处理，但输入重复值拒绝为 `invalid_scope`。所有已�
 
 `grant_type` 禁止首尾空白（包括制表符、换行与 Unicode 空白），在进入原生插件前返回 `invalid_request`；不能让插件去除空白后执行被外层 resource/family 检查跳过的操作。
 
-业务 resource 的 allowedScopes 包含表中五个 scope，保持 OIDC 签发能力。无 openid 时 aud 仅含业务 resource；有 openid 时仅含业务 resource 与 discovery 的 UserInfo URL 两项，不允许重复和额外 audience。Web/Mobile 未启用，不能因为 ID 已保留而获得任何授权。
+业务 resource 的 allowedScopes 包含表中五个 scope，保持 OIDC 签发能力。无 openid 时 aud 仅含业务 resource；有 openid 时仅含业务 resource 与 discovery 的 UserInfo URL 两项，不允许重复和额外 audience。每个 client 的 scope 仍受自身策略限制；Hako 请求 `api:read`、`api:write`、`offline_access` 返回 `invalid_scope`。保留的 `eruoo-web` / `eruoo-mobile` 未启用，不能因为 ID 已保留而获得任何授权。
+
+token 入口显式检查每个 client 的 grantTypes；Hako 请求 refresh grant 返回 `unauthorized_client`。不能依赖插件 1.7.2 的 `clientAllowsGrant` 推导（它会允许 authorization-code client 使用 refresh grant）。离线授权能力同时由 refresh grant 与 `offline_access` scope 推导，不维护另一份独立开关。
+
+Hako 后端完成 code exchange、ID token 校验及 UserInfo subject 对照，再维护自己的应用 Session；不向浏览器跨源开放 token/UserInfo 或放宽 CORS。上游 `authorized` 字段只表示本服务持有 consent 或活动 refresh 记录；Hako 正常跳过 consent 且没有 refresh，返回 false 不代表 Hako 未登录。Hako 自己负责应用退出，不能用本服务的离线授权撤销或浏览器退出代替。
 
 ### 4.3 token 与公钥
 
