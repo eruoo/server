@@ -196,7 +196,9 @@ BETTER_AUTH_SECRETS 轮换先加入新主版本并保留仍被 D1 密文引用�
 
 恢复清理从相同策略生成每个 client 的字段与关联，不能统一硬编码 Desktop 的 refresh/end-session 能力。`0005_hako_oidc_client.sql` 支持“旧快照清理已补种 Hako，再向前迁移”的顺序；清理后及迁移后均核验完整注册集合。Hako 的恢复与登录边界见[协议 §4](protocol-contract.md#4-oauthoidc-客户端契约)。
 
-Hako 开放前先准备含通用客户端准入、且不启用 Hako 的可回退版本，再发布 Hako 策略和 0005 migration。回退到该通用版本时保留 D1 中的 Hako 行，静态准入负责拒绝它；旧 Desktop 专用版本会因额外 client 行使授权列表失败，不能作为无条件安全的回退目标。回退产物的完整集合检查仍会拒绝额外行，因此常规发布路径不会静默越过这个差异；实际回退须按当次授权选择兼容产物或先调整精确客户端注册，不能自动删除数据。迁移、部署与 Hako/iPhone 真实联调均需要对应环境的当次授权。
+Hako 首次开放已按短发布窗口完成，结果见[实施记录 §4.27](implementation.md#427-2026-09-27hako-支持发布-staging-与-production)：先发布 staging 并核验，再按 production 的当次授权发布同一精确 SHA；单次 Actions 运行内连续完成 migration、登记检查、Worker 切换和冒烟，缩短旧 Worker 与新登记并存的时间。该次发布未增加“通用准入但关闭 Hako”的中间版本；发布前差异、回退版本及对照证据见[实施记录 §4.26](implementation.md#426-2026-09-26hako-发布准备与真实环境核查)。
+
+应急代码回退可使用已核实的上一活动 Worker version，保留 D1 数据、Hako 登记、migration ledger 和 receipt。已验证的降级是“已授权应用”列表返回 503，Hako 新 authorize 被拒绝；owner 登录、Session、API Key 与 Desktop 协议的所列本地用例仍通过。回退不撤销已经签发的 Hako 凭据或本应用 Session，也不代表完整 Hako 流程可用。迁移失败或回退后的正常恢复优先重新发布相同 SHA，或发布保留完整迁移历史的修复 SHA，本次包括 `0001` 至 `0005`；由发布脚本核对实际 ledger 后仅补未执行的迁移。含 0005 的 receipt 会阻止普通发布路径重新部署缺少该迁移的旧产物，不能删除历史或客户端数据来绕过。平台应急回退与正常向前发布是两种明确的操作，均遵循 §6.3 的当次授权；具体恢复命令见同一实施记录。
 
 ### 6.1 一次检查构建，一次触发发布
 

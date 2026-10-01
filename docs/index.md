@@ -1,8 +1,8 @@
 # 文档导航
 
-## AI 服务架构草案
+## AI 服务设计
 
-- [ai-service.md](specs/ai-service.md)：AI 服务唯一设计来源。现改为 DeepSeek 官方 API Key 与原生 Responses，默认 effort=max；旧 AI 状态一次性清理。DeepSeek staging 部署与 owner 人工验收见实施记录 §4.23；原生模型名与 Session 切换优化已发布 staging；工具选择组合的验收与修复见实施记录 §4.24。
+- [ai-service.md](specs/ai-service.md)：AI 服务唯一设计来源，采用 DeepSeek 官方 API Key 与原生 Responses，默认 effort=max。接入、owner 人工验收及工具选择修复见实施记录 §4.23、§4.24。
 
 ## 完整架构规格（2026-09-09，服务端与 Web 已实施，平台验收另列）
 
@@ -11,7 +11,9 @@
 - [operations.md](specs/operations.md) — 环境、审计、备份恢复、发布回滚与观测
 - [acceptance.md](specs/acceptance.md) — 消融证据、行为验收、实施切片与各阶段开放范围
 
-实现、验证及 Cloudflare 首次接线状态见 [implementation.md](specs/implementation.md)，不代表获得部署授权。2026-09-09 最新需求已纳入：原生滚动续期、数据从新空库开始、GitHub Actions 产物发布、约 5 分钟常规执行时间目标，以及先做 Web、Desktop 延后、不维护旧接口兼容；依据见架构 Q3–Q7。2026-09-10 按 owner 当次授权沿用稳定资源名、准备空存储并同步配置，覆盖关系见 Q8。owner 新指令覆盖冲突的历史条款，其余规则继续有效。平台实测与接口字段快照仍分别维护，本次验收服务端和 Web，实际 Desktop 联调延后。
+实现、验证及 Cloudflare 首次接线状态见 [implementation.md](specs/implementation.md)。Hako 支持已发布两个环境，发布结果见其 [§4.27](specs/implementation.md#427-2026-09-27hako-支持发布-staging-与-production)；10 月 1 日核查与接入交接见 [§4.28](specs/implementation.md#428-2026-10-01上线状态核查与-hako-接入交接)；发布前盘点及应急回退准备见 [§4.26](specs/implementation.md#426-2026-09-26hako-发布准备与真实环境核查)。这些记录不授权后续线上操作。
+
+2026-09-09 最新需求已纳入：原生滚动续期、数据从新空库开始、GitHub Actions 产物发布、约 5 分钟常规执行时间目标，以及先做 Web、Desktop 延后、不维护旧接口兼容；依据见架构 Q3 至 Q7。2026-09-10 按 owner 当次授权沿用稳定资源名、准备空存储并同步配置，覆盖关系见 Q8。owner 新指令覆盖冲突的历史条款，其余规则继续有效。平台实测与接口字段快照仍分别维护，本次验收服务端和 Web，实际 Desktop 联调延后。
 
 ## v2 历史确认与实测记录
 
