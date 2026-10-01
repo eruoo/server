@@ -504,16 +504,72 @@ owner 补测确认结构化 JSON 与默认 max 成功。工具 A/B 对照仅切�
 
 补齐回归后，完整 `pnpm run check` 再次通过：Worker 500、前端 72、脚本 76、Chromium 8，共 656 项，格式、lint、类型及 OpenAPI 漂移检查均通过。运行时与构建输入未变化，复用上述 staging/production 本地构建证据；不重复声明为提交 SHA 的构建结果。
 
-本轮未执行远端 migration 或部署；未修改 Hako 仓库，真实 Hako 后端和 iPhone PWA 仍需配套联调。提交与 CI 结果以关联 PR 记录为准。发布和回退准备见 [运维 §6](operations.md#6-发布与回滚)。
+上述实现已通过 [PR #55](https://github.com/eruoo/server/pull/55) 合入 `8b08a16e4e56925b32e1ad14beb15a2f2f8c7336`，合并后 [Check run 36227299104](https://github.com/eruoo/server/actions/runs/36227299104) 成功，两个环境的 CI 发布产物已生成。本轮未执行远端 migration 或部署；真实 Hako 后端和 iPhone PWA 仍需配套联调。发布和回退规则见 [运维 §6](operations.md#6-发布与回滚)，本次准备结果见下节。
+
+### 4.26 2026-09-26：Hako 发布准备与真实环境核查
+
+按 owner“与 Hako 父任务协作、保持简单”的指令完成本地准备及远端只读核查。2026-09-26 16:23–16:25（Asia/Shanghai）读取两环境的活动 deployment、具体 version bindings、D1 ledger/receipt、表数量、owner 关联及 backup health；没有部署、执行远端 migration、修改 Secret 或调整 DNS。
+
+| 环境       | 当前活动 Worker version（100% 流量）   | AI 连接 / 模型 / 调用记录 / AI Key |
+| ---------- | -------------------------------------- | ---------------------------------- |
+| staging    | `fc4585ef-7521-4918-9dc2-93aa02700067` | 1 / 2 / 19 / 1                     |
+| production | `7faeba2d-1a2b-4c6e-9d44-afb0658530b8` | 1 / 2 / 2 / 1                      |
+
+两个活动版本的 `RELEASE_SHA` 均为 `d1609f55f14947c2dbff62af62bec850af191d0f`；实际 DB binding 与各自 `wrangler.jsonc` 一致，`AI_CREDENTIAL_KEYS` 及其他必需 Secret binding 均存在，只核对名称。两库 ledger 均精确包含 0001–0004；receipt 的目标库 ID、4 份 migration 哈希与活动版本及本地文件一致。**本次唯一待执行项是 `0005_hako_oidc_client.sql`，不会重跑 0004，也不会清理现有 AI 数据。** 两库目前只登记 `eruoo-desktop`，0005 仅新增 Hako 登记及其 resource 关联。生产已经发布 DeepSeek，前面阶段记录中“生产未发布 AI”的描述不再代表当前状态。
+
+两环境 backup health 均为 `ok`，最近成功时间分别为当日 03:00:28、03:00:29；本轮未重新下载或恢复快照。本机 GET `/health` 和 discovery 均返回 200，health 中的 version 与上述活动版本一致，discovery issuer 分别匹配环境；历史 403 本轮未复现，原因仍未确认。owner 的持久 user/GitHub 关联均唯一，两个 issuer/sub 身份对已交给 Hako 父任务，并保存于其受忽略、权限 0600 的本地交接文件；实际 subject 不写入公共文档或前端，真实 ID token 匹配留待联调。
+
+**实际发布差异**：目标为 `8b08a16e4e56925b32e1ad14beb15a2f2f8c7336`，相对线上包含 [PR #54](https://github.com/eruoo/server/pull/54) 的 AI 请求边界/截止时间修复及 PR #55 的客户端策略/Hako 接入。`wrangler.jsonc`、lockfile、0001–0004 与备份 Workflow 未变；复用该目标 SHA 的成功 CI 和环境产物，不为本次文档整理重建发布代码。
+
+**回退对照**：临时隔离目录使用线上精确 SHA 的源码、相同 lockfile 与合成凭证，在真实 workerd/D1 中运行 7 个相关测试文件。0001–0004 基线 64/64 通过；仅加入原封不动的 0005 后 63/64 通过，唯一失败为 `GET /api/oauth/authorizations` 从预期 200 变为 503。GitHub owner 登录及非 owner 拒绝、Session、API Key（含 AI Key）、Desktop PKCE/code/refresh/UserInfo/撤销等所列用例仍通过，另验证旧 Worker 拒绝 Hako 新 authorize。实验没有改变生产源码或远端数据；日志和两组 JSON 保存在当前任务 `.output/release-preparation/`，不新增永久验收工具。代码回退的降级边界据此确定，不宣称已完成真实 GitHub/Passkey、Hako 后端或 iPhone 回退演练。
+
+**最短发布步骤**：获得对应环境授权后，用现有 `pnpm run deploy:staging <目标完整 SHA>` 触发一次 Actions，连续完成唯一迁移 0005、登记检查和代码发布；迁移与切换之间不插入人工操作。冒烟完成后核对 Hako 策略与 owner 登录，再对同一 SHA 执行 production 发布。窗口仅需覆盖 migration 开始至 Worker 切换及冒烟结束，实际耗时由 Actions 记录；不提前独立应用 0005、不额外建设维护模式或中间发布。staging 的验证不等于正式 Hako 联调通过：当前唯一 callback 仍是正式 Hako origin，完整 Hako 后端及真机验证由父任务的最小登录切片承接。
+
+**失败时的恢复步骤**：停止继续发布，保留平台错误与当前 ledger/receipt；优先修复后向前发布上述目标或包含完整迁移历史的修复 SHA。若已切换的新代码影响核心功能，且当次授权覆盖应急回退，在当前精确 Worker、数据库与 Secret 条件仍成立时，选择对应环境执行下列一条命令：
+
+```sh
+pnpm exec wrangler rollback fc4585ef-7521-4918-9dc2-93aa02700067 --env staging --name eruoo-server-staging --message "Restore core service; retain migration 0005 and accept authorization-list degradation"
+pnpm exec wrangler rollback 7faeba2d-1a2b-4c6e-9d44-afb0658530b8 --env production --name eruoo-server-production --message "Restore core service; retain migration 0005 and accept authorization-list degradation"
+```
+
+随后读回单一活动 version 与 `/health`，核验 owner 核心入口；接受授权列表临时 503 和 Hako 新授权暂停，保留全部 D1 数据及 0005 记录。已经签发的 Hako 凭据和本应用 Session 不因代码回退自动撤销。待前向修复发布后再核验授权列表、Hako 策略和真实流程。这是已准备的操作方案，**本轮没有实际执行平台回退**；平台回退不恢复数据库，语义见 [Cloudflare rollbacks](https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/)。
+
+### 4.27 2026-09-27：Hako 支持发布 staging 与 production
+
+owner 在 §4.26 准备结果后回复 `go`，按既定顺序授权发布同一精确 SHA `8b08a16e4e56925b32e1ad14beb15a2f2f8c7336`：先 staging，针对性验收通过后 production。发布前重新只读核对两环境仍为原活动版本、0001–0004 ledger、有效备份与未过期 CI 产物；继续消费 Check run 36227299104 的对应环境产物，没有重新构建代码。
+
+| 环境       | 发布 run                                                                | 活动 Worker version（100% 流量）       | 结果                            |
+| ---------- | ----------------------------------------------------------------------- | -------------------------------------- | ------------------------------- |
+| staging    | [36299264063](https://github.com/eruoo/server/actions/runs/36299264063) | `9e41d49b-5db6-4067-ba5f-1e3a73e8fb57` | success；1 项迁移；5 项冒烟通过 |
+| production | [36299580353](https://github.com/eruoo/server/actions/runs/36299580353) | `86e18043-5b7c-43ef-8355-abf94690f483` | success；1 项迁移；5 项冒烟通过 |
+
+两次发布 job 分别于 14:09:26–14:10:13、14:16:01–14:16:38（Asia/Shanghai）执行，迁移/部署/冒烟步骤分别耗时 22 秒、18 秒。唯一执行的 migration 是 `0005_hako_oidc_client.sql`，0004 未重跑；发布后读回两库 ledger/receipt，完整 0001–0005 文件名与哈希、目标库 ID、Hako 安全字段和 resource 关联均匹配。AI 连接/模型/调用记录/AI Key 数量与发布前一致，分别为 staging 1/2/19/1、production 1/2/2/1。未修改 Secret、DNS、存储绑定或回退数据库。
+
+每环境追加 8 项线上检查，全部通过：discovery 的 issuer/endpoints/public-client 方法、有效公钥集、匿名授权列表拒绝、合法 Hako 请求进入登录、严格 callback 匹配、拒绝 offline scope、要求 S256、拒绝 refresh grant。临时探针最初将 Fetch 调用的 JSON 跳转误判为必须 HTTP 302；核对锁定插件 `handleRedirect` 及实际响应后改为检查跳转语义，服务代码没有修改。浏览器已有 owner 会话在两个环境均能访问“已授权应用”，并显示 Hako“仅用于登录，登录状态由应用管理”，未出现回退方案中的列表 503。
+
+发布与核查回执保存在当前任务 `.output/deployment-20260927/`。已将精确版本、迁移、验证及限制同步给 Hako 父任务；其后端可以接入已上线的正式 issuer，客户端合同没有新增变更。本轮使用已有 owner 会话，未重新执行真实 GitHub/Passkey 登录；Hako 后端的授权码兑换、ID token/UserInfo 验证、本应用 Session 和 iPhone PWA 全链路仍由其登录切片完成。§4.26 的代码回退方案保留为应急准备，本轮未执行回退。
+
+### 4.28 2026-10-01：上线状态核查与 Hako 接入交接
+
+2026-10-01 18:06 至 18:07（Asia/Shanghai）只读核对 GitHub 与两环境。GitHub main、成功 CI 及两次发布结果仍对应 §4.27 的提交；两环境活动 Worker version 与该节一致，均承载 100% 流量，`RELEASE_SHA` 匹配。
+
+- 两库 migration ledger 完整包含 `0001` 至 `0005`，receipt 的目标库 ID、文件名与 SHA-256 均匹配本地迁移及活动版本。
+- 两环境 `/health` 与 OIDC discovery 经 curl 核查均返回 200，version 与环境 issuer 匹配。
+- backup health 均为 `ok`，`failureCode=null`；最近成功时间分别为 staging 当日 03:01:26、production 当日 03:01:24，时区均为 Asia/Shanghai。这只证明健康记录中的成功终态，本轮未重新下载或恢复快照，也未重新统计 AI 数据。
+
+首轮 Python HTTP 探针遇到 TLS 中断和 403，同轮 curl 复核成功；请求路径差异未定位。原始回执保存在 Git 忽略的 `.output/handoff-20261001/`，不随普通 clone 分发。此次核查复用 §4.25 的应用测试和 §4.27 的发布验收，没有重新执行完整应用测试、真实 GitHub/Passkey 登录或 Hako 全链路，也没有修改远端资源。
+
+本轮 server 的客户端登记与协议支持交付完成。Hako 后续负责最小登录流程及应用会话，合同见[协议 §4](protocol-contract.md#4-oauthoidc-客户端契约)，应用侧方案由 Hako 仓库的 `docs/specs/eruoo-login-integration.md` 维护。既定合同不需要追加 server 发布；后续联调问题先取得失败请求和环境证据，再决定是否修复服务端。Hako 待实现或验收的范围见 §5。
 
 ## 5. 后续验证与已知限制
 
 Cloudflare 与 GitHub 接线、staging 验收及 production 首次发布、真实登录和备份已按上述记录完成。以下限制与后续范围仍保留，不能由本地测试替代：
 
-- §4.13 已通过对照确认 D1 导出期间登录会短暂返回 503；生产原始请求缺少底层错误的追溯限制仍保留，不将其写成代码已修复。首次自动备份与清理已配置并安排核验，实际调度结果仍待取得。
+- §4.13 已通过对照确认 D1 导出期间登录会短暂返回 503；生产原始请求缺少底层错误的追溯限制仍保留，不将其写成代码已修复。§4.28 已取得备份健康成功记录；自动备份与清理的独立调度执行证据仍待取得。
 - §4.11 的 Default 三地 warm 达到新目标，同代码闲置样本满足新目标；旧 JP 尾延迟和 Smart SG 超时未定位，后续若再次出现须按请求与平台证据排查，不能报告为已修复。常规发布阶段耗时尚未积累五次样本，不代表所有代理节点或生产性能已验证。
 - Workflow 中断与代码回退已在 §4.9 完成所列场景；大对象提交竞争与长时限的所有窗口未穷尽。成功导出/上传、隔离库导入、凭证清理及新信任验证已在 §4.8 通过。
 - Desktop App、Rust 安全存储、客户端打包与跨端联调：按 owner 最新决定延期，不属于本次 Web 交付。
-- AI 历史 Codex 链路的 403 阻断与恢复演练见 §4.21，不再作为现有 DeepSeek 链路的状态。DeepSeek staging 已完成 §4.23 与 §4.24 所列 owner 人工测试；真实加密密钥轮换与其他异常上游行为仍不能由本地 mock 代替。原生模型名与 Session 切换优化已发布 staging，工具选择校验修复尚未发布；production 未发布本轮 AI 改动。
+- AI 历史 Codex 链路的 403 阻断与恢复演练见 §4.21，不再作为现有 DeepSeek 链路的状态。DeepSeek staging 已完成 §4.23 与 §4.24 所列 owner 人工测试；真实加密密钥轮换与其他异常上游行为仍不能由本地 mock 代替。PR #54/#55 已随 `8b08a16` 发布两个环境，发布与后续核查分别见 §4.27、§4.28；这些结果不证明 Hako 识图已可用。
+- Hako 的登录后端、授权码兑换、ID token/UserInfo 校验、应用 Session 与退出，以及 Worker 间出站接线、普通浏览器和 iPhone PWA 全链路，仍待其应用侧实现或验收。会话时长与续期参数、iPhone 跨环境完成码仍由 Hako 接入规格维护为建议，需在实施或真机验证时明确采用状态。
 
 恢复规划器只输出可审核计划；恢复、secret 轮换、资源删除及正式部署仍需当次具体授权。Git 提交和 PR 合并与这些平台操作分别记录，不代表远端发布或验收已经完成。
